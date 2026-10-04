@@ -1,11 +1,16 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Draft rev 1, awaiting review
+**Status:** Draft rev 1.1, awaiting review
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 
 `potter` is a placeholder name: a potter shapes the clay, kiln fires it.
+
+### Revision history
+
+- **rev 1 (2026-10-04):** initial design.
+- **rev 1.1 (2026-10-04):** the PHP web runtime is nginx + php-fpm under a small supervisor, `potter-run`, instead of FrankenPHP (§2, §6.1, §6.1.1, §7, §15). This was the user's decision.
 
 ---
 
@@ -66,7 +71,7 @@ It is meant to be serious open-source software (stable plan and cache formats, r
 | Base OS | Minimal Debian stable (glibc) | Compatible with prebuilt native wheels, gems and npm binaries. |
 | Cache scope | Per tenant. Only catalog layers are global | A shared step cache is a poisoning vector, because network fetches during steps are not hermetic. |
 | Remote cache store | An OCI registry, through `kiln-registry` | No new server. Cache layers use kiln's layer media type, so they dedupe with images. |
-| PHP web process | FrankenPHP: classic mode by default, Octane mode when `laravel/octane` is installed. Overridable | A microVM runs one main process. FrankenPHP serves PHP without a php-fpm + nginx supervisor. |
+| PHP web process | nginx + php-fpm, started by `potter-run`, a minimal supervisor embedded in potter (§6.1.1). Octane apps run Octane's own server instead. Overridable | The conventional Laravel production stack. kiln-init keeps its one-main-process model, and `potter-run` is that process. |
 | Dockerfile parser | Our own, in `potter-dockerfile` | Exercises the internals, avoids an unmaintained crate dependency, and gives exact control over the lowering. |
 | Determinism | Inputs layers, catalog composites, export layers and every host-built layer are byte-reproducible. Step layers are deterministic only when the step's command is | No claim beyond what potter controls. mtimes and ownership are normalised in the erofs writer either way. |
 
@@ -230,8 +235,8 @@ Every provider emits the same chain shape: base, then dependency inputs, then th
 
 | Provider | Detects | Dependency step (inputs → cmd; cache mounts) | Build steps | Run base | Default process |
 |---|---|---|---|---|---|
-| **PHP generic** | `composer.json` | `composer.json`, `composer.lock` → `composer install --no-dev --no-scripts --no-autoloader --prefer-dist`; `composer` | `composer dump-autoload -o --no-dev` after source | php + required exts + FrankenPHP | `frankenphp php-server -r public/` |
-| **Laravel** | PHP + `laravel/framework` + `artisan` | as PHP; node deps when `package.json` exists (as Node) | asset build (`vite`/`mix`) when present; `php artisan package:discover`; *no* `config:cache`/`route:cache` (env is runtime) | as PHP; exts from `ext-*` across composer.json + composer.lock, plus Laravel defaults (`bcmath`, `intl`, `pcntl`, `pdo_mysql`, `pdo_pgsql`, `redis`); `swoole` when Octane uses swoole | `web` = `octane:start --server=frankenphp` with Octane, else FrankenPHP classic; `worker` = `queue:work` (or `horizon`); `scheduler` = `schedule:work` |
+| **PHP generic** | `composer.json` | `composer.json`, `composer.lock` → `composer install --no-dev --no-scripts --no-autoloader --prefer-dist`; `composer` | `composer dump-autoload -o --no-dev` after source | php + required exts + php-fpm + nginx + `potter-run` | `web` = `potter-run` (nginx + php-fpm, §6.1.1) |
+| **Laravel** | PHP + `laravel/framework` + `artisan` | as PHP; node deps when `package.json` exists (as Node) | asset build (`vite`/`mix`) when present; `php artisan package:discover`; *no* `config:cache`/`route:cache` (env is runtime) | as PHP; exts from `ext-*` across composer.json + composer.lock, plus Laravel defaults (`bcmath`, `intl`, `pcntl`, `pdo_mysql`, `pdo_pgsql`, `redis`); with Octane, the server's runtime (`swoole` ext, RoadRunner binary or FrankenPHP) replaces nginx + php-fpm | `web` = nginx + php-fpm (as PHP generic); with Octane, `octane:start --server=<detected> --host=0.0.0.0` (server from `config/octane.php` / `OCTANE_SERVER`, else the installed server package); `worker` = `queue:work` (or `horizon`); `scheduler` = `schedule:work` |
 | **Node** | `package.json` without `bun.lock*`/`deno.json*` | manifest + lockfile → `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --immutable`; picked from the lockfile and `packageManager` (via corepack); `npm`/`pnpm`/`yarn` | `build` script when present (covers `tsc`); then prune dev deps (`npm prune --omit=dev`, `pnpm prune --prod`) | node | Next with `output: 'standalone'` → `node server.js`; Nuxt → `node .output/server/index.mjs`; else the `start` script |
 | **Bun** | `bun.lock`/`bun.lockb` | manifest + lockfile → `bun install --frozen-lockfile`; `bun` | `build` script when present | bun | the `start` script, else `bun run <module/main>` |
 | **Deno** | `deno.json`/`deno.jsonc` | `deno.json*`, `deno.lock` → `deno install --frozen` (or `deno cache` on the entry point); `deno` (`DENO_DIR`) | `deno task build` when defined | deno | `deno task start`, else `deno serve` on the detected entry point. Permissions come from the task definition, never widened by potter |
@@ -246,6 +251,32 @@ Notes:
 - For Rust, the `target/` dir stays in layers, not in a cache mount. Layers are shared through the remote cache across builders; mounts are not.
 - Go's `GOCACHE` is a mount because Go's own cache is content-addressed and safe to share between runs.
 - For native libraries (libpq, libvips, ImageMagick and so on), providers add an `Apt` step when a known package needs one. This uses a static table: for example `psycopg2` needs `libpq-dev` in the build and `libpq5` at runtime. Users can add more with `[apt] build = [...]`, `runtime = [...]`.
+
+### 6.1.1 PHP web runtime (nginx + php-fpm)
+
+kiln-init runs one main process, so PHP web images run **`potter-run`**, a small static Rust supervisor. It is embedded in the potter binary and added to the run image as a host-built, byte-reproducible layer, the same way kiln embeds its init.
+
+- **Startup:**
+  - `potter-run` starts `php-fpm --nodaemonize`, waits for its unix socket (`/run/php/fpm.sock`) to accept connections, then starts `nginx -g 'daemon off;'`.
+  - It writes no files outside `/run` and `/tmp`.
+- **Supervision:**
+  - If either child exits, `potter-run` stops the other and exits with the failed child's status. The VM then ends, and restarting it is the platform's job.
+  - There is no in-VM restart loop.
+- **Signals:** SIGTERM/SIGINT go to nginx first (`QUIT`, a graceful drain), then to php-fpm (`QUIT`), within kiln's shutdown grace period. SIGWINCH is ignored.
+- **Logs:** both children inherit potter-run's stdout and stderr.
+  - nginx's `access_log` and `error_log` go to `/dev/stdout` and `/dev/stderr`.
+  - php-fpm's `error_log` goes to `/proc/self/fd/2`, with `catch_workers_output = yes` and `decorate_workers_output = no`.
+- **Default nginx config:**
+  - Shipped in the `nginx` catalog layer as a template that `potter-run` renders at start (no other templating).
+  - It listens on `$PORT` (default 8080), with `root /app/public` and `try_files $uri $uri/ /index.php?$query_string`.
+  - `fastcgi_pass unix:/run/php/fpm.sock`, `client_max_body_size` from `$PHP_UPLOAD_MAX` (default 100m), gzip for text types, `server_tokens off`, and denied dotfiles except `.well-known`.
+- **Default php-fpm pool:**
+  - `listen = /run/php/fpm.sock`, `pm = dynamic`, `pm.max_children` derived at start from guest memory (`MemTotal / 64 MiB`, clamped to 4–64; overridable with `$PHP_FPM_MAX_CHILDREN`).
+  - `clear_env = no`, so platform-injected env reaches PHP, and `opcache.validate_timestamps = 0`.
+- **Overrides:**
+  - `[target.x.php] nginx_conf = "deploy/nginx.conf"` and `fpm_pool = "deploy/www.conf"` replace the defaults. The files are copied in as an inputs layer.
+  - `[target.x.process.web]` replaces the whole command.
+- **Non-web processes** (`worker`, `scheduler`) run their command directly as the main process, with no `potter-run`.
 
 ### 6.2 `potter.toml`
 
@@ -264,7 +295,7 @@ run = "npm run build:prod"
 inputs = ["resources/**", "vite.config.ts", "package.json"]
 
 [target.app.process.web]
-cmd = ["php", "artisan", "octane:start", "--server=frankenphp", "--port=8080"]
+cmd = ["php", "artisan", "octane:start", "--server=swoole", "--host=0.0.0.0", "--port=8080"]
 
 [target.api]
 root = "services/api"             # monorepo target
@@ -307,7 +338,8 @@ runtime = ["libvips42"]
 
 - **Contents (v1):**
   - `os-min` (Debian stable minimal plus ca-certificates and tzdata)
-  - php 8.2/8.3/8.4, with ~20 extensions each as separate layers, plus FrankenPHP and swoole
+  - php 8.2/8.3/8.4 (cli + fpm), with ~20 extensions each as separate layers, plus swoole, RoadRunner and FrankenPHP for Octane
+  - nginx (stable), with the default Laravel/PHP config template (§6.1.1)
   - node 20/22/24
   - bun (current)
   - deno 2.x
@@ -636,7 +668,7 @@ Each milestone gets its own implementation plan.
 
 | # | Milestone | Content | Runs on | Depends on |
 |---|---|---|---|---|
-| P1a | Plan core | `potter-plan`, `potter-config`, `potter plan/explain/detect`; PHP (generic + Laravel), Node, Bun, Deno and Static providers; constraint parsers for composer and npm | macOS + Linux | — |
+| P1a | Plan core | `potter-plan`, `potter-config`, `potter plan/explain/detect`; `potter-run` (§6.1.1); PHP (generic + Laravel), Node, Bun, Deno and Static providers; constraint parsers for composer and npm | macOS + Linux | — |
 | P1b | Remaining detectors | Python, Ruby, Go and Rust providers and their constraint parsers | macOS + Linux | P1a |
 | P2 | First images | `potter-exec` with `NsExecutor`, inputs layers, `Base::Oci` bases (no catalog yet), host-side export, cache mounts, local cache, `potter build` → kiln image | Linux, no KVM | P1a, kiln M1b (convert/store) |
 | P3 | Catalog | Catalog format, signing, resolver, composite bases, `Apt` steps, catalog recipes and CI for every runtime in §7; detectors switch to catalog bases | Linux + KVM CI | P2 |
@@ -645,4 +677,4 @@ Each milestone gets its own implementation plan.
 | P6 | Remote cache and graph | Remote cache, tenant keys, monorepo discovery, dedup, `--affected`, `--progress json` | Linux | P2 |
 | P7 | Daemon | gRPC API, build queue, warm VM pool, concurrency and tenant quotas, wrapping the library | Linux + KVM | P4, P6 |
 
-P2 deliberately comes before the catalog and the VM executor, so real images come out early on a host without KVM. It uses upstream OCI bases (`php:8.4-cli`, `node:22-slim`, …) until P3 swaps detectors onto the catalog.
+P2 deliberately comes before the catalog and the VM executor, so real images come out early on a host without KVM. It uses upstream OCI bases (`php:8.4-fpm`, `node:22-slim`, …) until P3 swaps detectors onto the catalog. PHP web targets in P2 get nginx from a detector-emitted `apt-get install nginx` `Run` step on top of `php:X-fpm`; P3 replaces it with the catalog nginx layer.
