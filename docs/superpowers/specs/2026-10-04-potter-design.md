@@ -1,7 +1,7 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Draft rev 1.2, awaiting review
+**Status:** Draft rev 1.3, awaiting review
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 
@@ -15,6 +15,11 @@
   - `potter-run` is dropped. kiln-init gains `services`, and nginx + php-fpm run as kiln services (§4, §6.1.1).
   - `NsExecutor` is built on vmkit's generalised `sandbox` and `net` modules instead of its own namespace code (§4, §9.4).
   - kiln's planned native RUN-free Dockerfile backend is cancelled. potter is the only Dockerfile implementation in the project family, and `kiln build --builder potter` becomes `auto`'s first choice (§2, §6.3).
+- **rev 1.3 (2026-10-05):** gap fill.
+  - Added rebase (§16), supply chain (§17), platform integration (§18) and the catalog patch cadence (§7).
+  - The run image now has its own `runtime_steps` for runtime `Apt` packages (§5.1).
+  - New property P12.
+  - The KVM prerequisite for build nodes is stated (§1).
 
 ---
 
@@ -40,9 +45,11 @@ It is meant to be serious open-source software (stable plan and cache formats, r
    - On the Laravel fixture, a change limited to application source re-executes only the steps after the source step.
    - Changing a file that no step declares re-executes nothing.
 4. potter's overhead per build on the VM executor is **< 2 s** on top of the steps' own runtime: boot, sealing, ingest, erofs and export. A cold Laravel fixture build takes **< 90 s** on CI hardware with warm catalog layers.
-5. The namespace executor needs **no root and no KVM**. It needs only unprivileged user namespaces, `newuidmap`/`newgidmap` and a `/etc/subuid` range, the same requirements as rootless Podman.
-6. Every threat property in §3 has a test (§14.4).
-7. `docs/plan-format.md` documents the plan IR, `potter.toml`, the cache artifact format and the catalog format well enough for a third party to produce plans or consume caches.
+5. Build nodes using the VM executor need `/dev/kvm`, from nested virtualization or bare metal, like the nodes that run kiln images.
+6. The namespace executor needs **no root and no KVM**. It needs only unprivileged user namespaces, `newuidmap`/`newgidmap` and a `/etc/subuid` range, the same requirements as rootless Podman.
+7. Every threat property in §3 has a test (§14.4).
+8. A catalog security fix reaches every affected image by rebase (§16) without rebuilding from source, and every image carries an SBOM, a signature and provenance (§17).
+9. `docs/plan-format.md` documents the plan IR, `potter.toml`, the cache artifact format and the catalog format well enough for a third party to produce plans or consume caches.
 
 ### Non-goals (v1)
 
@@ -123,6 +130,7 @@ The `potter`, `kiln` and `vmkit` binaries; catalog signing keys compiled into `p
 | P9 | Detection is static parsing only. potter never executes repository code, package managers or build tools on the host. Parsers are size- and depth-bounded. | §6.1 |
 | P10 | Dockerfile content cannot make the host fetch URLs, clone git repos or reach SSH agents. Those forms are refused in v1. | §6.3 |
 | P11 | A build cannot exhaust host disk, memory or CPU without bound. Output disk, scratch, cache mounts, step time and build time all have hard caps. | §9.3, §9.4, §12 |
+| P12 | Provenance can't overstate how an image was built. It records the executor class and the catalog index digest, and an image that contains any `ns`-class layer can't claim `vm` provenance. Rebase never changes app layers and records the base it replaced. | §16, §17 |
 
 ---
 
@@ -195,7 +203,7 @@ Step       = Inputs   { name, include: [glob], exclude: [glob], dest: path, owne
            | CopyFrom { name, stage | target, paths: [path], dest, owner, mode? }             # host-built
            | Apt      { name, packages: [string], snapshot: date }                            # lowers to a Run with a pinned mirror
            | Meta     { env?, workdir?, user?, labels? }                                       # config only, no layer
-Image      { base: Base, export: [Export], config: ImageConfig, processes: {name: Process},
+Image      { base: Base, runtime_steps: [Apt], export: [Export], config: ImageConfig, processes: {name: Process},
              services: {process name: [Service]} }   # → kiln Config.services for that process (§4)
 Export     { path, dest, exclude: [glob] }           # read from the final state of the target's build chain
 CacheMount { id, target: path, sharing: exclusive }
@@ -204,6 +212,7 @@ SecretRef  { id, target: path }                      # mounted file, never in a 
 
 - A target's `build` chain produces its build filesystem.
 - The target's `image` is assembled separately: the run base, then the exported paths, then the init layer. Build-only tooling (compilers, node for asset builds, dev dependencies) never ships unless it is exported explicitly.
+- `runtime_steps` holds runtime system packages (`[apt] runtime`). They run as their own short chain on top of the run base, so the libraries an app needs at runtime ship without its build toolchain. They're cached like any other step.
 - `processes` is written into the kiln image config. The process named `web`, or the only process, becomes the entrypoint. The others are recorded as `dev.potter.process.<name>` annotations, for platforms that run the same image as web, worker or scheduler.
 
 ### 5.2 Canonical form and hashing
@@ -382,6 +391,11 @@ runtime = ["libvips42"]
   - Recipes live in `catalog/` in the potter repo, as explicit `potter.toml` plans.
   - They're built by potter itself under a dedicated `catalog` tenant, with `VmExecutor`, on trusted CI.
   - CI rejects path overlaps between layers that could be co-installed, and runs a smoke test per layer (`php -m`, `node -e`, `python -c`, …).
+- **Patch cadence:**
+  - **Inputs:** catalog CI watches upstream release feeds (php.net, Node, Python, Ruby, Go and Rust releases, Bun, Deno, nginx) and the Debian security tracker for every package in `os-min` and in the runtime layers.
+  - **Targets:** critical or actively exploited CVEs are fixed in a rebuilt layer and a published index within **24 h**; high severity within **7 days**; everything else in the weekly rebuild.
+  - **Index:** new index entries carry `supersedes: <old digest>` and the advisory ids they fix. Superseded layers stay resolvable, so old images keep verifying.
+  - **Finding affected images:** `potter catalog affected <advisory-id | layer-digest>` lists the catalog layers involved. The platform matches them against the `dev.potter.catalog.layers` annotation every image carries (§16) to find the images to rebase.
 
 ---
 
@@ -571,7 +585,10 @@ potter build   [PATH] [--target T]... [-f Dockerfile] [--stage S] [--executor vm
                [--secret id=X,src=FILE]... [--build-arg K=V]... [--affected GITREF]
                [--output kiln|oci-layout=DIR|registry=REF] [--jobs N] [--progress auto|plain|json]
 potter cache   ls|gc|rm [--tenant ID] [--mounts]
-potter catalog ls|resolve <constraints>|verify
+potter catalog ls|resolve <constraints>|verify|affected <advisory|digest>
+potter rebase  <image-ref> [--catalog-index DIGEST] [--dry-run] [--output …]
+potter sbom    <image-ref>                       # print the attached SBOM
+potter verify  <image-ref> [--key …]             # signature + provenance + SBOM digest check
 potter bench   [PATH]
 ```
 
@@ -666,6 +683,7 @@ Fixtures are vendored into `fixtures/`, kept small, and seeded from the existing
 | P9 | A repo whose `composer.json` has a `post-install-cmd` that writes a marker file: `potter plan` must not create the marker. |
 | P10 | `ADD http://…`, `ADD git@…` and `--mount=type=ssh` are refused at plan time. |
 | P11 | A step that fills the output disk, fork-bombs, or sleeps past its timeout is contained and reported. |
+| P12 | An image that mixes `ns` and `vm` layers gets `ns` provenance. A rebase leaves the app-layer digests unchanged and records the replaced base. A rebase across an ABI change, or with a broken `DT_NEEDED` soname, is refused. `potter verify` rejects a tampered SBOM or provenance. |
 
 ### 14.5 Bench
 
@@ -689,10 +707,70 @@ Each milestone gets its own implementation plan.
 | P1a | Plan core | `potter-plan`, `potter-config`, `potter plan/explain/detect`; PHP (generic + Laravel), Node, Bun, Deno and Static providers; constraint parsers for composer and npm | macOS + Linux | — |
 | P1b | Remaining detectors | Python, Ruby, Go and Rust providers and their constraint parsers | macOS + Linux | P1a |
 | P2 | First images | `potter-exec` with `NsExecutor`, inputs layers, `Base::Oci` bases (no catalog yet), host-side export, cache mounts, local cache, `potter build` → kiln image | Linux, no KVM | P1a, kiln M1b (convert/store), kiln `services` PR, vmkit generalised `sandbox`/`net` |
-| P3 | Catalog | Catalog format, signing, resolver, composite bases, `Apt` steps, catalog recipes and CI for every runtime in §7; detectors switch to catalog bases | Linux + KVM CI | P2 |
+| P3 | Catalog | Catalog format, signing, resolver, composite bases, `Apt` steps and `runtime_steps`, catalog recipes and CI for every runtime in §7, patch cadence and `catalog affected`, rebase (§16); detectors switch to catalog bases | Linux + KVM CI | P2 |
 | P4 | VM executor | kiln PRs (proto build mode, kiln-init build mode), `VmExecutor`, output-disk ingest, device budgeting, trust ordering | Linux + KVM | P2, kiln M3 run |
 | P5 | Dockerfile frontend | `potter-dockerfile`, lowering, the buildx oracle, `kiln build --builder potter` | Linux | P2 (P4 for VM runs) |
-| P6 | Remote cache and graph | Remote cache, tenant keys, monorepo discovery, dedup, `--affected`, `--progress json` | Linux | P2 |
+| P6 | Remote cache, graph and supply chain | Remote cache, tenant keys, monorepo discovery, dedup, `--affected`, `--progress json`, SBOM/provenance/signing and `potter verify` (§17), build Jobs (§18) | Linux | P2 |
 | P7 | Daemon | gRPC API, build queue, warm VM pool, concurrency and tenant quotas, wrapping the library | Linux + KVM | P4, P6 |
 
 P2 deliberately comes before the catalog and the VM executor, so real images come out early on a host without KVM. It uses upstream OCI bases (`php:8.4-fpm`, `node:22-slim`, …) until P3 swaps detectors onto the catalog. PHP web targets in P2 get nginx from a detector-emitted `apt-get install nginx` `Run` step on top of `php:X-fpm`; P3 replaces it with the catalog nginx layer.
+
+---
+
+## 16. Rebase
+
+Catalog layers sit below the app's layers, so a runtime security fix can be applied to an existing image without rebuilding it from source, as Cloud Native Buildpacks' `rebase` does.
+
+- **Image metadata.** Every catalog-based image records:
+  - `dev.potter.catalog.layers`: the ordered catalog layer digests behind its run-base composite;
+  - `dev.potter.catalog.constraints`: the resolved constraints, for example `php@8.4`, `ext-redis`, `nginx`;
+  - `dev.potter.catalog.index`: the index digest;
+  - `dev.potter.chain`: the digests of the `runtime_steps` layers, the export layer and the init layer.
+- **`potter rebase <image>`:**
+  1. Re-resolve the recorded constraints against the current (or given) index, staying on the same **minor** version: php 8.4.x → 8.4.y, never 8.5.
+  2. Require **identical `.abi` annotations** on every replaced layer (os, libc, php-api and so on). Otherwise the image is refused with "needs rebuild" and the reason.
+  3. Build the new composite, re-run `runtime_steps` on top of it (cached, and usually cheap), then stack the **unchanged** export layer and the current pinned init layer.
+  4. Write a new image and a new provenance record (§17) naming the base it replaced. App layers are byte-identical.
+- **Never rebased** (they need a rebuild):
+  - images on `Base::Oci` bases, including Dockerfile builds;
+  - images whose ABI changed;
+  - images whose export contains native code linked against a replaced library outside the ABI contract. This is detected by recording the `DT_NEEDED` sonames of ELF files in the export layer at build time and checking them against the new layers' provided sonames.
+- **Platform flow:**
+  1. `potter catalog affected <advisory>` gives the layers involved.
+  2. The platform queries its registry for the images whose annotations match.
+  3. `potter rebase` each one, then roll out through the normal deploy path, wave by wave.
+
+## 17. Supply chain
+
+Every image potter outputs gets three OCI referrer artifacts, attached through the OCI referrers API, with a tag-schema fallback for registries without it.
+
+- **SBOM:** SPDX 2.3 JSON. It is assembled from data potter already has, without scanning:
+  - the catalog layer metadata (name, version, upstream source, licence);
+  - `Apt` package lists (Debian package and version from the pinned snapshot);
+  - the lockfiles inside the declared inputs: `composer.lock`, `package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`/`bun.lock`, `deno.lock`, `uv.lock`/`poetry.lock`/`requirements.txt` (pinned only), `Gemfile.lock`, `go.sum` together with the build list, and `Cargo.lock`.
+  - Components with no lockfile evidence are listed as `NOASSERTION`, never guessed.
+- **Provenance:** an in-toto statement with a SLSA v1 provenance predicate. It records:
+  - the builder id and potter version;
+  - the canonical plan hash (§5.2) and the source revision and tree digest, when available;
+  - the catalog index digest;
+  - the per-step cache keys, and the executor class per layer (P12);
+  - for rebased images, the replaced base.
+- **Signature:** the image manifest, the SBOM and the provenance are signed in the cosign/sigstore bundle format.
+  - v1 uses a **platform-held key**: a KMS reference passed with `--sign-key kms://…` or a local key for development. Keyless signing is deferred.
+  - `potter verify` checks all three, and the platform's deploy step verifies before rollout.
+- **Inputs to the attestation are trusted only as far as they deserve:** step-reported data never enters it. The SBOM comes from host-side inputs and the catalog only.
+
+## 18. Platform integration
+
+- **Build and deploy commands.** Hosting platforms commonly let an environment declare "build commands" and "deploy commands".
+  - **Build commands** are delivered as `[target.x.build] commands = [...]` (from the platform or `potter.toml`). Each becomes a `Run` step named `user-build-<n>`, after the provider's build steps and before export. Their inputs are the full source layer, which is already present.
+  - **Deploy commands** (migrations, cache warmups) are not build steps. potter emits them as a `deploy` process: `processes.deploy = ["sh", "-c", "<commands joined with &&>"]`. The platform runs the image once with that process, as a one-off VM, before rolling out `web`/`worker`. No exec is needed.
+  - `potter plan --explain` shows where each command landed.
+- **Before the daemon (P7):**
+  - Builds can run as Kubernetes Jobs on KVM build nodes.
+  - The Job runs `potter build --progress json --output registry=<ref> --cache-from/--cache-to <tenant cache>`. The tenant key and registry credentials come from mounted Secrets, and build secrets from `--secret` files.
+  - The platform reads the newline-delimited JSON events from the Job's log stream and shows step progress and logs to the user. Build logs are build output, separate from the app's runtime logs.
+- **Runtime contract:**
+  - **Port:** the listen port is fixed at build time (`[target.x.php] port` or the provider default, 8080) and recorded in the `dev.potter.port` annotation. nginx can't read env vars, so the platform routes to the recorded port instead of injecting `PORT`. Non-PHP providers also honour `PORT` at runtime where the framework does.
+  - **Env:** the platform injects `PHP_FPM_MAX_CHILDREN` (set per VM size) and the app's own env.
+  - **Processes:** the platform starts `web`, `worker`, `scheduler` and `deploy` from the process annotations (§5.1).

@@ -21,7 +21,9 @@ The dependency direction is `potter` → `kiln` → `vmkit`. Nothing depends upw
 | kiln M3a (guest: proto, init, ext4, testguest) | 8 of 9 tasks done on `m3a-guest` |
 | kiln M3b (`kiln run`) | Planned |
 | kiln M3c (`kiln build`) | Shrinks to backend dispatch (potter, then BuildKit, then Podman/Buildah). The native RUN-free backend from spec rev 2.7 is cancelled; potter owns Dockerfiles |
-| potter | Spec rev 1.2 on branch `docs/design-spec`, awaiting review. Milestones P1–P7 |
+| potter | Spec rev 1.3 on branch `docs/design-spec`, awaiting review. Milestones P1–P7 |
+| kiln-shim (slip) | Draft spec; it belongs in kiln. Decisions D1–D4 are open |
+| KVM capacity | Open decision D1. AWS nested virtualization on C7i/M7i/R7i/C8i/M8i/R8i (Intel, 2026) vs metal; aarch64 needs metal |
 
 ## Build order
 
@@ -29,7 +31,9 @@ The dependency direction is `potter` → `kiln` → `vmkit`. Nothing depends upw
 2. **potter P1–P2, in parallel with step 1.** P1 is plan and detectors; P2 is the first images via the namespace executor, with no KVM needed. P2 needs two small upstream PRs:
    - kiln-init `services` (potter spec §4);
    - vmkit generalised `sandbox` and tap-less `net` (potter spec §4).
-3. **kiln-shim (slip).** Runs kiln images as a k8s RuntimeClass, so existing Kubernetes operators, namespaces, ingress and node-level log collection work unchanged. This is the deploy path. It needs its own spec.
+3. **kiln-shim (slip).** Runs kiln images as a k8s RuntimeClass, so existing Kubernetes operators, namespaces, ingress and node-level log collection work unchanged. This is the deploy path.
+   - First: a KVM node-group spike (S0).
+   - Then the kiln PRs: exec, guest stats and OOM reporting, `FileUpdate`, and media-type alignment with containerd 2.3's erofs snapshotter.
 4. **potter P3–P7.** Catalog, VM executor, Dockerfile frontend, remote cache and graph, daemon.
 5. **Agent sandbox (sagger), then snapshot distribution (sherd) with lazy restore (raku).** These need specs for snapshot/fork and for lazy restore.
 
