@@ -1,7 +1,7 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Draft rev 1.3, awaiting review
+**Status:** Approved rev 1.3 (2026-10-05)
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 

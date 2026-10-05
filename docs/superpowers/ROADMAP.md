@@ -21,9 +21,9 @@ The dependency direction is `potter` → `kiln` → `vmkit`. Nothing depends upw
 | kiln M3a (guest: proto, init, ext4, testguest) | 8 of 9 tasks done on `m3a-guest` |
 | kiln M3b (`kiln run`) | Planned |
 | kiln M3c (`kiln build`) | Shrinks to backend dispatch (potter, then BuildKit, then Podman/Buildah). The native RUN-free backend from spec rev 2.7 is cancelled; potter owns Dockerfiles |
-| potter | Spec rev 1.3 on branch `docs/design-spec`, awaiting review. Milestones P1–P7 |
-| kiln-shim (slip) | Draft spec; it belongs in kiln. Decisions D1–D4 are open |
-| KVM capacity | Open decision D1. AWS nested virtualization on C7i/M7i/R7i/C8i/M8i/R8i (Intel, 2026) vs metal; aarch64 needs metal |
+| potter | Spec rev 1.3 approved (branch `docs/design-spec`). Next: the P1a implementation plan |
+| kiln-shim (slip) | Draft spec; it belongs in kiln. D1–D4 are confirmed |
+| KVM capacity | Decided (D1): nested virtualization on C8i first, benchmarked in a canary region. Metal only if needed; aarch64 needs metal |
 
 ## Build order
 

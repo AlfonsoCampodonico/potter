@@ -1,14 +1,14 @@
 # potter: session handoff
 
 **State (2026-10-05):**
-- The design spec is at `docs/superpowers/specs/2026-10-04-potter-design.md`, rev 1.3. The user has not yet reviewed the written spec. Rev 1.3 added rebase (§16), supply chain (§17), platform integration (§18) and the catalog patch cadence.
+- The design spec is at `docs/superpowers/specs/2026-10-04-potter-design.md`, rev 1.3. **The user approved it on 2026-10-05.** Rev 1.3 added rebase (§16), supply chain (§17), platform integration (§18) and the catalog patch cadence.
 - **kiln-shim draft:** it belongs in the **kiln** repo; don't edit kiln from here.
-  - Open decisions D1–D4 (KVM capacity, pod shape, default memory, egress under the shim) need the user.
+  - Decisions D1–D4 were confirmed by the user on 2026-10-05: nested virtualization on C8i first; one VM per pod with one container; a 1 GiB default; CNI plus a fixed deny list.
 - `docs/superpowers/ROADMAP.md` is the proposed replacement for `playground/ROADMAP.md` (the three-repo consolidation). It still needs copying over: `cp docs/superpowers/ROADMAP.md ../ROADMAP.md`, run from the potter repo root.
 
 **Next steps, in order:**
-1. The user reviews the spec. Apply their changes and bump the revision history.
-2. Once the spec is approved, run `superpowers:writing-plans` for milestone **P1a** (plan core plus the PHP/Laravel, Node, Bun, Deno and Static detectors). Each milestone in §15 gets its own plan.
+1. ~~The user reviews the spec.~~ Done; approved.
+2. Run `superpowers:writing-plans` for milestone **P1a** (plan core plus the PHP/Laravel, Node, Bun, Deno and Static detectors). Each milestone in §15 gets its own plan.
 
 **Upstream follow-ups this design creates.** Raise each in the owning repo's session. Don't edit kiln or vmkit from a potter session.
 
