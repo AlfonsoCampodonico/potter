@@ -1,7 +1,7 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Draft rev 1.1, awaiting review
+**Status:** Draft rev 1.2, awaiting review
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 
@@ -11,6 +11,10 @@
 
 - **rev 1 (2026-10-04):** initial design.
 - **rev 1.1 (2026-10-04):** the PHP web runtime is nginx + php-fpm under a small supervisor, `potter-run`, instead of FrankenPHP (§2, §6.1, §6.1.1, §7, §15). This was the user's decision.
+- **rev 1.2 (2026-10-05):** consolidation into the existing repos (the user's decision):
+  - `potter-run` is dropped. kiln-init gains `services`, and nginx + php-fpm run as kiln services (§4, §6.1.1).
+  - `NsExecutor` is built on vmkit's generalised `sandbox` and `net` modules instead of its own namespace code (§4, §9.4).
+  - kiln's planned native RUN-free Dockerfile backend is cancelled. potter is the only Dockerfile implementation in the project family, and `kiln build --builder potter` becomes `auto`'s first choice (§2, §6.3).
 
 ---
 
@@ -61,7 +65,7 @@ It is meant to be serious open-source software (stable plan and cache formats, r
 | Output | `kiln` images (erofs layers, init layer, kiln config). OCI export goes through `kiln` | The deploy target is a microVM. Producing erofs directly skips an OCI tar round trip. |
 | Repository | Its own repo. It pins `kiln` crates and `vmkit` by git rev | Follows the ROADMAP rule: independent projects, coupling through documented formats. kiln-init build mode lands in `kiln` through its own PRs. |
 | Default executor | `VmExecutor`: one microVM per target chain (§9.3) | Builds run untrusted customer code. This reuses `vmkit`, kiln-init and kiln-proto. |
-| Second executor | `NsExecutor`: rootless user/mount/PID/net namespaces (§9.4) | Works without KVM and starts faster for trusted builds and development. A trust ordering keeps its outputs away from VM builds (§8.4). |
+| Second executor | `NsExecutor`: rootless user/mount/PID/net namespaces, built on vmkit's `sandbox` and `net` (§9.4) | Works without KVM and starts faster for trusted builds and development. Reusing vmkit means one audited sandbox and one egress policy for VMMs and build steps alike. A trust ordering keeps its outputs away from VM builds (§8.4). |
 | Layer capture | Each step's overlay upper is sealed and converted to an OCI-format tar diff, which goes through kiln's untrusted tar ingest into erofs | One ingest path for both executors and for OCI bases, already hardened for untrusted layers. |
 | Diff transport (VM) | A dedicated raw output disk, not vsock | High throughput. The disk size is the output cap, so the cap holds by construction. The control channel stays small. |
 | Export and `COPY --from` | Computed **on the host** from the chain's erofs layers, using kiln's merge logic | Deterministic, on the trusted side, and no guest round trip. |
@@ -71,8 +75,8 @@ It is meant to be serious open-source software (stable plan and cache formats, r
 | Base OS | Minimal Debian stable (glibc) | Compatible with prebuilt native wheels, gems and npm binaries. |
 | Cache scope | Per tenant. Only catalog layers are global | A shared step cache is a poisoning vector, because network fetches during steps are not hermetic. |
 | Remote cache store | An OCI registry, through `kiln-registry` | No new server. Cache layers use kiln's layer media type, so they dedupe with images. |
-| PHP web process | nginx + php-fpm, started by `potter-run`, a minimal supervisor embedded in potter (§6.1.1). Octane apps run Octane's own server instead. Overridable | The conventional Laravel production stack. kiln-init keeps its one-main-process model, and `potter-run` is that process. |
-| Dockerfile parser | Our own, in `potter-dockerfile` | Exercises the internals, avoids an unmaintained crate dependency, and gives exact control over the lowering. |
+| PHP web process | nginx + php-fpm, run as kiln-init `services` (§6.1.1). Octane apps run Octane's own server instead. Overridable | The conventional Laravel production stack. One PID 1 supervises everything; there's no second supervisor in the image. |
+| Dockerfile parser | Our own, in `potter-dockerfile`. The only Dockerfile implementation across kiln and potter | Exercises the internals, avoids an unmaintained crate dependency, and gives exact control over the lowering. kiln delegates to it instead of keeping a second, RUN-free parser. |
 | Determinism | Inputs layers, catalog composites, export layers and every host-built layer are byte-reproducible. Step layers are deterministic only when the step's command is | No claim beyond what potter controls. mtimes and ownership are normalised in the erofs writer either way. |
 
 ---
@@ -135,14 +139,28 @@ The `potter`, `kiln` and `vmkit` binaries; catalog signing keys compiled into `p
 | `potter-graph` | Workspace and target discovery, step dedup across targets, affected-target computation, scheduling (§10) | plan |
 | `potter-catalog` | Catalog index verification (ed25519), resolving constraints to layer digests, ABI checks, composite base merges (§7) | kiln-registry, kiln-erofs |
 | `potter-cache` | Cache keys, the local cache index, the remote cache (OCI), tenant keys, the executor trust ordering, gc (§8) | kiln-store, kiln-registry |
-| `potter-exec` | The `Executor` trait, inputs layers, diff ingest, host-side export. `VmExecutor` and `NsExecutor` live in submodules (§9) | vmkit, kiln-erofs, kiln-proto, kiln-image |
+| `potter-exec` | The `Executor` trait, inputs layers, diff ingest, host-side export. `VmExecutor` and `NsExecutor` live in submodules (§9) | vmkit (`Vmm`, `sandbox`, `net`), kiln-erofs, kiln-proto, kiln-image |
 | `potter` | The CLI (§11) | all |
 
-**Changes in `kiln`** (separate PRs, tracked as dependencies of P4 and P5):
+**Changes in `kiln`** (separate PRs, tracked as dependencies of P2, P4 and P5):
 
+- **kiln-proto and kiln-init `services`** (needed by P2 for PHP web images):
+  - `Config.services: [Service{name, process, ready, stop_signal}]`, where `ready` is `unix:<path> | tcp:<port> | none`.
+  - Services start in order, each waiting for the previous one's readiness, and the main process starts last.
+  - If any of them exits, the rest are stopped in reverse order with their `stop_signal`, within the shutdown grace period. The VM's exit status is that of the first process to exit.
+  - Signals the host delivers go to the main process.
+  - Every service shares the main process's stdout and stderr.
 - **kiln-proto:** `Config.mode = Run | Build`, plus the build-mode messages (§9.3).
 - **kiln-init build mode:** step execution, overlay sealing, conversion of the upper into an OCI tar diff, and writing to the output disk.
-- **kiln `build --builder potter`:** shells out to the `potter` binary, as it does for BuildKit. This avoids a crate cycle.
+- **kiln `build --builder potter`:**
+  - Shells out to the `potter` binary, as it does for BuildKit, which avoids a crate cycle.
+  - `--builder auto` tries potter first, then BuildKit, then Podman/Buildah.
+  - This replaces the native RUN-free backend in kiln spec rev 2.7, so kiln M3c shrinks to backend dispatch.
+
+**Changes in `vmkit`** (needed by P2):
+
+- **Generalised `sandbox`.** It can run an arbitrary process, not only a VMM, in the unprivileged user/mount/PID namespaces with seccomp/Landlock and cgroup limits. It also supports nested user namespaces, so the sandboxed process holds no capabilities over its network namespace (§9.4).
+- **`net` without a tap.** It can apply the same nftables policy and `pasta` egress to a bare network namespace, so a process can join it directly.
 
 **Store.** potter writes images and layer blobs into `$KILN_HOME`, so `kiln run`/`push`/`inspect` see them directly. potter's own state lives in `$POTTER_HOME` (default `~/.local/share/potter`):
 
@@ -177,7 +195,8 @@ Step       = Inputs   { name, include: [glob], exclude: [glob], dest: path, owne
            | CopyFrom { name, stage | target, paths: [path], dest, owner, mode? }             # host-built
            | Apt      { name, packages: [string], snapshot: date }                            # lowers to a Run with a pinned mirror
            | Meta     { env?, workdir?, user?, labels? }                                       # config only, no layer
-Image      { base: Base, export: [Export], config: ImageConfig, processes: {name: Process} }
+Image      { base: Base, export: [Export], config: ImageConfig, processes: {name: Process},
+             services: {process name: [Service]} }   # → kiln Config.services for that process (§4)
 Export     { path, dest, exclude: [glob] }           # read from the final state of the target's build chain
 CacheMount { id, target: path, sharing: exclusive }
 SecretRef  { id, target: path }                      # mounted file, never in a layer
@@ -235,7 +254,7 @@ Every provider emits the same chain shape: base, then dependency inputs, then th
 
 | Provider | Detects | Dependency step (inputs → cmd; cache mounts) | Build steps | Run base | Default process |
 |---|---|---|---|---|---|
-| **PHP generic** | `composer.json` | `composer.json`, `composer.lock` → `composer install --no-dev --no-scripts --no-autoloader --prefer-dist`; `composer` | `composer dump-autoload -o --no-dev` after source | php + required exts + php-fpm + nginx + `potter-run` | `web` = `potter-run` (nginx + php-fpm, §6.1.1) |
+| **PHP generic** | `composer.json` | `composer.json`, `composer.lock` → `composer install --no-dev --no-scripts --no-autoloader --prefer-dist`; `composer` | `composer dump-autoload -o --no-dev` after source | php + required exts + php-fpm + nginx | `web` = nginx main process with a php-fpm service (§6.1.1) |
 | **Laravel** | PHP + `laravel/framework` + `artisan` | as PHP; node deps when `package.json` exists (as Node) | asset build (`vite`/`mix`) when present; `php artisan package:discover`; *no* `config:cache`/`route:cache` (env is runtime) | as PHP; exts from `ext-*` across composer.json + composer.lock, plus Laravel defaults (`bcmath`, `intl`, `pcntl`, `pdo_mysql`, `pdo_pgsql`, `redis`); with Octane, the server's runtime (`swoole` ext, RoadRunner binary or FrankenPHP) replaces nginx + php-fpm | `web` = nginx + php-fpm (as PHP generic); with Octane, `octane:start --server=<detected> --host=0.0.0.0` (server from `config/octane.php` / `OCTANE_SERVER`, else the installed server package); `worker` = `queue:work` (or `horizon`); `scheduler` = `schedule:work` |
 | **Node** | `package.json` without `bun.lock*`/`deno.json*` | manifest + lockfile → `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --immutable`; picked from the lockfile and `packageManager` (via corepack); `npm`/`pnpm`/`yarn` | `build` script when present (covers `tsc`); then prune dev deps (`npm prune --omit=dev`, `pnpm prune --prod`) | node | Next with `output: 'standalone'` → `node server.js`; Nuxt → `node .output/server/index.mjs`; else the `start` script |
 | **Bun** | `bun.lock`/`bun.lockb` | manifest + lockfile → `bun install --frozen-lockfile`; `bun` | `build` script when present | bun | the `start` script, else `bun run <module/main>` |
@@ -254,29 +273,27 @@ Notes:
 
 ### 6.1.1 PHP web runtime (nginx + php-fpm)
 
-kiln-init runs one main process, so PHP web images run **`potter-run`**, a small static Rust supervisor. It is embedded in the potter binary and added to the run image as a host-built, byte-reproducible layer, the same way kiln embeds its init.
+PHP web images run nginx and php-fpm under **kiln-init `services`** (§4), not under a supervisor of potter's own.
 
-- **Startup:**
-  - `potter-run` starts `php-fpm --nodaemonize`, waits for its unix socket (`/run/php/fpm.sock`) to accept connections, then starts `nginx -g 'daemon off;'`.
-  - It writes no files outside `/run` and `/tmp`.
-- **Supervision:**
-  - If either child exits, `potter-run` stops the other and exits with the failed child's status. The VM then ends, and restarting it is the platform's job.
-  - There is no in-VM restart loop.
-- **Signals:** SIGTERM/SIGINT go to nginx first (`QUIT`, a graceful drain), then to php-fpm (`QUIT`), within kiln's shutdown grace period. SIGWINCH is ignored.
-- **Logs:** both children inherit potter-run's stdout and stderr.
+- **Service layout:**
+  - php-fpm is a service: `php-fpm --nodaemonize`, `ready = unix:/run/php/fpm.sock`, `stop_signal = QUIT`.
+  - nginx is the main process: `nginx -g 'daemon off;'`, `stop_signal = QUIT`. It starts only once php-fpm's socket accepts connections.
+- **Supervision:** if either exits, kiln-init stops the other and the VM ends. Restarting is the platform's job, and there is no restart loop inside the VM.
+- **Logs:** both share the main process's stdout and stderr.
   - nginx's `access_log` and `error_log` go to `/dev/stdout` and `/dev/stderr`.
   - php-fpm's `error_log` goes to `/proc/self/fd/2`, with `catch_workers_output = yes` and `decorate_workers_output = no`.
 - **Default nginx config:**
-  - Shipped in the `nginx` catalog layer as a template that `potter-run` renders at start (no other templating).
-  - It listens on `$PORT` (default 8080), with `root /app/public` and `try_files $uri $uri/ /index.php?$query_string`.
-  - `fastcgi_pass unix:/run/php/fpm.sock`, `client_max_body_size` from `$PHP_UPLOAD_MAX` (default 100m), gzip for text types, `server_tokens off`, and denied dotfiles except `.well-known`.
+  - Generated by potter at build time into a host-built layer. kiln-init does no templating.
+  - It listens on `[target.x.php] port` (default 8080), with `root /app/public` and `try_files $uri $uri/ /index.php?$query_string`.
+  - `fastcgi_pass unix:/run/php/fpm.sock`, `client_max_body_size 100m`, gzip for text types, `server_tokens off`, and denied dotfiles except `.well-known`.
 - **Default php-fpm pool:**
-  - `listen = /run/php/fpm.sock`, `pm = dynamic`, `pm.max_children` derived at start from guest memory (`MemTotal / 64 MiB`, clamped to 4–64; overridable with `$PHP_FPM_MAX_CHILDREN`).
+  - `listen = /run/php/fpm.sock` and `pm = dynamic`.
+  - `pm.max_children = ${PHP_FPM_MAX_CHILDREN}`, using php-fpm's native env expansion. The image env defaults it to 16, and the platform overrides it per VM size.
   - `clear_env = no`, so platform-injected env reaches PHP, and `opcache.validate_timestamps = 0`.
 - **Overrides:**
   - `[target.x.php] nginx_conf = "deploy/nginx.conf"` and `fpm_pool = "deploy/www.conf"` replace the defaults. The files are copied in as an inputs layer.
-  - `[target.x.process.web]` replaces the whole command.
-- **Non-web processes** (`worker`, `scheduler`) run their command directly as the main process, with no `potter-run`.
+  - `[target.x.process.web]` replaces the whole command, in which case potter emits no services.
+- **Non-web processes** (`worker`, `scheduler`) run their command as the main process, with no services.
 
 ### 6.2 `potter.toml`
 
@@ -330,7 +347,7 @@ runtime = ["libvips42"]
 - **Refused (P10):**
   - `ADD <url>`, `ADD <git>`, `RUN --mount=type=ssh` and `ONBUILD` triggers in a base image's config. Each gets an error naming the line.
   - `ADD <local archive>` is supported and extracted on the host through the same bounded tar ingest.
-- **Relationship to kiln rev 2.7:** kiln's native RUN-free backend stays as it is. `kiln build --builder potter` delegates whole Dockerfiles to potter.
+- **Relationship to kiln:** potter is the only Dockerfile implementation. kiln spec rev 2.7's native RUN-free backend is cancelled, and `kiln build --builder potter` (the first choice for `auto`) delegates whole Dockerfiles to potter (§4).
 
 ---
 
@@ -339,7 +356,7 @@ runtime = ["libvips42"]
 - **Contents (v1):**
   - `os-min` (Debian stable minimal plus ca-certificates and tzdata)
   - php 8.2/8.3/8.4 (cli + fpm), with ~20 extensions each as separate layers, plus swoole, RoadRunner and FrankenPHP for Octane
-  - nginx (stable), with the default Laravel/PHP config template (§6.1.1)
+  - nginx (stable). Its default config is generated by potter (§6.1.1)
   - node 20/22/24
   - bun (current)
   - deno 2.x
@@ -487,6 +504,7 @@ trait Executor {
 - **Lowers:**
   - erofs cannot be mounted inside a user namespace, so `NsExecutor` uses **unpacked layer directories** in `$POTTER_HOME/unpacked/<digest>/`.
   - They're produced from the erofs layers with the kiln-erofs reader and owned within the subuid range, and are reused across builds.
+- **Built on vmkit:** the namespaces, seccomp, cgroups and egress below come from vmkit's generalised `sandbox` and tap-less `net` (§4). potter adds only the overlay, mounts and sealing. Hardening fixes land once and protect VMMs and build steps alike.
 - **Sandbox layout** (from the outermost layer in):
   1. potter.
   2. Helper namespace `U1`: a userns mapped to the subuid range. It owns a new net namespace, the egress nftables policy and the pasta attachment.
@@ -668,9 +686,9 @@ Each milestone gets its own implementation plan.
 
 | # | Milestone | Content | Runs on | Depends on |
 |---|---|---|---|---|
-| P1a | Plan core | `potter-plan`, `potter-config`, `potter plan/explain/detect`; `potter-run` (§6.1.1); PHP (generic + Laravel), Node, Bun, Deno and Static providers; constraint parsers for composer and npm | macOS + Linux | — |
+| P1a | Plan core | `potter-plan`, `potter-config`, `potter plan/explain/detect`; PHP (generic + Laravel), Node, Bun, Deno and Static providers; constraint parsers for composer and npm | macOS + Linux | — |
 | P1b | Remaining detectors | Python, Ruby, Go and Rust providers and their constraint parsers | macOS + Linux | P1a |
-| P2 | First images | `potter-exec` with `NsExecutor`, inputs layers, `Base::Oci` bases (no catalog yet), host-side export, cache mounts, local cache, `potter build` → kiln image | Linux, no KVM | P1a, kiln M1b (convert/store) |
+| P2 | First images | `potter-exec` with `NsExecutor`, inputs layers, `Base::Oci` bases (no catalog yet), host-side export, cache mounts, local cache, `potter build` → kiln image | Linux, no KVM | P1a, kiln M1b (convert/store), kiln `services` PR, vmkit generalised `sandbox`/`net` |
 | P3 | Catalog | Catalog format, signing, resolver, composite bases, `Apt` steps, catalog recipes and CI for every runtime in §7; detectors switch to catalog bases | Linux + KVM CI | P2 |
 | P4 | VM executor | kiln PRs (proto build mode, kiln-init build mode), `VmExecutor`, output-disk ingest, device budgeting, trust ordering | Linux + KVM | P2, kiln M3 run |
 | P5 | Dockerfile frontend | `potter-dockerfile`, lowering, the buildx oracle, `kiln build --builder potter` | Linux | P2 (P4 for VM runs) |
