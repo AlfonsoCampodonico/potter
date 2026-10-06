@@ -1,0 +1,6 @@
+{
+    "packages": [
+        { "name": "laravel/framework", "version": "v12.0.0", "require": { "php": "^8.2", "ext-mbstring": "*", "ext-openssl": "*" } },
+        { "name": "laravel/octane", "version": "v2.6.0", "require": { "php": "^8.1" } }
+    ]
+}

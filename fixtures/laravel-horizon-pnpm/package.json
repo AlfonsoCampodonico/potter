@@ -1,0 +1,7 @@
+{
+    "private": true,
+    "type": "module",
+    "packageManager": "pnpm@9.15.0",
+    "scripts": { "build": "vite build", "dev": "vite" },
+    "devDependencies": { "vite": "^6.0.0", "laravel-vite-plugin": "^1.2.0" }
+}

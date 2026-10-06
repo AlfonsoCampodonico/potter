@@ -1,0 +1,6 @@
+{
+    "packages": [
+        { "name": "laravel/framework", "version": "v12.0.0", "require": { "php": "^8.2" } },
+        { "name": "laravel/horizon", "version": "v5.30.0", "require": { "ext-pcntl": "*", "ext-posix": "*" } }
+    ]
+}

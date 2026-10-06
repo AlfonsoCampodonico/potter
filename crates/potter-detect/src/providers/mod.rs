@@ -2,8 +2,9 @@
 
 #[allow(dead_code)] // Every helper is used once all providers land (Task 13 removes this).
 pub(crate) mod common;
-#[allow(dead_code)] // Bun and Static use the rest (Tasks 11–13).
+#[allow(dead_code)] // Bun and Static use the rest (Tasks 12–13).
 pub(crate) mod js;
+mod laravel;
 mod node;
 mod php;
 mod php_config;
@@ -29,7 +30,7 @@ pub trait Provider: Sync {
 }
 
 pub fn all() -> Vec<&'static dyn Provider> {
-    vec![&php::PhpProvider, &node::NodeProvider]
+    vec![&php::PhpProvider, &laravel::LaravelProvider, &node::NodeProvider]
 }
 
 pub fn get(id: ProviderId) -> Option<&'static dyn Provider> {

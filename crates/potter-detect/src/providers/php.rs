@@ -79,7 +79,6 @@ impl Provider for PhpProvider {
 }
 
 pub(crate) struct PhpFacts {
-    #[allow(dead_code)] // Read by Laravel (Task 11).
     pub composer: Value,
     pub version: &'static Line,
     pub extensions: BTreeSet<String>,
