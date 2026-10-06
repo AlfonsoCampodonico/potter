@@ -1,2 +1,5 @@
 [target.frontend]
 root = "frontend"
+
+[target.backend]
+root = "backend"

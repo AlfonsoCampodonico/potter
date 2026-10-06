@@ -104,16 +104,91 @@ fn ambiguous_root_names_the_target() {
     );
 }
 
+fn summary(p: &potter_config::PlannedRepo) -> Vec<(String, String, String)> {
+    p.plan
+        .targets
+        .iter()
+        .map(|t| (t.name.clone(), t.root.clone(), t.provider.clone()))
+        .collect()
+}
+
+fn owned(v: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+    v.iter()
+        .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+        .collect()
+}
+
 #[test]
-fn monorepo_root_hint_and_targets() {
-    let msg = plan_repo(&fixture("monorepo-root"), None).unwrap_err().to_string();
-    assert!(msg.contains("frontend/") && msg.contains("backend/"), "{msg}");
-    let p = plan_repo(&fixture("monorepo-targets"), None).unwrap();
-    let t = &p.plan.targets[0];
+fn monorepo_root_discovers_targets() {
+    let p = plan_repo(&fixture("monorepo-root"), None).unwrap();
     assert_eq!(
-        (t.name.as_str(), t.root.as_str(), t.provider.as_str()),
-        ("frontend", "frontend", "node")
+        summary(&p),
+        owned(&[("backend", "backend", "go"), ("frontend", "frontend", "node")])
     );
+    let backend = &p.decisions[0].1;
+    assert!(
+        backend
+            .iter()
+            .any(|d| d.field == "target" && d.origin.to_string().contains("backend/ has a manifest"))
+    );
+    assert_eq!(
+        plan_repo(&fixture("monorepo-root"), Some("frontend"))
+            .unwrap()
+            .plan
+            .targets
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn explicit_monorepo_targets() {
+    let p = plan_repo(&fixture("monorepo-targets"), None).unwrap();
+    assert_eq!(
+        summary(&p),
+        owned(&[("frontend", "frontend", "node"), ("backend", "backend", "go")])
+    );
+}
+
+#[test]
+fn apps_and_services_are_discovered() {
+    let d = temp(&[
+        ("apps/Web App/package.json", r#"{"scripts":{"start":"node server.js"}}"#),
+        ("apps/Web App/package-lock.json", "{}"),
+        ("services/api/go.mod", "module api\n\ngo 1.26\n"),
+        ("services/api/main.go", "package main\n"),
+        ("README.md", "monorepo"),
+    ]);
+    let p = plan_repo(d.path(), None).unwrap();
+    assert_eq!(
+        summary(&p),
+        owned(&[
+            ("apps-web-app", "apps/Web App", "node"),
+            ("services-api", "services/api", "go")
+        ])
+    );
+}
+
+#[test]
+fn a_root_provider_disables_discovery() {
+    let d = temp(&[
+        ("composer.json", r#"{"require":{}}"#),
+        ("composer.lock", r#"{"packages":[]}"#),
+        ("tools/package.json", "{}"),
+    ]);
+    let p = plan_repo(d.path(), None).unwrap();
+    assert_eq!(summary(&p), owned(&[("app", ".", "php")]));
+}
+
+#[test]
+fn discovered_target_failure_names_the_target() {
+    let d = temp(&[
+        ("web/package.json", r#"{"scripts":{"start":"x"}}"#),
+        ("api/go.mod", "module a\n\ngo 1.26\n"),
+        ("api/main.go", "package main\n"),
+    ]);
+    let msg = plan_repo(d.path(), None).unwrap_err().to_string();
+    assert!(msg.starts_with("target `web`:") && msg.contains("lockfile"), "{msg}");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Approved rev 1.5 (2026-10-06)
+**Status:** Approved rev 1.6 (2026-10-06)
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 
@@ -15,6 +15,15 @@
   - `potter-run` is dropped. kiln-init gains `services`, and nginx + php-fpm run as kiln services (§4, §6.1.1).
   - `NsExecutor` is built on vmkit's generalised `sandbox` and `net` modules instead of its own namespace code (§4, §9.4).
   - kiln's planned native RUN-free Dockerfile backend is cancelled. potter is the only Dockerfile implementation in the project family, and `kiln build --builder potter` becomes `auto`'s first choice (§2, §6.3).
+- **rev 1.6 (2026-10-06):** two additions at the user's request.
+  - **Zero-config monorepo targets (§10):**
+    - Applies when potter.toml declares no `[target.*]`, the root matches no provider, and directories below it do.
+    - Candidates are depth-1 directories with a manifest, plus `apps/*` and `services/*`.
+    - Each becomes a target named after its path, slugified to `[a-z0-9._-]`. A `target` decision records why.
+    - A root that matches a provider stays a single target. Workspace-manifest discovery and `--affected` stay in P6.
+  - **`[target.x] export` for detected targets:**
+    - Entries relative to the target root are copied under the image workdir (Go/Rust: `/out/<p>`); absolute entries are copied as is.
+    - It closes the gap where Go/Rust images ship only the binary and miss runtime files such as templates or `data/`.
 - **rev 1.5 (2026-10-06):** P1b refinements (implementation level).
   - **Catalog lines refreshed to current releases (§7):**
     - python 3.12/3.13/3.14 (default 3.13);

@@ -14,7 +14,12 @@
 **Next steps, in order:**
 1. ~~The user reviews the spec.~~ Done; approved.
 2. ~~P1a plan and implementation.~~ Done. Merging `p1a-plan-core` is the user's call.
-3. Plan **P1b**: the Python, Ruby, Go and Rust detectors.
+3. ~~P1b~~ Done (2026-10-06):
+   - the Python, Ruby, Go and Rust detectors;
+   - `export` for detected targets;
+   - zero-config monorepo targets (spec rev 1.6).
+   - Plan: `docs/superpowers/plans/2026-10-06-potter-p1b-detectors.md`.
+4. Next: **P2**, first images via `NsExecutor`. It needs the kiln `services` PR and vmkit's generalised sandbox (see the upstream table below).
 
 **Deferred minor findings from the P1a review** (fix in P1b/P2):
 - yarn.lock flavour detection swallows read errors and over-cap files, and should read a bounded prefix.

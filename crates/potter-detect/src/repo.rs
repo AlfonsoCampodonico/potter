@@ -249,6 +249,21 @@ impl RepoView {
         }
         out.into_iter().collect()
     }
+
+    /// `prefix/<name>` directories containing a known manifest (e.g. `apps/web`).
+    pub fn manifest_dirs_under(&self, prefix: &str) -> Vec<String> {
+        let mut out: BTreeSet<String> = BTreeSet::new();
+        for f in &self.files {
+            if let Some(rest) = f.strip_prefix(prefix).and_then(|r| r.strip_prefix('/'))
+                && let Some((dir, name)) = rest.split_once('/')
+                && !name.contains('/')
+                && MANIFESTS.contains(&name)
+            {
+                out.insert(format!("{prefix}/{dir}"));
+            }
+        }
+        out.into_iter().collect()
+    }
 }
 
 #[cfg(unix)]

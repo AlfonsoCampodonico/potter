@@ -7,9 +7,10 @@ pub mod file;
 pub mod merge;
 pub mod options;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use potter_detect::RepoView;
+use potter_detect::{DetectOptions, RepoView};
 use potter_plan::{Decision, Plan, Target, is_relative_path};
 
 pub use error::ConfigError;
@@ -25,31 +26,106 @@ pub struct PlannedRepo {
 
 pub fn plan_repo(root: &Path, only: Option<&str>) -> Result<PlannedRepo, ConfigError> {
     let cfg = file::load(root)?;
-    let all = file::targets(&cfg);
+    let all = discover_targets(root, &cfg)?;
     if let Some(o) = only
-        && !all.iter().any(|(n, _)| n == o)
+        && !all.iter().any(|(n, _, _)| n == o)
     {
         return Err(ConfigError::UnknownTarget {
             name: o.to_string(),
-            available: all.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "),
+            available: all.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>().join(", "),
         });
     }
     let mut targets = Vec::new();
     let mut decisions = Vec::new();
-    for (name, tc) in all {
+    for (name, tc, discovered) in all {
         if only.is_some_and(|o| o != name) {
             continue;
         }
-        let (t, d) = plan_target(root, &name, &tc, &cfg.apt).map_err(|e| ConfigError::InTarget {
+        let (t, mut d) = plan_target(root, &name, &tc, &cfg.apt).map_err(|e| ConfigError::InTarget {
             name: name.clone(),
             source: Box::new(e),
         })?;
+        if let Some(decision) = discovered {
+            d.insert(0, decision);
+        }
         targets.push(t);
         decisions.push((name, d));
     }
     let plan = Plan::new(targets);
     potter_plan::validate(&plan)?;
     Ok(PlannedRepo { plan, decisions })
+}
+
+/// Directories below the root that become targets when the root itself matches no provider.
+const TARGET_CONTAINERS: &[&str] = &["apps", "services"];
+
+type Discovered = (String, TargetConfig, Option<Decision>);
+
+/// Declared targets; otherwise, when the root matches no provider but directories below it do,
+/// one target per such directory (spec rev 1.6); otherwise the implicit `app` target.
+fn discover_targets(root: &Path, cfg: &file::ConfigFile) -> Result<Vec<Discovered>, ConfigError> {
+    if !cfg.target.is_empty() {
+        return Ok(file::targets(cfg).into_iter().map(|(n, t)| (n, t, None)).collect());
+    }
+    let implicit = || vec![("app".to_string(), TargetConfig::default(), None)];
+    // An unreadable root is reported by `plan_target` with the target's name.
+    let Ok(repo) = RepoView::open(root) else {
+        return Ok(implicit());
+    };
+    if !potter_detect::claims(&repo, &DetectOptions::default())?.is_empty() {
+        return Ok(implicit());
+    }
+    let mut dirs = repo.manifest_dirs();
+    for container in TARGET_CONTAINERS {
+        dirs.extend(repo.manifest_dirs_under(container));
+    }
+    dirs.sort();
+    dirs.dedup();
+    if dirs.is_empty() {
+        return Ok(implicit());
+    }
+    let mut used = BTreeSet::new();
+    let mut out = Vec::new();
+    for dir in dirs {
+        let base = slug(&dir);
+        let mut name = base.clone();
+        let mut n = 2;
+        while !used.insert(name.clone()) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        let decision = Decision::detected(
+            "target",
+            name.as_str(),
+            [format!("{dir}/ has a manifest and the root has none")],
+        );
+        out.push((
+            name,
+            TargetConfig {
+                root: Some(dir),
+                ..Default::default()
+            },
+            Some(decision),
+        ));
+    }
+    Ok(out)
+}
+
+/// A directory path as a target name: lower case, `[a-z0-9._-]` only, at most 60 characters.
+fn slug(dir: &str) -> String {
+    let s: String = dir
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let s: String = s.trim_matches('-').chars().take(60).collect();
+    if s.is_empty() { "target".into() } else { s }
 }
 
 fn plan_target(
