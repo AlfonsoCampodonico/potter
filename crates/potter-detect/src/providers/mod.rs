@@ -3,6 +3,7 @@
 pub(crate) mod bun;
 pub(crate) mod common;
 mod deno;
+mod go;
 pub(crate) mod js;
 mod laravel;
 pub(crate) mod node;
@@ -42,6 +43,7 @@ pub fn all() -> Vec<&'static dyn Provider> {
         &static_site::StaticProvider,
         &python::PythonProvider,
         &ruby::RubyProvider,
+        &go::GoProvider,
     ]
 }
 
