@@ -1,7 +1,7 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Approved rev 1.3 (2026-10-05)
+**Status:** Approved rev 1.4 (2026-10-05)
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 
@@ -15,6 +15,18 @@
   - `potter-run` is dropped. kiln-init gains `services`, and nginx + php-fpm run as kiln services (§4, §6.1.1).
   - `NsExecutor` is built on vmkit's generalised `sandbox` and `net` modules instead of its own namespace code (§4, §9.4).
   - kiln's planned native RUN-free Dockerfile backend is cancelled. potter is the only Dockerfile implementation in the project family, and `kiln build --builder potter` becomes `auto`'s first choice (§2, §6.3).
+- **rev 1.4 (2026-10-05):** implementation-level refinements found while planning P1a. None changes a user decision.
+  - **Catalog refs from P1a.** Detectors emit `Base::Catalog` refs from P1a onwards. Until P3, P2 maps those refs to upstream OCI images, so detectors don't change when the catalog arrives (§15).
+  - **IR additions.**
+    - `Target.provider`.
+    - `Image.files`: generated config files, host-built in P2.
+    - `ImageConfig.port`: recorded as `dev.potter.port`.
+    - `ImageConfig.stop_signal`: the main process's stop signal (§5.1).
+  - **Lockfile read cap.** Lockfiles that detectors parse (`composer.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `deno.lock`) have a 64 MiB read cap; every other file keeps 4 MiB. Real lockfiles exceed 4 MiB (§6.1).
+  - **Several JS lockfiles, no `packageManager`.** npm is chosen when `package-lock.json` is present, and the choice is recorded as a decision. Otherwise the order is pnpm, then yarn. Override with `[target.x.node] package_manager`. Real Laravel repos commit both `package-lock.json` and `yarn.lock` (§6.1).
+  - **PHP config paths.** The generated nginx and php-fpm configs live at `/etc/potter/nginx.conf` and `/etc/potter/php-fpm.conf`. The php-fpm socket moves to `/run/php-fpm.sock`, so no directory has to exist under `/run` (§6.1.1).
+  - **Deno's cache is in the layer.** Deno's `DENO_DIR` is `/app/.deno` and lives in the layer, not in a cache mount, because Deno needs its module cache at runtime (§6.1).
+  - **`port` at target level.** `[target.x] port` applies to every provider; `[target.x.php] port` remains as an alias.
 - **rev 1.3 (2026-10-05):** gap fill.
   - Added rebase (§16), supply chain (§17), platform integration (§18) and the catalog patch cadence (§7).
   - The run image now has its own `runtime_steps` for runtime `Apt` packages (§5.1).
@@ -192,7 +204,7 @@ The default tenant for local CLI use is `local`.
 
 ```
 Plan       { schema: "potter.plan/v1", targets: [Target] }
-Target     { name, root: path, platform, build: Chain, image: Image }
+Target     { name, root: path, platform, provider, build: Chain, image: Image }
 Chain      { base: Base, steps: [Step] }
 Base       = Catalog { layers: [CatalogRef] }        # resolved to digests before execution
            | Oci { reference, digest }               # pinned; tags resolve once at plan time
@@ -203,8 +215,10 @@ Step       = Inputs   { name, include: [glob], exclude: [glob], dest: path, owne
            | CopyFrom { name, stage | target, paths: [path], dest, owner, mode? }             # host-built
            | Apt      { name, packages: [string], snapshot: date }                            # lowers to a Run with a pinned mirror
            | Meta     { env?, workdir?, user?, labels? }                                       # config only, no layer
-Image      { base: Base, runtime_steps: [Apt], export: [Export], config: ImageConfig, processes: {name: Process},
-             services: {process name: [Service]} }   # → kiln Config.services for that process (§4)
+Image      { base: Base, runtime_steps: [Apt], export: [Export], files: [GeneratedFile], config: ImageConfig,
+             processes: {name: Process}, services: {process name: [Service]} }   # services → kiln Config.services (§4)
+GeneratedFile { path, content, mode }               # host-built layer, e.g. the nginx/php-fpm configs (§6.1.1)
+ImageConfig   { env, workdir, user, labels, port?, stop_signal? }
 Export     { path, dest, exclude: [glob] }           # read from the final state of the target's build chain
 CacheMount { id, target: path, sharing: exclusive }
 SecretRef  { id, target: path }                      # mounted file, never in a layer
@@ -246,7 +260,7 @@ SecretRef  { id, target: path }                      # mounted file, never in a 
 `Provider::detect(&RepoView) -> Option<Detection>`. `RepoView` is a read-only, bounded view of the target root:
 
 - the file list (capped at 200 000 entries);
-- reads capped at 4 MiB per file;
+- reads capped at 4 MiB per file, except lockfiles that detectors parse, which are capped at 64 MiB;
 - no symlink traversal outside the root.
 
 A `Detection` carries a partial plan, a specificity level and its evidence (the files and keys that drove each decision).
@@ -265,9 +279,9 @@ Every provider emits the same chain shape: base, then dependency inputs, then th
 |---|---|---|---|---|---|
 | **PHP generic** | `composer.json` | `composer.json`, `composer.lock` → `composer install --no-dev --no-scripts --no-autoloader --prefer-dist`; `composer` | `composer dump-autoload -o --no-dev` after source | php + required exts + php-fpm + nginx | `web` = nginx main process with a php-fpm service (§6.1.1) |
 | **Laravel** | PHP + `laravel/framework` + `artisan` | as PHP; node deps when `package.json` exists (as Node) | asset build (`vite`/`mix`) when present; `php artisan package:discover`; *no* `config:cache`/`route:cache` (env is runtime) | as PHP; exts from `ext-*` across composer.json + composer.lock, plus Laravel defaults (`bcmath`, `intl`, `pcntl`, `pdo_mysql`, `pdo_pgsql`, `redis`); with Octane, the server's runtime (`swoole` ext, RoadRunner binary or FrankenPHP) replaces nginx + php-fpm | `web` = nginx + php-fpm (as PHP generic); with Octane, `octane:start --server=<detected> --host=0.0.0.0` (server from `config/octane.php` / `OCTANE_SERVER`, else the installed server package); `worker` = `queue:work` (or `horizon`); `scheduler` = `schedule:work` |
-| **Node** | `package.json` without `bun.lock*`/`deno.json*` | manifest + lockfile → `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --immutable`; picked from the lockfile and `packageManager` (via corepack); `npm`/`pnpm`/`yarn` | `build` script when present (covers `tsc`); then prune dev deps (`npm prune --omit=dev`, `pnpm prune --prod`) | node | Next with `output: 'standalone'` → `node server.js`; Nuxt → `node .output/server/index.mjs`; else the `start` script |
+| **Node** | `package.json` without `bun.lock*`/`deno.json*` | manifest + lockfile → `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --immutable`; picked from `[target.x.node] package_manager`, then `packageManager` (via corepack), then the lockfile. With several lockfiles, npm wins when `package-lock.json` exists (recorded as a decision); yarn classic uses `--frozen-lockfile`; `npm`/`pnpm`/`yarn` | `build` script when present (covers `tsc`); then prune dev deps (`npm prune --omit=dev`, `pnpm prune --prod`) | node | Next with `output: 'standalone'` → `node server.js`; Nuxt → `node .output/server/index.mjs`; else the `start` script |
 | **Bun** | `bun.lock`/`bun.lockb` | manifest + lockfile → `bun install --frozen-lockfile`; `bun` | `build` script when present | bun | the `start` script, else `bun run <module/main>` |
-| **Deno** | `deno.json`/`deno.jsonc` | `deno.json*`, `deno.lock` → `deno install --frozen` (or `deno cache` on the entry point); `deno` (`DENO_DIR`) | `deno task build` when defined | deno | `deno task start`, else `deno serve` on the detected entry point. Permissions come from the task definition, never widened by potter |
+| **Deno** | `deno.json`/`deno.jsonc` | `deno.json*`, `deno.lock` → `deno install --frozen` (`deno install` without a lockfile); no cache mount: `DENO_DIR=/app/.deno` stays in the layer because Deno needs it at runtime | `deno task build` when defined | deno | `deno task start`, else `deno serve` on the detected entry point. Permissions come from the task definition, never widened by potter |
 | **Static** | JS project (Node/Bun/Deno) whose build outputs a static dir and that has no server runtime deps | as the underlying JS provider | as the underlying JS provider | os-min + `static-server` catalog layer | serve the build dir |
 | **Python** | `pyproject.toml`, `requirements.txt`, `Pipfile` | uv: `pyproject.toml`, `uv.lock` → `uv sync --frozen --no-dev --no-install-project`; poetry: `poetry install --only main --no-root`; pip: `pip install -r requirements.txt` into `/app/.venv`; pipenv: `pipenv sync`; `uv`/`pip`/`poetry` | project install after source; Django `collectstatic --noinput` (disable with `[target.x.python.django] collectstatic = false`) | python | gunicorn/uvicorn/granian, whichever is in the deps, against the detected ASGI/WSGI app; Django → `gunicorn <proj>.wsgi` |
 | **Ruby** | `Gemfile` | `Gemfile`, `Gemfile.lock` → `bundle install` (deployment, without development:test); `bundler` | Rails: `SECRET_KEY_BASE_DUMMY=1 bin/rails assets:precompile`, `bootsnap precompile` | ruby | Rails → `bin/rails server -b 0.0.0.0`; Rack → `bundle exec rackup` |
@@ -285,7 +299,7 @@ Notes:
 PHP web images run nginx and php-fpm under **kiln-init `services`** (§4), not under a supervisor of potter's own.
 
 - **Service layout:**
-  - php-fpm is a service: `php-fpm --nodaemonize`, `ready = unix:/run/php/fpm.sock`, `stop_signal = QUIT`.
+  - php-fpm is a service: `php-fpm --nodaemonize`, `ready = unix:/run/php-fpm.sock`, `stop_signal = QUIT`.
   - nginx is the main process: `nginx -g 'daemon off;'`, `stop_signal = QUIT`. It starts only once php-fpm's socket accepts connections.
 - **Supervision:** if either exits, kiln-init stops the other and the VM ends. Restarting is the platform's job, and there is no restart loop inside the VM.
 - **Logs:** both share the main process's stdout and stderr.
@@ -294,9 +308,9 @@ PHP web images run nginx and php-fpm under **kiln-init `services`** (§4), not u
 - **Default nginx config:**
   - Generated by potter at build time into a host-built layer. kiln-init does no templating.
   - It listens on `[target.x.php] port` (default 8080), with `root /app/public` and `try_files $uri $uri/ /index.php?$query_string`.
-  - `fastcgi_pass unix:/run/php/fpm.sock`, `client_max_body_size 100m`, gzip for text types, `server_tokens off`, and denied dotfiles except `.well-known`.
+  - `fastcgi_pass unix:/run/php-fpm.sock`, `client_max_body_size 100m`, gzip for text types, `server_tokens off`, and denied dotfiles except `.well-known`.
 - **Default php-fpm pool:**
-  - `listen = /run/php/fpm.sock` and `pm = dynamic`.
+  - `listen = /run/php-fpm.sock` and `pm = dynamic`.
   - `pm.max_children = ${PHP_FPM_MAX_CHILDREN}`, using php-fpm's native env expansion. The image env defaults it to 16, and the platform overrides it per VM size.
   - `clear_env = no`, so platform-injected env reaches PHP, and `opcache.validate_timestamps = 0`.
 - **Overrides:**
@@ -713,7 +727,7 @@ Each milestone gets its own implementation plan.
 | P6 | Remote cache, graph and supply chain | Remote cache, tenant keys, monorepo discovery, dedup, `--affected`, `--progress json`, SBOM/provenance/signing and `potter verify` (§17), build Jobs (§18) | Linux | P2 |
 | P7 | Daemon | gRPC API, build queue, warm VM pool, concurrency and tenant quotas, wrapping the library | Linux + KVM | P4, P6 |
 
-P2 deliberately comes before the catalog and the VM executor, so real images come out early on a host without KVM. It uses upstream OCI bases (`php:8.4-fpm`, `node:22-slim`, …) until P3 swaps detectors onto the catalog. PHP web targets in P2 get nginx from a detector-emitted `apt-get install nginx` `Run` step on top of `php:X-fpm`; P3 replaces it with the catalog nginx layer.
+P2 deliberately comes before the catalog and the VM executor, so real images come out early on a host without KVM. Detectors emit catalog refs from P1a. Until P3 ships the catalog, P2 maps each ref to an upstream OCI image (`php:8.4-fpm`, `node:22-slim`, …). For PHP web targets, P2's mapping turns the `nginx` ref into an `apt-get install nginx` step on top of `php:X-fpm`, and P3 replaces it with the catalog nginx layer.
 
 ---
 
