@@ -1,0 +1,9 @@
+[tool.poetry]
+name = "poetry-app"
+version = "0.1.0"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+flask = "^3.1"
+gunicorn = "^23.0"

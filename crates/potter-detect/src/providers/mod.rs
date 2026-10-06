@@ -8,6 +8,7 @@ mod laravel;
 pub(crate) mod node;
 mod php;
 mod php_config;
+mod python;
 mod static_site;
 
 use potter_plan::{Decision, Target};
@@ -38,6 +39,7 @@ pub fn all() -> Vec<&'static dyn Provider> {
         &bun::BunProvider,
         &deno::DenoProvider,
         &static_site::StaticProvider,
+        &python::PythonProvider,
     ]
 }
 
