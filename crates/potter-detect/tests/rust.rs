@@ -115,3 +115,88 @@ fn missing_lock_and_library_only() {
         Err(DetectError::NoProcess { .. })
     ));
 }
+
+#[test]
+fn declared_benches_examples_and_tests_are_stubbed() {
+    let r = temp_repo(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n[[bench]]\nname = \"speed\"\nharness = false\n[[example]]\nname = \"demo\"\n[[test]]\nname = \"it\"\npath = \"tests/integration.rs\"\n",
+        ),
+        ("Cargo.lock", "version = 4\n"),
+        ("src/main.rs", "fn main() {}\n"),
+    ]);
+    let deps = command(&detect_at(r.path(), &DetectOptions::default()).unwrap().target, "deps");
+    for path in ["benches/speed.rs", "examples/demo.rs", "tests/integration.rs"] {
+        assert!(deps.contains(&format!("> {path}")), "{path} not stubbed: {deps}");
+    }
+}
+
+#[test]
+fn binaries_follow_cargo_autodiscovery() {
+    let r = temp_repo(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"c\"\n[[bin]]\nname = \"worker\"\npath = \"src/worker.rs\"\n",
+        ),
+        ("Cargo.lock", "version = 4\n"),
+        ("src/main.rs", "fn main() {}\n"),
+        ("src/worker.rs", "fn main() {}\n"),
+        ("src/bin/tool.rs", "fn main() {}\n"),
+        ("src/bin/srv/main.rs", "fn main() {}\n"),
+    ]);
+    let t = detect_at(r.path(), &DetectOptions::default()).unwrap().target;
+    let build = command(&t, "build");
+    for bin in ["c", "worker", "tool", "srv"] {
+        assert!(
+            build.contains(&format!("target/release/{bin}")),
+            "{bin} missing: {build}"
+        );
+    }
+    assert_eq!(process(&t, "web"), "/out/c");
+    let deps = command(&t, "deps");
+    assert!(
+        deps.contains("> src/bin/srv/main.rs") && !deps.contains("src/bin/srv.rs"),
+        "{deps}"
+    );
+    let r = temp_repo(&[
+        ("Cargo.toml", "[package]\nname = \"c\"\n"),
+        ("Cargo.lock", "version = 4\n"),
+        ("src/bin/api.rs", "fn main() {}\n"),
+    ]);
+    assert_eq!(
+        process(&detect_at(r.path(), &DetectOptions::default()).unwrap().target, "web"),
+        "/out/api"
+    );
+}
+
+#[test]
+fn path_dependencies_are_inputs_and_stubbed() {
+    let r = temp_repo(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"app\"\n[dependencies]\nshared = { path = \"libs/shared\" }\n",
+        ),
+        ("Cargo.lock", "version = 4\n"),
+        ("src/main.rs", "fn main() {}\n"),
+        ("libs/shared/Cargo.toml", "[package]\nname = \"shared\"\n"),
+        ("libs/shared/src/lib.rs", "pub fn x() {}\n"),
+    ]);
+    let t = detect_at(r.path(), &DetectOptions::default()).unwrap().target;
+    assert!(includes(&t, "deps-inputs").contains(&"libs/shared/Cargo.toml".to_string()));
+    assert!(command(&t, "deps").contains("> libs/shared/src/lib.rs"));
+    assert!(command(&t, "build").contains("-p shared"));
+    assert!(!command(&t, "build").contains("target/release/shared"));
+    let r = temp_repo(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"app\"\n[dependencies]\nevil = { path = \"../../outside\" }\n",
+        ),
+        ("Cargo.lock", "version = 4\n"),
+        ("src/main.rs", "fn main() {}\n"),
+    ]);
+    assert!(matches!(
+        detect_at(r.path(), &DetectOptions::default()),
+        Err(DetectError::Parse { .. })
+    ));
+}

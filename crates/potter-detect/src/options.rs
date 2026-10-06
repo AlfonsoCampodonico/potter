@@ -12,6 +12,8 @@ pub struct DetectOptions {
     pub php: PhpOptions,
     pub node: NodeOptions,
     pub python: PythonOptions,
+    /// `[target.x.process.web] cmd`: when set, providers don't need to infer a web process.
+    pub web_cmd: Option<Vec<String>>,
     /// The potter.toml key prefix used in decisions and hints, e.g. `target.api`. Empty means `target.app`.
     pub key_prefix: String,
 }

@@ -41,7 +41,7 @@ impl Provider for GoProvider {
         let mut d = Vec::new();
         let go = go_version(opts, &gomod, &mut d)?;
         let mains = main_packages(repo)?;
-        if mains.is_empty() {
+        if mains.is_empty() && opts.web_cmd.is_none() {
             return Err(DetectError::NoProcess {
                 provider: ProviderId::Go,
                 hint: format!(
@@ -67,7 +67,7 @@ impl Provider for GoProvider {
             .join(" && ");
         let mut build_env = env.to_vec();
         build_env.push(("CGO_ENABLED", "0"));
-        let steps = vec![
+        let mut steps = vec![
             inputs("deps-inputs", deps_inputs),
             run(
                 "deps",
@@ -84,12 +84,21 @@ impl Provider for GoProvider {
             ),
         ];
 
-        let web = pick_web(&mains, opts)?;
-        d.push(Decision::detected(
-            "process.web",
-            format!("/out/{web}"),
-            [main_evidence(&mains, &web)],
-        ));
+        if mains.is_empty() {
+            steps.pop();
+        }
+        // With `process.web.cmd` set in potter.toml, every main keeps its own name.
+        let web = match opts.web_cmd {
+            Some(_) => None,
+            None => Some(pick_web(&mains, opts)?),
+        };
+        if let Some(web) = &web {
+            d.push(Decision::detected(
+                "process.web",
+                format!("/out/{web}"),
+                [main_evidence(&mains, web)],
+            ));
+        }
         let port = port(opts, 8080, &mut d);
         let mut config = ImageConfig::new("/out", "root");
         config.port = Some(port);
@@ -97,7 +106,11 @@ impl Provider for GoProvider {
         let mut image = empty_image(vec![cref("os-min", None)], config);
         image.export = vec![export("/out", "/out")];
         for (name, _) in &mains {
-            let process = if *name == web { "web".to_string() } else { name.clone() };
+            let process = if web.as_deref() == Some(name.as_str()) {
+                "web".to_string()
+            } else {
+                name.clone()
+            };
             if potter_plan::is_name(&process) {
                 image
                     .processes
@@ -136,7 +149,18 @@ fn go_version(opts: &DetectOptions, gomod: &str, d: &mut Vec<Decision>) -> Resul
         let set = parse_partial(release_prefix(raw))
             .and_then(|p| p.x_range())
             .map_err(|e| bad_constraint("go", tc, "go.mod toolchain", e))?;
-        src = Some(detected(format!("go.mod toolchain {tc}"), set));
+        // `toolchain` only suggests a version; `go` is the real minimum.
+        let in_catalog = GO.lines.iter().any(|l| set.intersects(&l.interval()));
+        src = match directive(gomod, "go") {
+            Some(v) if !in_catalog => {
+                let min = at_least(v).map_err(|e| bad_constraint("go", v, "go.mod go", e))?;
+                Some(detected(
+                    format!("go.mod toolchain {tc} isn't in the catalog; go {v} (minimum)"),
+                    min,
+                ))
+            }
+            _ => Some(detected(format!("go.mod toolchain {tc}"), set)),
+        };
     }
     if src.is_none()
         && let Some(v) = directive(gomod, "go")

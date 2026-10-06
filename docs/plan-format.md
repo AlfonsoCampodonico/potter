@@ -49,6 +49,7 @@ checked in CI.
 | `[target.<name>.deploy]` `commands` | A `deploy` process the platform runs once before rollout. |
 | `[target.<name>]` `export` | Extra paths in the image: relative to the target root (copied under the image workdir, e.g. `/out/data` for Go/Rust) or absolute. Explicit plans default to `/app`. |
 | `[target.<name>.base]` `catalog`/`oci`, `run_catalog`/`run_oci` | Explicit plans only. |
+| `discover` (top level) | `false` turns off zero-config monorepo targets (directories with their own manifest when the root has none). Declared `[target.*]` entries otherwise merge over discovered ones. |
 | `[apt]` `build`, `runtime`, `snapshot` | Debian packages from a pinned snapshot.debian.org date. |
 
 `potter plan --explain` prints where every decision came from: what a detector found (with its

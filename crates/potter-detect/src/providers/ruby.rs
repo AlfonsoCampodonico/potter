@@ -163,6 +163,8 @@ impl Provider for RubyProvider {
                 "-p".into(),
                 port.to_string(),
             ]
+        } else if let Some(cmd) = &opts.web_cmd {
+            cmd.clone()
         } else {
             return Err(DetectError::NoProcess {
                 provider: ProviderId::Ruby,

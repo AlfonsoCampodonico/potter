@@ -68,3 +68,14 @@
 - kiln M3a is in progress on branch `m3a-guest`.
 - vmkit is in `../vmkit`.
 - Commits carry no attribution trailers (a user preference).
+
+**Deferred minor findings from the P1b review** (spec rev 1.6 work):
+- A Go root `package main` plus `cmd/app` collide on `/out/app`. Go and Rust names starting with `.` or `-` pass `safe_name`.
+- Main or binary names that fail `is_name` are dropped from processes without a decision.
+- Python `-e .` and local-path requirement lines install before the source is copied. The glued form `-rbase.txt` is not followed. A `-r ../base.txt` that stays inside the root is still refused.
+- Django with `manage.py` outside the target root gets an error that doesn't name `manage.py`. Pipfile `[requires] python_version` is not consulted.
+- A Gemfile with a multi-argument `ruby ">= 3.2", "< 4"` reads only the first argument. `.ruby-version` `ruby-3.3.6@gemset` is an error.
+- TOML parse errors echo the whole offending line; truncate `reason`.
+- `export` accepts `/` and `./data`; `/app/../etc` fails later as an anonymous plan error. Normalise, and reject at the key.
+- Discovery can overlap `apps` with `apps/web` when `apps/` has its own manifest.
+- **P3:** exact patch pins (`ruby "3.3.6"`, PEP 440 `==3.12`, `.python-version` `3.12.4` with `UV_PYTHON_DOWNLOADS=never`) need catalog patch resolution. `rust-toolchain.toml` components and profile vs rustup in the catalog layer.

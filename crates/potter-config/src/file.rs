@@ -20,6 +20,8 @@ pub struct ConfigFile {
     pub target: IndexMap<String, TargetConfig>,
     #[serde(default)]
     pub apt: AptConfig,
+    /// Zero-config monorepo targets (spec §10); `false` turns discovery off.
+    pub discover: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

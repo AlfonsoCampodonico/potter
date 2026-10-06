@@ -41,11 +41,18 @@ pub fn plan_repo(root: &Path, only: Option<&str>) -> Result<PlannedRepo, ConfigE
         if only.is_some_and(|o| o != name) {
             continue;
         }
-        let (t, mut d) = plan_target(root, &name, &tc, &cfg.apt).map_err(|e| ConfigError::InTarget {
-            name: name.clone(),
-            source: Box::new(e),
+        let (t, mut d) = plan_target(root, &name, &tc, &cfg.apt).map_err(|e| match &discovered {
+            Some((_, dir)) => ConfigError::InDiscoveredTarget {
+                name: name.clone(),
+                dir: dir.clone(),
+                source: Box::new(e),
+            },
+            None => ConfigError::InTarget {
+                name: name.clone(),
+                source: Box::new(e),
+            },
         })?;
-        if let Some(decision) = discovered {
+        if let Some((decision, _)) = discovered {
             d.insert(0, decision);
         }
         targets.push(t);
@@ -58,35 +65,63 @@ pub fn plan_repo(root: &Path, only: Option<&str>) -> Result<PlannedRepo, ConfigE
 
 /// Directories below the root that become targets when the root itself matches no provider.
 const TARGET_CONTAINERS: &[&str] = &["apps", "services"];
+/// Depth-1 directories that hold tooling or documentation, never deployable apps.
+const AUXILIARY_DIRS: &[&str] = &[
+    "bench",
+    "benchmarks",
+    "doc",
+    "docs",
+    "e2e",
+    "example",
+    "examples",
+    "fixtures",
+    "script",
+    "scripts",
+    "test",
+    "tests",
+    "tools",
+];
 
-type Discovered = (String, TargetConfig, Option<Decision>);
+/// (name, config, for discovered targets: the decision and the directory)
+type Discovered = (String, TargetConfig, Option<(Decision, String)>);
 
-/// Declared targets; otherwise, when the root matches no provider but directories below it do,
-/// one target per such directory (spec rev 1.6); otherwise the implicit `app` target.
+/// Declared targets, plus (when the root matches no provider and discovery is on) one target per
+/// directory below it that does (spec §10). Declared targets override discovered ones of the same
+/// name and inherit their root. Without either, the implicit `app` target.
 fn discover_targets(root: &Path, cfg: &file::ConfigFile) -> Result<Vec<Discovered>, ConfigError> {
-    if !cfg.target.is_empty() {
-        return Ok(file::targets(cfg).into_iter().map(|(n, t)| (n, t, None)).collect());
+    let declared: Vec<Discovered> = file::targets(cfg).into_iter().map(|(n, t)| (n, t, None)).collect();
+    if cfg.discover == Some(false) {
+        return Ok(declared);
     }
-    let implicit = || vec![("app".to_string(), TargetConfig::default(), None)];
     // An unreadable root is reported by `plan_target` with the target's name.
     let Ok(repo) = RepoView::open(root) else {
-        return Ok(implicit());
+        return Ok(declared);
     };
     if !potter_detect::claims(&repo, &DetectOptions::default())?.is_empty() {
-        return Ok(implicit());
+        return Ok(declared);
     }
-    let mut dirs = repo.manifest_dirs();
+    let mut dirs: Vec<String> = repo
+        .manifest_dirs()
+        .into_iter()
+        .filter(|d| !d.starts_with('.') && !AUXILIARY_DIRS.contains(&d.as_str()))
+        .collect();
     for container in TARGET_CONTAINERS {
         dirs.extend(repo.manifest_dirs_under(container));
     }
     dirs.sort();
     dirs.dedup();
     if dirs.is_empty() {
-        return Ok(implicit());
+        return Ok(declared);
     }
+    let explicit: Vec<(String, TargetConfig)> = if cfg.target.is_empty() {
+        vec![]
+    } else {
+        file::targets(cfg)
+    };
+    let declared_roots: BTreeSet<String> = explicit.iter().filter_map(|(_, t)| t.root.clone()).collect();
     let mut used = BTreeSet::new();
-    let mut out = Vec::new();
-    for dir in dirs {
+    let mut out: Vec<Discovered> = Vec::new();
+    for dir in dirs.into_iter().filter(|d| !declared_roots.contains(d)) {
         let base = slug(&dir);
         let mut name = base.clone();
         let mut n = 2;
@@ -102,11 +137,22 @@ fn discover_targets(root: &Path, cfg: &file::ConfigFile) -> Result<Vec<Discovere
         out.push((
             name,
             TargetConfig {
-                root: Some(dir),
+                root: Some(dir.clone()),
                 ..Default::default()
             },
-            Some(decision),
+            Some((decision, dir)),
         ));
+    }
+    for (name, mut tc) in explicit {
+        match out.iter_mut().find(|(n, _, _)| *n == name) {
+            Some(slot) => {
+                if tc.root.is_none() {
+                    tc.root = slot.1.root.clone();
+                }
+                slot.1 = tc;
+            }
+            None => out.push((name, tc, None)),
+        }
     }
     Ok(out)
 }

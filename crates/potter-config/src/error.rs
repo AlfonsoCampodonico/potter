@@ -22,6 +22,14 @@ pub enum ConfigError {
     UnknownTarget { name: String, available: String },
     #[error("target `{name}`: {source}")]
     InTarget { name: String, source: Box<ConfigError> },
+    #[error(
+        "target `{name}` (discovered automatically from {dir}/): {source}; declare the targets you want under [target.*], or set `discover = false`"
+    )]
+    InDiscoveredTarget {
+        name: String,
+        dir: String,
+        source: Box<ConfigError>,
+    },
     #[error(transparent)]
     Detect(#[from] DetectError),
     #[error(transparent)]
@@ -40,7 +48,9 @@ impl ConfigError {
     pub fn is_infrastructure(&self) -> bool {
         match self {
             ConfigError::Io { source, .. } => source.kind() != ErrorKind::NotFound,
-            ConfigError::InTarget { source, .. } => source.is_infrastructure(),
+            ConfigError::InTarget { source, .. } | ConfigError::InDiscoveredTarget { source, .. } => {
+                source.is_infrastructure()
+            }
             ConfigError::Detect(DetectError::Repo(RepoError::Io { source, .. })) => {
                 source.kind() != ErrorKind::NotFound
             }

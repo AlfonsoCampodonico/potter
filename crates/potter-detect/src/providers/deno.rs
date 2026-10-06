@@ -113,6 +113,8 @@ impl Provider for DenoProvider {
                 port.to_string(),
                 e.into(),
             ]
+        } else if let Some(cmd) = &opts.web_cmd {
+            cmd.clone()
         } else {
             return Err(DetectError::NoProcess {
                 provider: ProviderId::Deno,

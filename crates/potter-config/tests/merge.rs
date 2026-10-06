@@ -188,7 +188,10 @@ fn discovered_target_failure_names_the_target() {
         ("api/main.go", "package main\n"),
     ]);
     let msg = plan_repo(d.path(), None).unwrap_err().to_string();
-    assert!(msg.starts_with("target `web`:") && msg.contains("lockfile"), "{msg}");
+    assert!(
+        msg.starts_with("target `web` (discovered automatically from web/):") && msg.contains("lockfile"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -387,4 +390,102 @@ fn export_rejects_escapes() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn web_cmd_resolves_ambiguous_go_mains() {
+    let d = temp(&[
+        ("go.mod", "module x\n\ngo 1.26\n"),
+        ("cmd/alpha/main.go", "package main\n"),
+        ("cmd/beta/main.go", "package main\n"),
+        (
+            "potter.toml",
+            "[target.app.process.web]\ncmd = [\"/out/alpha\", \"serve\"]\n",
+        ),
+    ]);
+    let t = &plan_repo(d.path(), None).unwrap().plan.targets[0];
+    assert_eq!(t.image.processes["web"].command, ["/out/alpha", "serve"]);
+    assert_eq!(t.image.processes["alpha"].command, ["/out/alpha"]);
+    assert_eq!(t.image.processes["beta"].command, ["/out/beta"]);
+}
+
+#[test]
+fn web_cmd_resolves_missing_framework_and_start_script() {
+    let d = temp(&[
+        ("requirements.txt", "requests\n"),
+        (
+            "potter.toml",
+            "[target.app.process.web]\ncmd = [\"/app/.venv/bin/python\", \"worker.py\"]\n",
+        ),
+    ]);
+    let t = &plan_repo(d.path(), None).unwrap().plan.targets[0];
+    assert_eq!(t.image.processes["web"].command, ["/app/.venv/bin/python", "worker.py"]);
+    let d = temp(&[
+        ("package.json", r#"{"dependencies":{"express":"^5"}}"#),
+        ("package-lock.json", "{}"),
+        (
+            "potter.toml",
+            "[target.app.process.web]\ncmd = [\"node\", \"server.js\"]\n",
+        ),
+    ]);
+    let t = &plan_repo(d.path(), None).unwrap().plan.targets[0];
+    assert_eq!(t.image.processes["web"].command, ["node", "server.js"]);
+}
+
+#[test]
+fn auxiliary_directories_are_not_discovered() {
+    let d = temp(&[
+        ("backend/go.mod", "module b\n\ngo 1.26\n"),
+        ("backend/main.go", "package main\n"),
+        ("docs/requirements.txt", "mkdocs\n"),
+        ("tools/package.json", "{}"),
+        (".github/package.json", "{}"),
+    ]);
+    let p = plan_repo(d.path(), None).unwrap();
+    assert_eq!(summary(&p), owned(&[("backend", "backend", "go")]));
+}
+
+#[test]
+fn discovered_failures_say_they_were_discovered() {
+    let d = temp(&[
+        ("web/package.json", r#"{"scripts":{"start":"x"}}"#),
+        ("api/go.mod", "module a\n\ngo 1.26\n"),
+        ("api/main.go", "package main\n"),
+    ]);
+    let msg = plan_repo(d.path(), None).unwrap_err().to_string();
+    assert!(
+        msg.contains("discovered automatically") && msg.contains("discover = false"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn declared_targets_merge_with_discovered_ones() {
+    let d = temp(&[
+        ("frontend/package.json", r#"{"scripts":{"start":"next start"}}"#),
+        ("frontend/package-lock.json", "{}"),
+        ("backend/go.mod", "module b\n\ngo 1.26\n"),
+        ("backend/main.go", "package main\n"),
+        ("potter.toml", "[target.backend]\nport = 9000\n"),
+    ]);
+    let p = plan_repo(d.path(), None).unwrap();
+    assert_eq!(
+        summary(&p),
+        owned(&[("backend", "backend", "go"), ("frontend", "frontend", "node")])
+    );
+    assert_eq!(p.plan.targets[0].image.config.port, Some(9000));
+    let d = temp(&[
+        ("frontend/package.json", r#"{"scripts":{"start":"next start"}}"#),
+        ("frontend/package-lock.json", "{}"),
+        ("backend/go.mod", "module b\n\ngo 1.26\n"),
+        ("backend/main.go", "package main\n"),
+        (
+            "potter.toml",
+            "discover = false\n[target.backend]\nroot = \"backend\"\n",
+        ),
+    ]);
+    assert_eq!(
+        summary(&plan_repo(d.path(), None).unwrap()),
+        owned(&[("backend", "backend", "go")])
+    );
 }

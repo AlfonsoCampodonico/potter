@@ -61,7 +61,25 @@ pub fn detect(repo: &RepoView, opts: &DetectOptions, target: &str) -> Result<Det
 
 /// Files whose presence decides which provider applies. A symlink in their place is an error that
 /// names the file, rather than a provider silently not seeing it.
-const ROOT_MANIFESTS: &[&str] = &["composer.json", "package.json", "deno.json", "deno.jsonc", "artisan"];
+const ROOT_MANIFESTS: &[&str] = &[
+    "composer.json",
+    "composer.lock",
+    "package.json",
+    "deno.json",
+    "deno.jsonc",
+    "artisan",
+    "pyproject.toml",
+    "requirements.txt",
+    "Pipfile",
+    "Pipfile.lock",
+    "uv.lock",
+    "poetry.lock",
+    "Gemfile",
+    "Gemfile.lock",
+    "go.mod",
+    "Cargo.toml",
+    "Cargo.lock",
+];
 
 fn refuse_symlinked_manifests(repo: &RepoView) -> Result<(), DetectError> {
     match ROOT_MANIFESTS.iter().find(|m| repo.is_symlink(m)) {

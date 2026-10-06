@@ -69,6 +69,8 @@ impl Provider for BunProvider {
         } else if let Some(entry) = pkg.str_field("module").or_else(|| pkg.str_field("main")) {
             d.push(Decision::detected("process.web", entry, ["package.json module/main"]));
             vec!["bun".into(), "run".into(), entry.to_string()]
+        } else if let Some(cmd) = &opts.web_cmd {
+            cmd.clone()
         } else {
             return Err(DetectError::NoProcess {
                 provider: ProviderId::Bun,

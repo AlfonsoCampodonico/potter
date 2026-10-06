@@ -171,3 +171,49 @@ fn version_sources() {
     let e = detect_at(r.path(), &DetectOptions::default()).unwrap_err();
     assert!(e.to_string().contains("available: 3.12, 3.13, 3.14"), "{e}");
 }
+
+#[test]
+fn flask_factory_and_indented_app() {
+    let r = temp_repo(&[
+        ("requirements.txt", "flask\ngunicorn\nuvicorn\n"),
+        (
+            "app.py",
+            "from flask import Flask\n\ndef create_app():\n    app = Flask(__name__)\n    return app\n",
+        ),
+    ]);
+    let t = detect_at(r.path(), &DetectOptions::default()).unwrap().target;
+    assert_eq!(
+        process(&t, "web"),
+        "/app/.venv/bin/gunicorn app:create_app() --bind 0.0.0.0:8000"
+    );
+    let r = temp_repo(&[
+        ("requirements.txt", "fastapi\nuvicorn\n"),
+        ("main.py", "def build():\n    app = FastAPI()\n    return app\n"),
+    ]);
+    assert!(matches!(
+        detect_at(r.path(), &DetectOptions::default()),
+        Err(DetectError::NoProcess { .. })
+    ));
+    let r = temp_repo(&[
+        ("requirements.txt", "fastapi\nuvicorn\n"),
+        ("main.py", "def create_app():\n    return FastAPI()\n"),
+    ]);
+    let t = detect_at(r.path(), &DetectOptions::default()).unwrap().target;
+    assert_eq!(
+        process(&t, "web"),
+        "/app/.venv/bin/uvicorn --factory main:create_app --host 0.0.0.0 --port 8000"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_requirements_is_named() {
+    let r = temp_repo(&[("requirements/prod.txt", "flask\n")]);
+    std::os::unix::fs::symlink(
+        r.path().join("requirements/prod.txt"),
+        r.path().join("requirements.txt"),
+    )
+    .unwrap();
+    let e = detect_at(r.path(), &DetectOptions::default()).unwrap_err();
+    assert!(e.to_string().contains("requirements.txt is a symlink"), "{e}");
+}

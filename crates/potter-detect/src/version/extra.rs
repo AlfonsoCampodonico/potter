@@ -117,15 +117,23 @@ fn gem_clause(clause: &str, req: &str) -> Result<VersionSet, ConstraintError> {
     })
 }
 
-/// Poetry's `python = "^3.11"` style constraints: npm caret/tilde semantics, comma as AND.
+/// Poetry's `python = "^3.11"` style constraints: npm caret/tilde semantics plus PEP 440
+/// operators (`==`, `!=`, `~=`); `||` separates alternatives and binds looser than `,`.
 pub fn parse_poetry_constraint(c: &str) -> Result<VersionSet, ConstraintError> {
-    let mut set = VersionSet::any();
-    for clause in c.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-        let alternatives: Result<Vec<VersionSet>, _> = clause.split("||").map(|a| npm_clause(a.trim())).collect();
-        let union = alternatives?.into_iter().fold(VersionSet::none(), VersionSet::union);
-        set = set.intersect(&union);
+    let mut union = VersionSet::none();
+    for alternative in c.split("||") {
+        let mut set = VersionSet::any();
+        for clause in alternative.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+            let part = if ["===", "==", "!=", "~="].iter().any(|op| clause.starts_with(op)) {
+                pep440_clause(clause, c)?
+            } else {
+                npm_clause(clause)?
+            };
+            set = set.intersect(&part);
+        }
+        union = union.union(set);
     }
-    Ok(set)
+    Ok(union)
 }
 
 #[cfg(test)]
@@ -196,5 +204,16 @@ mod tests {
         assert!(has(&s, (3, 12, 9)) && !has(&s, (3, 13, 0)));
         let s = parse_poetry_constraint("~3.12").unwrap();
         assert!(has(&s, (3, 12, 4)) && !has(&s, (3, 13, 0)));
+    }
+    #[test]
+    fn poetry_pep440_operators_and_precedence() {
+        let s = parse_poetry_constraint("~=3.12").unwrap();
+        assert!(has(&s, (3, 13, 0)) && !has(&s, (3, 11, 9)));
+        let s = parse_poetry_constraint(">=3.9,!=3.9.7").unwrap();
+        assert!(has(&s, (3, 9, 6)) && !has(&s, (3, 9, 7)) && has(&s, (3, 12, 0)));
+        let s = parse_poetry_constraint("==3.12").unwrap();
+        assert!(has(&s, (3, 12, 0)));
+        let s = parse_poetry_constraint(">=3.14 || >=3.11,<3.13").unwrap();
+        assert!(has(&s, (3, 14, 0)) && has(&s, (3, 12, 0)) && !has(&s, (3, 13, 5)));
     }
 }

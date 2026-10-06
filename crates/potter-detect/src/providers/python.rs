@@ -140,7 +140,14 @@ impl Provider for PythonProvider {
         }
 
         let port = port(opts, 8000, &mut d);
-        let web = web_process(repo, &deps.names, port, opts, &mut d)?;
+        // potter.toml `process.web.cmd` answers "no web process found".
+        let web = match web_process(repo, &deps.names, port, opts, &mut d) {
+            Err(DetectError::NoProcess { .. }) if opts.web_cmd.is_some() => Web {
+                command: opts.web_cmd.clone().unwrap_or_default(),
+                django_project: None,
+            },
+            other => other?,
+        };
         if let Some(project) = &web.django_project {
             let enabled = opts.python.collectstatic.unwrap_or(true);
             if enabled {
@@ -467,9 +474,19 @@ struct Web {
     django_project: Option<String>,
 }
 
-/// A file defines or re-exports a module-level `app`.
-fn binds_app(text: &str) -> bool {
-    text.lines().map(str::trim_start).any(|l| {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppKind {
+    /// A module-level `app` object.
+    App,
+    /// A module-level `create_app()` factory.
+    Factory,
+}
+
+/// What a file exposes at module level (unindented lines only: an `app` built inside a function
+/// is not importable as `module:app`).
+fn app_kind(text: &str) -> Option<AppKind> {
+    let top: Vec<&str> = text.lines().filter(|l| !l.starts_with([' ', '\t'])).collect();
+    let binds = top.iter().any(|l| {
         let assigns = l
             .strip_prefix("app")
             .is_some_and(|r| r.trim_start().starts_with(['=', ':']));
@@ -477,15 +494,25 @@ fn binds_app(text: &str) -> bool {
             && l.split_once(" import ")
                 .is_some_and(|(_, names)| names.split(',').any(|n| n.split_whitespace().last() == Some("app")));
         assigns || imports
-    })
+    });
+    let factory = top
+        .iter()
+        .any(|l| l.starts_with("def create_app(") || l.starts_with("async def create_app("));
+    if binds {
+        Some(AppKind::App)
+    } else if factory {
+        Some(AppKind::Factory)
+    } else {
+        None
+    }
 }
 
-fn app_module(repo: &RepoView) -> Result<Option<(String, &'static str)>, DetectError> {
+fn app_module(repo: &RepoView) -> Result<Option<(String, &'static str, AppKind)>, DetectError> {
     for f in APP_FILES {
         if let Some(text) = repo.read_string(f, READ_CAP)?
-            && binds_app(&text)
+            && let Some(kind) = app_kind(&text)
         {
-            return Ok(Some((f.trim_end_matches(".py").replace('/', "."), f)));
+            return Ok(Some((f.trim_end_matches(".py").replace('/', "."), f, kind)));
         }
     }
     Ok(None)
@@ -559,30 +586,47 @@ fn web_process(
             "no Django, FastAPI, Starlette or Flask dependency was found",
         ));
     }
-    let (module, file) = app_module(repo)?.ok_or_else(|| no_process("no module defining `app` was found"))?;
-    let target = format!("{module}:app");
+    let (module, file, kind) =
+        app_module(repo)?.ok_or_else(|| no_process("no module defining `app` or `create_app()` was found"))?;
+    let factory = kind == AppKind::Factory;
+    // gunicorn calls a factory through `module:create_app()`; uvicorn and granian take `--factory`.
+    let (object, called) = if factory {
+        ("create_app", "create_app()")
+    } else {
+        ("app", "app")
+    };
+    let host_port = |cmd: &mut Vec<String>| cmd.extend(["--host".into(), "0.0.0.0".into(), "--port".into(), p.clone()]);
     let command = match (asgi, has("uvicorn"), has("granian"), has("gunicorn")) {
         (true, true, _, _) => {
+            let mut cmd = vec![bin("uvicorn")];
+            if factory {
+                cmd.push("--factory".into());
+            }
+            cmd.push(format!("{module}:{object}"));
+            host_port(&mut cmd);
+            cmd
+        }
+        (_, _, true, _) => {
+            let mut cmd = vec![
+                bin("granian"),
+                "--interface".into(),
+                if asgi { "asgi" } else { "wsgi" }.into(),
+            ];
+            if factory {
+                cmd.push("--factory".into());
+            }
+            host_port(&mut cmd);
+            cmd.push(format!("{module}:{object}"));
+            cmd
+        }
+        (false, _, _, true) => {
             vec![
-                bin("uvicorn"),
-                target,
-                "--host".into(),
-                "0.0.0.0".into(),
-                "--port".into(),
-                p,
+                bin("gunicorn"),
+                format!("{module}:{called}"),
+                "--bind".into(),
+                format!("0.0.0.0:{p}"),
             ]
         }
-        (_, _, true, _) => vec![
-            bin("granian"),
-            "--interface".into(),
-            if asgi { "asgi" } else { "wsgi" }.into(),
-            "--host".into(),
-            "0.0.0.0".into(),
-            "--port".into(),
-            p,
-            target,
-        ],
-        (false, _, _, true) => vec![bin("gunicorn"), target, "--bind".into(), format!("0.0.0.0:{p}")],
         _ => {
             let servers = if asgi {
                 "uvicorn or granian"
@@ -595,7 +639,7 @@ fn web_process(
     d.push(Decision::detected(
         "process.web",
         command.join(" "),
-        [format!("{file} defines `app`")],
+        [format!("{file} defines `{called}`")],
     ));
     Ok(Web {
         command,

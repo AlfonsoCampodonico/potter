@@ -71,3 +71,19 @@ fn too_new_go_is_unsatisfiable() {
     let e = detect_at(r.path(), &DetectOptions::default()).unwrap_err();
     assert!(e.to_string().contains("available: 1.25, 1.26, 1.27"), "{e}");
 }
+
+#[test]
+fn old_toolchain_falls_back_to_the_go_minimum() {
+    let r = temp_repo(&[
+        ("go.mod", "module x\n\ngo 1.24.0\n\ntoolchain go1.24.4\n"),
+        ("main.go", "package main\n"),
+    ]);
+    let d = detect_at(r.path(), &DetectOptions::default()).unwrap();
+    assert_eq!(decision(&d, "runtime.go").value, "1.27");
+    assert!(
+        decision(&d, "runtime.go")
+            .origin
+            .to_string()
+            .contains("toolchain go1.24.4 isn't in the catalog")
+    );
+}

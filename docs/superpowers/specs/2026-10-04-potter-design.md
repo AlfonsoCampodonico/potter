@@ -21,6 +21,10 @@
     - Candidates are depth-1 directories with a manifest, plus `apps/*` and `services/*`.
     - Each becomes a target named after its path, slugified to `[a-z0-9._-]`. A `target` decision records why.
     - A root that matches a provider stays a single target. Workspace-manifest discovery and `--affected` stay in P6.
+    - Discovery skips hidden directories and tooling or documentation directories (docs, tools, scripts, examples, tests, e2e, fixtures, benchmarks).
+    - Declared `[target.*]` entries merge over discovered ones: the same name inherits the discovered root, and a discovered directory already used as a declared root is dropped. Top-level `discover = false` turns discovery off.
+    - Errors from a discovered target say it was discovered and how to opt out.
+  - **`[target.x.process.web] cmd` also satisfies detection** wherever a provider would otherwise ask for it (no start script, several main packages or binaries, no framework). Go and Rust then name every binary's process after itself.
   - **`[target.x] export` for detected targets:**
     - Entries relative to the target root are copied under the image workdir (Go/Rust: `/out/<p>`); absolute entries are copied as is.
     - It closes the gap where Go/Rust images ship only the binary and miss runtime files such as templates or `data/`.

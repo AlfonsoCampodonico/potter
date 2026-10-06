@@ -91,6 +91,8 @@ impl Provider for NodeProvider {
                 ["package.json scripts.start"],
             ));
             (vec![export("/app", "/app")], pm.run_script("start"))
+        } else if let Some(cmd) = &opts.web_cmd {
+            (vec![export("/app", "/app")], cmd.clone())
         } else {
             return Err(DetectError::NoProcess {
                 provider: ProviderId::Node,

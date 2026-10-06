@@ -91,6 +91,7 @@ pub fn options_for(name: &str, tc: &TargetConfig) -> Result<Mode, ConfigError> {
         node: NodeOptions {
             package_manager: tc.node.package_manager.clone(),
         },
+        web_cmd: tc.process.get("web").map(|p| p.cmd.clone()),
         key_prefix: prefix,
         python: PythonOptions {
             package_manager: tc.python.package_manager.clone(),
