@@ -5,7 +5,10 @@
 
 pub mod catalog;
 mod error;
+mod jsonc;
 pub mod repo;
+pub(crate) mod scan;
 pub mod version;
 
 pub use error::{DetectError, ProviderId};
+pub use repo::{RepoError, RepoView};
