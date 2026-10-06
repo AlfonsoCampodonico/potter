@@ -14,6 +14,11 @@ fn err(input: &str, why: &str) -> ConstraintError {
     ConstraintError(format!("`{input}`: {why}"))
 }
 
+/// One AND-clause of npm range syntax (also used for Poetry constraints).
+pub(crate) fn npm_clause(s: &str) -> Result<VersionSet, ConstraintError> {
+    parse_and(s, s)
+}
+
 fn parse_and(s: &str, input: &str) -> Result<VersionSet, ConstraintError> {
     if s.is_empty() {
         return Ok(VersionSet::any());
