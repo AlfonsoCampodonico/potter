@@ -1,0 +1,214 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"drupal\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "php",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "php",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-gd",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-opcache",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pdo_mysql",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pdo_pgsql",
+              "version": "8.4"
+            },
+            {
+              "name": "composer",
+              "version": "2"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "composer.json",
+              "composer.lock"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "shell": "composer install --no-dev --no-scripts --no-autoloader --prefer-dist --no-interaction --no-progress"
+            },
+            "env": {
+              "COMPOSER_ALLOW_SUPERUSER": "1",
+              "COMPOSER_CACHE_DIR": "/cache/composer"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "composer",
+                "target": "/cache/composer",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "autoload",
+            "command": {
+              "shell": "composer dump-autoload --optimize --no-dev --no-interaction"
+            },
+            "env": {
+              "COMPOSER_ALLOW_SUPERUSER": "1"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "php",
+              "version": "8.4"
+            },
+            {
+              "name": "php-fpm",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-gd",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-opcache",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pdo_mysql",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pdo_pgsql",
+              "version": "8.4"
+            },
+            {
+              "name": "nginx"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": [
+              "node_modules"
+            ]
+          }
+        ],
+        "files": [
+          {
+            "path": "/etc/potter/nginx.conf",
+            "content": "worker_processes auto;\npid /run/nginx.pid;\nerror_log /dev/stderr warn;\ndaemon off;\nuser www-data;\n\nevents {\n    worker_connections 1024;\n}\n\nhttp {\n    include /etc/nginx/mime.types;\n    default_type application/octet-stream;\n    access_log /dev/stdout;\n    server_tokens off;\n    sendfile on;\n    client_max_body_size 100m;\n    gzip on;\n    gzip_types text/plain text/css text/xml application/json application/javascript application/xml image/svg+xml;\n\n    server {\n        listen 8080;\n        root /app/public;\n        index index.php index.html;\n\n        location ~ /\\.(?!well-known) {\n            deny all;\n        }\n\n        location / {\n            try_files $uri $uri/ /index.php?$query_string;\n        }\n\n        location ~ \\.php$ {\n            try_files $uri =404;\n            fastcgi_pass unix:/run/php-fpm.sock;\n            fastcgi_index index.php;\n            include /etc/nginx/fastcgi_params;\n            fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;\n            fastcgi_param DOCUMENT_ROOT $realpath_root;\n        }\n    }\n}\n",
+            "mode": 420
+          },
+          {
+            "path": "/etc/potter/php-fpm.conf",
+            "content": "[global]\nerror_log = /proc/self/fd/2\ndaemonize = no\n\n[www]\nuser = www-data\ngroup = www-data\nlisten = /run/php-fpm.sock\nlisten.owner = www-data\nlisten.group = www-data\nlisten.mode = 0660\npm = dynamic\npm.max_children = ${PHP_FPM_MAX_CHILDREN}\npm.start_servers = 2\npm.min_spare_servers = 1\npm.max_spare_servers = 3\nclear_env = no\ncatch_workers_output = yes\ndecorate_workers_output = no\nphp_admin_value[opcache.validate_timestamps] = 0\n",
+            "mode": 420
+          }
+        ],
+        "config": {
+          "env": {
+            "PHP_FPM_MAX_CHILDREN": "16"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 8080,
+          "stop_signal": "SIGQUIT"
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "nginx",
+              "-c",
+              "/etc/potter/nginx.conf"
+            ],
+            "env": {}
+          }
+        },
+        "services": {
+          "web": [
+            {
+              "name": "php-fpm",
+              "command": [
+                "php-fpm",
+                "--nodaemonize",
+                "--fpm-config",
+                "/etc/potter/php-fpm.conf"
+              ],
+              "ready": {
+                "unix": "/run/php-fpm.sock"
+              },
+              "stop_signal": "SIGQUIT"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = php [detected: composer.json]
+app runtime.php = 8.4 [detected: composer.json require.php = >=8.3 <8.5]
+app runtime.extensions = gd [detected: composer.lock: drupal/core requires ext-gd]
+app runtime.extensions = opcache [detected: drupal/core needs ext-opcache]
+app runtime.extensions = pdo_mysql [detected: drupal/core needs ext-pdo_mysql]
+app runtime.extensions = pdo_pgsql [detected: drupal/core needs ext-pdo_pgsql]
+app php.docroot = public [detected: composer.json extra.drupal-scaffold.locations.web-root = public/]
+app port = 8080 [default]

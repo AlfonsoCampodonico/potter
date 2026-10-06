@@ -1,0 +1,5 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"ambiguous\")"
+---
+error: target `app`: laravel, node all claim the build root; choose one with `provider = "…"` under [target.<name>] in potter.toml, or split the repo into [target.*] entries

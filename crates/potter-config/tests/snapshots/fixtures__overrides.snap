@@ -1,0 +1,372 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"overrides\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "laravel",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "php",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-bcmath",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-imagick",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-intl",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-pcntl",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-pdo_mysql",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-pdo_pgsql",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-redis",
+              "version": "8.3"
+            },
+            {
+              "name": "composer",
+              "version": "2"
+            },
+            {
+              "name": "node",
+              "version": "22"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "apt",
+            "name": "apt-build",
+            "packages": [
+              "libvips-dev"
+            ],
+            "snapshot": "20261001T000000Z"
+          },
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "composer.json",
+              "composer.lock"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "shell": "composer install --no-dev --no-scripts --no-autoloader --prefer-dist --no-interaction --no-progress"
+            },
+            "env": {
+              "COMPOSER_ALLOW_SUPERUSER": "1",
+              "COMPOSER_CACHE_DIR": "/cache/composer"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "composer",
+                "target": "/cache/composer",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "node-deps-inputs",
+            "include": [
+              "package.json",
+              "package-lock.json"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "node-deps",
+            "command": {
+              "argv": [
+                "npm",
+                "ci",
+                "--no-audit",
+                "--no-fund"
+              ]
+            },
+            "env": {
+              "npm_config_cache": "/cache/npm"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "npm",
+                "target": "/cache/npm",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "inputs",
+            "name": "assets-inputs",
+            "include": [
+              "resources/**",
+              "vite.config.js",
+              "package.json"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "assets",
+            "command": {
+              "shell": "npm run build:prod"
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "autoload",
+            "command": {
+              "shell": "composer dump-autoload --optimize --no-dev --no-interaction --no-scripts"
+            },
+            "env": {
+              "COMPOSER_ALLOW_SUPERUSER": "1"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "warm",
+            "command": {
+              "shell": "php artisan icons:cache"
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "user-build-1",
+            "command": {
+              "shell": "php artisan route:list"
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "php",
+              "version": "8.3"
+            },
+            {
+              "name": "php-fpm",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-bcmath",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-imagick",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-intl",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-pcntl",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-pdo_mysql",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-pdo_pgsql",
+              "version": "8.3"
+            },
+            {
+              "name": "php-ext-redis",
+              "version": "8.3"
+            },
+            {
+              "name": "nginx"
+            }
+          ]
+        },
+        "runtime_steps": [
+          {
+            "kind": "apt",
+            "name": "apt-runtime",
+            "packages": [
+              "libvips42"
+            ],
+            "snapshot": "20261001T000000Z"
+          }
+        ],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": [
+              "node_modules"
+            ]
+          }
+        ],
+        "files": [
+          {
+            "path": "/etc/potter/nginx.conf",
+            "content": "worker_processes auto;\npid /run/nginx.pid;\nerror_log /dev/stderr warn;\ndaemon off;\nuser www-data;\n\nevents {\n    worker_connections 1024;\n}\n\nhttp {\n    include /etc/nginx/mime.types;\n    default_type application/octet-stream;\n    access_log /dev/stdout;\n    server_tokens off;\n    sendfile on;\n    client_max_body_size 100m;\n    gzip on;\n    gzip_types text/plain text/css text/xml application/json application/javascript application/xml image/svg+xml;\n\n    server {\n        listen 8080;\n        root /app/public;\n        index index.php index.html;\n\n        location ~ /\\.(?!well-known) {\n            deny all;\n        }\n\n        location / {\n            try_files $uri $uri/ /index.php?$query_string;\n        }\n\n        location ~ \\.php$ {\n            try_files $uri =404;\n            fastcgi_pass unix:/run/php-fpm.sock;\n            fastcgi_index index.php;\n            include /etc/nginx/fastcgi_params;\n            fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;\n            fastcgi_param DOCUMENT_ROOT $realpath_root;\n        }\n    }\n}\n",
+            "mode": 420
+          },
+          {
+            "path": "/etc/potter/php-fpm.conf",
+            "content": "[global]\nerror_log = /proc/self/fd/2\ndaemonize = no\n\n[www]\nuser = www-data\ngroup = www-data\nlisten = /run/php-fpm.sock\nlisten.owner = www-data\nlisten.group = www-data\nlisten.mode = 0660\npm = dynamic\npm.max_children = ${PHP_FPM_MAX_CHILDREN}\npm.start_servers = 2\npm.min_spare_servers = 1\npm.max_spare_servers = 3\nclear_env = no\ncatch_workers_output = yes\ndecorate_workers_output = no\nphp_admin_value[opcache.validate_timestamps] = 0\n",
+            "mode": 420
+          }
+        ],
+        "config": {
+          "env": {
+            "PHP_FPM_MAX_CHILDREN": "16"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 8080,
+          "stop_signal": "SIGQUIT"
+        },
+        "processes": {
+          "deploy": {
+            "command": [
+              "sh",
+              "-c",
+              "php artisan migrate --force && php artisan config:cache"
+            ],
+            "env": {}
+          },
+          "scheduler": {
+            "command": [
+              "php",
+              "artisan",
+              "schedule:work"
+            ],
+            "env": {}
+          },
+          "web": {
+            "command": [
+              "php",
+              "artisan",
+              "serve",
+              "--host=0.0.0.0",
+              "--port=8080"
+            ],
+            "env": {}
+          },
+          "worker": {
+            "command": [
+              "php",
+              "artisan",
+              "queue:work"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = laravel [detected: composer.json requires laravel/framework; artisan]
+app runtime.php = 8.3 [potter.toml target.app.runtime.php]
+app runtime.extensions = bcmath [detected: Laravel default extension]
+app runtime.extensions = imagick [potter.toml target.app.runtime.extensions]
+app runtime.extensions = intl [detected: Laravel default extension]
+app runtime.extensions = pcntl [detected: Laravel default extension]
+app runtime.extensions = pdo_mysql [detected: Laravel default extension]
+app runtime.extensions = pdo_pgsql [detected: Laravel default extension]
+app runtime.extensions = redis [detected: Laravel default extension]
+app php.docroot = public [detected: public/ exists]
+app port = 8080 [default]
+app node.package_manager = npm [detected: package-lock.json is present]
+app runtime.node = 22 [default]
+app process.worker = php artisan queue:work [detected: Laravel queue worker]
+app steps.assets.command = npm run build:prod [potter.toml target.app.steps.assets.run]
+app steps.assets.inputs = resources/** vite.config.js package.json [potter.toml target.app.steps.assets.inputs]
+app steps.discover = skipped [potter.toml target.app.steps.discover.skip]
+app steps.warm = php artisan icons:cache [potter.toml target.app.steps.warm]
+app process.web = php artisan serve --host=0.0.0.0 --port=8080 [potter.toml target.app.process.web.cmd]
+app steps.user-build-1 = php artisan route:list [potter.toml target.app.build.commands]
+app process.deploy = php artisan migrate --force && php artisan config:cache [potter.toml target.app.deploy.commands]
+app steps.apt-build = libvips-dev [potter.toml apt.build]
+app runtime_steps.apt-runtime = libvips42 [potter.toml apt.runtime]

@@ -1,0 +1,5 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"monorepo-root\")"
+---
+error: target `app`: no provider recognises the build root; found manifests in backend/, frontend/. Declare each as a target in potter.toml, e.g. [target.backend] root = "backend"

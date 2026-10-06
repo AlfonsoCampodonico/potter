@@ -1,0 +1,162 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"monorepo-targets\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "frontend",
+      "root": "frontend",
+      "provider": "node",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "node",
+              "version": "22"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "package.json",
+              "package-lock.json"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "argv": [
+                "npm",
+                "ci",
+                "--no-audit",
+                "--no-fund"
+              ]
+            },
+            "env": {
+              "npm_config_cache": "/cache/npm"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "npm",
+                "target": "/cache/npm",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "build",
+            "command": {
+              "argv": [
+                "npm",
+                "run",
+                "build"
+              ]
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "prune",
+            "command": {
+              "argv": [
+                "npm",
+                "prune",
+                "--omit=dev"
+              ]
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "node",
+              "version": "22"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "NODE_ENV": "production",
+            "PORT": "3000"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 3000
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "npm",
+              "run",
+              "start"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+frontend provider = node [detected: package.json]
+frontend node.package_manager = npm [detected: package-lock.json is present]
+frontend runtime.node = 22 [default]
+frontend port = 3000 [default]
+frontend process.web = start script [detected: package.json scripts.start]

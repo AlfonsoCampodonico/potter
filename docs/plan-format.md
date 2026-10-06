@@ -1,0 +1,57 @@
+# potter plan format (`potter.plan/v1`)
+
+A plan is what `potter plan --json` prints and what later milestones execute. The JSON Schema is
+[`docs/schema/potter.plan.v1.json`](schema/potter.plan.v1.json), generated from the Rust types and
+checked in CI.
+
+## Canonical form and hashing
+
+- Plans are serialised as RFC 8785 (JCS) canonical JSON: object keys are sorted by UTF-16 code
+  units, there is no insignificant whitespace, and strings are escaped as ECMAScript does.
+  Floats are rejected.
+- A node's hash is SHA-256 over its canonical bytes, written `sha256:<hex>`.
+- A step's hash, used for cache keys, ignores its `name` and `timeout_secs`.
+- The plan hash ignores every `timeout_secs`.
+
+## Shape
+
+- `targets[]`: `name`, `root` (relative to the repo), `provider`, `build` (a chain), and `image`.
+- `build.base`, one of:
+  - `{kind: "catalog", layers: [{name, version?}]}`;
+  - `{kind: "oci", reference, digest?}`;
+  - `{kind: "stage", name}`.
+- `build.steps[]`, internally tagged by `kind`:
+  - `inputs` `{name, include[], exclude[], dest, owner}`: a host-built layer of exactly the
+    globbed source files. A step only ever sees the inputs declared by itself and its ancestors.
+  - `run` `{name, command: {argv: […]} | {shell: "…"}, env, workdir, user, network, cache_mounts[], secrets[], timeout_secs?}`.
+  - `copy_from`, `apt` `{name, packages[], snapshot}` and `meta`.
+- `image`:
+  - `base`;
+  - `runtime_steps[]` (apt only);
+  - `export[]` `{path, dest, exclude[]}`, read from the build chain's final state;
+  - `files[]` `{path, content, mode}`;
+  - `config` `{env, workdir, user, labels, port?, stop_signal?}`;
+  - `processes` `{name: {command[], workdir?, env}}`;
+  - `services` `{process: [{name, command[], ready: {unix: path} | {tcp: port} | "none", stop_signal}]}`.
+
+## potter.toml (P1a)
+
+| Key | Meaning |
+|---|---|
+| `[target.<name>]` `root`, `provider`, `port` | Build root (relative); force a provider (`php`, `laravel`, `node`, `bun`, `deno`, `static`, or `none` for an explicit plan); listen port. |
+| `[target.<name>.runtime]` `php`, `node`, `bun`, `deno`, `extensions` | Version lines and extra PHP extensions. Always wins over detection. |
+| `[target.<name>.php]` `nginx_conf`, `fpm_pool`, `octane_server`, `port` | Replace the generated configs (repo-relative files); pick the Octane server; port alias. |
+| `[target.<name>.node]` `package_manager` | `npm`, `pnpm`, `yarn` or `bun`; its lockfile must exist. |
+| `[target.<name>.steps.<step>]` `run`, `inputs`, `skip`, `after`, `network`, `cache` | Override a detected step; with `after`, insert a new one. |
+| `[target.<name>.process.<process>]` `cmd` | Replace a process (drops its services). |
+| `[target.<name>.build]` `commands` | Appended build steps `user-build-<n>`. |
+| `[target.<name>.deploy]` `commands` | A `deploy` process the platform runs once before rollout. |
+| `[target.<name>.base]` `catalog`/`oci`, `run_catalog`/`run_oci`; `[target.<name>]` `export` | Explicit plans only. |
+| `[apt]` `build`, `runtime`, `snapshot` | Debian packages from a pinned snapshot.debian.org date. |
+
+`potter plan --explain` prints where every decision came from: what a detector found (with its
+evidence), a potter.toml key, or a default.
+
+## Exit codes
+
+0 success · 2 usage, config, plan or detection error (including a missing path) · 4 other I/O errors.

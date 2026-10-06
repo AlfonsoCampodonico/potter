@@ -1,0 +1,143 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"vite-static\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "static",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "node",
+              "version": "22"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "package.json",
+              "package-lock.json"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "argv": [
+                "npm",
+                "ci",
+                "--no-audit",
+                "--no-fund"
+              ]
+            },
+            "env": {
+              "npm_config_cache": "/cache/npm"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "npm",
+                "target": "/cache/npm",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "build",
+            "command": {
+              "argv": [
+                "npm",
+                "run",
+                "build"
+              ]
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "static-server"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app/build",
+            "dest": "/srv/www",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {},
+          "workdir": "/srv/www",
+          "user": "root",
+          "labels": {},
+          "port": 8080
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "static-server",
+              "--root",
+              "/srv/www",
+              "--listen",
+              "0.0.0.0:8080"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = static [detected: vite build with no server runtime]
+app static.out_dir = build [detected: vite.config.ts build.outDir]
+app node.package_manager = npm [detected: package-lock.json is present]
+app runtime.node = 22 [default]
+app port = 8080 [default]

@@ -1,0 +1,120 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"deno-serve\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "deno",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "deno",
+              "version": "2"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "deno.json"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "argv": [
+                "deno",
+                "install"
+              ]
+            },
+            "env": {
+              "DENO_DIR": "/app/.deno"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "deno",
+              "version": "2"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "DENO_DIR": "/app/.deno",
+            "PORT": "3000"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 3000
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "deno",
+              "serve",
+              "--port",
+              "3000",
+              "main.ts"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = deno [detected: deno.json]
+app runtime.deno = 2 [default]
+app port = 3000 [default]
+app process.web = main.ts [detected: main.ts exists]

@@ -1,0 +1,162 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"nuxt\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "node",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "node",
+              "version": "22"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "package.json",
+              "package-lock.json"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "argv": [
+                "npm",
+                "ci",
+                "--no-audit",
+                "--no-fund"
+              ]
+            },
+            "env": {
+              "npm_config_cache": "/cache/npm"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "npm",
+                "target": "/cache/npm",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "build",
+            "command": {
+              "argv": [
+                "npm",
+                "run",
+                "build"
+              ]
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "prune",
+            "command": {
+              "argv": [
+                "npm",
+                "prune",
+                "--omit=dev"
+              ]
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "node",
+              "version": "22"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app/.output",
+            "dest": "/app/.output",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "HOST": "0.0.0.0",
+            "NODE_ENV": "production",
+            "PORT": "3000"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 3000
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "node",
+              ".output/server/index.mjs"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = node [detected: package.json]
+app node.package_manager = npm [detected: package-lock.json is present]
+app runtime.node = 22 [default]
+app port = 3000 [default]
+app process.web = nuxt [detected: package.json dependencies.nuxt]

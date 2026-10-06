@@ -1,0 +1,103 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"explicit-go\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "api",
+      "root": ".",
+      "provider": "none",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "go",
+              "version": "1.25"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "build",
+            "command": {
+              "shell": "GOMODCACHE=/cache/gomod GOCACHE=/cache/gobuild CGO_ENABLED=0 go build -trimpath -o /out/api ."
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "gomod",
+                "target": "/cache/gomod",
+                "sharing": "exclusive"
+              },
+              {
+                "id": "gobuild",
+                "target": "/cache/gobuild",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/out/api",
+            "dest": "/out/api",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {},
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 8080
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "/out/api"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+api provider = none [potter.toml target.api.provider]
+api steps.build = GOMODCACHE=/cache/gomod GOCACHE=/cache/gobuild CGO_ENABLED=0 go build -trimpath -o /out/api . [potter.toml target.api.steps.build]

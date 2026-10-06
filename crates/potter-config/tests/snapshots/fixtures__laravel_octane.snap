@@ -1,0 +1,243 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"laravel-octane\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "laravel",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "php",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-bcmath",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-intl",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pcntl",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pdo_mysql",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pdo_pgsql",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-redis",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-swoole",
+              "version": "8.4"
+            },
+            {
+              "name": "composer",
+              "version": "2"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "composer.json",
+              "composer.lock"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "shell": "composer install --no-dev --no-scripts --no-autoloader --prefer-dist --no-interaction --no-progress"
+            },
+            "env": {
+              "COMPOSER_ALLOW_SUPERUSER": "1",
+              "COMPOSER_CACHE_DIR": "/cache/composer"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "composer",
+                "target": "/cache/composer",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "autoload",
+            "command": {
+              "shell": "composer dump-autoload --optimize --no-dev --no-interaction --no-scripts"
+            },
+            "env": {
+              "COMPOSER_ALLOW_SUPERUSER": "1"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "discover",
+            "command": {
+              "argv": [
+                "php",
+                "artisan",
+                "package:discover",
+                "--ansi"
+              ]
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "php",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-bcmath",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-intl",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pcntl",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pdo_mysql",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-pdo_pgsql",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-redis",
+              "version": "8.4"
+            },
+            {
+              "name": "php-ext-swoole",
+              "version": "8.4"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": [
+              "node_modules"
+            ]
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {},
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 8080
+        },
+        "processes": {
+          "scheduler": {
+            "command": [
+              "php",
+              "artisan",
+              "schedule:work"
+            ],
+            "env": {}
+          },
+          "web": {
+            "command": [
+              "php",
+              "artisan",
+              "octane:start",
+              "--server=swoole",
+              "--host=0.0.0.0",
+              "--port=8080"
+            ],
+            "env": {}
+          },
+          "worker": {
+            "command": [
+              "php",
+              "artisan",
+              "queue:work"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = laravel [detected: composer.json requires laravel/framework; artisan]
+app runtime.php = 8.4 [detected: composer.json require.php = ^8.3]
+app runtime.extensions = bcmath [detected: Laravel default extension]
+app runtime.extensions = intl [detected: Laravel default extension]
+app runtime.extensions = pcntl [detected: Laravel default extension]
+app runtime.extensions = pdo_mysql [detected: Laravel default extension]
+app runtime.extensions = pdo_pgsql [detected: Laravel default extension]
+app runtime.extensions = redis [detected: Laravel default extension]
+app php.docroot = public [detected: public/ exists]
+app php.octane_server = swoole [detected: config/octane.php OCTANE_SERVER default]
+app runtime.extensions = swoole [detected: Octane server swoole]
+app port = 8080 [default]
+app process.worker = php artisan queue:work [detected: Laravel queue worker]
