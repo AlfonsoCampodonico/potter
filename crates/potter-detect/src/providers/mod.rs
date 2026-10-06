@@ -11,6 +11,7 @@ mod php;
 mod php_config;
 mod python;
 mod ruby;
+mod rust;
 mod static_site;
 
 use potter_plan::{Decision, Target};
@@ -44,6 +45,7 @@ pub fn all() -> Vec<&'static dyn Provider> {
         &python::PythonProvider,
         &ruby::RubyProvider,
         &go::GoProvider,
+        &rust::RustProvider,
     ]
 }
 

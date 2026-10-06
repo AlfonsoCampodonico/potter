@@ -1,0 +1,14 @@
+# Declares the toolchain so CI and the platform builder agree on one
+# compiler instead of each picking their own default. `edition = "2024"` in
+# Cargo.toml needs 1.85 or newer, which any current stable satisfies.
+#
+# This tracks the channel rather than pinning an exact version, to match the
+# platform: its Rust base image floats on upstream `rust:1-slim-bookworm`
+# because Rust has no LTS and code that compiles on stable keeps compiling on
+# later stable. An exact pin also works — rustup honours this file during the
+# build — but it would download a second toolchain on every deploy to sidestep
+# a breakage the edition system already prevents.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

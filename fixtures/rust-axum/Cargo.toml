@@ -1,0 +1,28 @@
+[package]
+name = "axum-hello-world"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A hello-world HTTP API in Rust on axum, built to deploy on a hosting platform."
+repository = "https://github.com/AlfonsoCampodonico/axum-hello-world"
+
+[dependencies]
+axum = "0.8.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+tower = { version = "0.5.3", features = ["util"] }
+
+# The deployed artifact is a single binary that the platform rebuilds on every
+# deploy, so trade build time for a smaller, faster one — a cold build of
+# this dependency tree still finishes in about 15 seconds. `panic` stays at
+# the default `unwind`: with `abort`, a panic in one request handler would
+# take the whole process down instead of dropping that one connection.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
