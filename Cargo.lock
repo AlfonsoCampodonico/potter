@@ -217,6 +217,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "potter-detect"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "potter-plan",
+ "proptest",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "potter-plan"
 version = "0.1.0"
 dependencies = [
