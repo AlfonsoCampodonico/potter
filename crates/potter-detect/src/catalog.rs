@@ -77,6 +77,46 @@ pub static DENO: Runtime = Runtime {
     default: "2",
 };
 
+pub static PYTHON: Runtime = Runtime {
+    name: "python",
+    lines: &[
+        line("3.12", 3, Some(12), false),
+        line("3.13", 3, Some(13), false),
+        line("3.14", 3, Some(14), false),
+    ],
+    default: "3.13",
+};
+
+pub static RUBY: Runtime = Runtime {
+    name: "ruby",
+    lines: &[
+        line("3.3", 3, Some(3), false),
+        line("3.4", 3, Some(4), false),
+        line("4.0", 4, Some(0), false),
+    ],
+    default: "3.4",
+};
+
+pub static GO: Runtime = Runtime {
+    name: "go",
+    lines: &[
+        line("1.25", 1, Some(25), false),
+        line("1.26", 1, Some(26), false),
+        line("1.27", 1, Some(27), false),
+    ],
+    default: "1.27",
+};
+
+pub static RUST: Runtime = Runtime {
+    name: "rust",
+    lines: &[
+        line("1.97", 1, Some(97), false),
+        line("1.98", 1, Some(98), false),
+        line("1.99", 1, Some(99), false),
+    ],
+    default: "1.99",
+};
+
 pub const COMPOSER_VERSION: &str = "2";
 
 /// Where a version requirement came from, for `--explain` and error messages.
@@ -181,6 +221,26 @@ mod tests {
         let mut d = vec![];
         assert_eq!(pick(&NODE, "runtime.node", None, &mut d).unwrap().version, "22");
         assert_eq!(d[0].origin, Origin::Default);
+    }
+
+    #[test]
+    fn p1b_runtimes() {
+        let mut d = vec![];
+        assert_eq!(
+            pick(&GO, "runtime.go", src(parse_npm_range(">=1.26").unwrap()), &mut d)
+                .unwrap()
+                .version,
+            "1.27"
+        );
+        assert_eq!(pick(&RUST, "runtime.rust", None, &mut d).unwrap().version, "1.99");
+        assert_eq!(pick(&PYTHON, "runtime.python", None, &mut d).unwrap().version, "3.13");
+        assert_eq!(pick(&RUBY, "runtime.ruby", None, &mut d).unwrap().version, "3.4");
+        assert_eq!(
+            pick(&RUBY, "runtime.ruby", src(parse_npm_range(">=4").unwrap()), &mut d)
+                .unwrap()
+                .version,
+            "4.0"
+        );
     }
 
     #[test]

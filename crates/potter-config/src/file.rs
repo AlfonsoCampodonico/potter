@@ -11,8 +11,7 @@ use crate::error::ConfigError;
 
 pub const FILE_NAME: &str = "potter.toml";
 pub const MAX_BYTES: u64 = 1024 * 1024;
-/// Debian snapshot used by `Apt` steps unless `[apt] snapshot` is set.
-pub const DEFAULT_APT_SNAPSHOT: &str = "20261001T000000Z";
+pub use potter_plan::DEFAULT_APT_SNAPSHOT;
 
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

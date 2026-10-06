@@ -58,6 +58,8 @@ pub enum RepoError {
     Json { path: String, reason: String },
     #[error("invalid repository path `{0}`")]
     BadPath(String),
+    #[error("{path}: invalid TOML: {reason}")]
+    Toml { path: String, reason: String },
 }
 
 fn io(path: &Path) -> impl FnOnce(std::io::Error) -> RepoError + '_ {
@@ -208,6 +210,18 @@ impl RepoView {
             path: rel.to_string(),
             reason: e.to_string(),
         })
+    }
+
+    pub fn read_toml(&self, rel: &str) -> Result<Option<toml::Value>, RepoError> {
+        let Some(text) = self.read_string(rel, READ_CAP)? else {
+            return Ok(None);
+        };
+        toml::from_str::<toml::Table>(&text)
+            .map(|t| Some(toml::Value::Table(t)))
+            .map_err(|e| RepoError::Toml {
+                path: rel.to_string(),
+                reason: e.to_string(),
+            })
     }
 
     pub fn read_jsonc(&self, rel: &str) -> Result<Option<Value>, RepoError> {
@@ -363,6 +377,20 @@ mod tests {
         for p in ["../x", "/etc/passwd", "a//b", "./composer.json", ""] {
             assert!(matches!(r.read(p), Err(RepoError::BadPath(_))), "{p:?}");
         }
+    }
+
+    #[test]
+    fn reads_toml() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        fs::write(d.path().join("bad.toml"), "[broken").unwrap();
+        let r = RepoView::open(d.path()).unwrap();
+        assert_eq!(
+            r.read_toml("Cargo.toml").unwrap().unwrap()["package"]["name"].as_str(),
+            Some("x")
+        );
+        assert!(r.read_toml("missing.toml").unwrap().is_none());
+        assert!(matches!(r.read_toml("bad.toml"), Err(RepoError::Toml { path, .. }) if path == "bad.toml"));
     }
 
     #[test]

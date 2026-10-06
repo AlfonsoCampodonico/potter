@@ -82,6 +82,7 @@ pub fn options_for(name: &str, tc: &TargetConfig) -> Result<Mode, ConfigError> {
             node: tc.runtime.node.clone(),
             bun: tc.runtime.bun.clone(),
             deno: tc.runtime.deno.clone(),
+            ..Default::default()
         },
         php: PhpOptions {
             octane_server: tc.php.octane_server.clone(),
@@ -92,5 +93,6 @@ pub fn options_for(name: &str, tc: &TargetConfig) -> Result<Mode, ConfigError> {
             package_manager: tc.node.package_manager.clone(),
         },
         key_prefix: prefix,
+        ..Default::default()
     })))
 }

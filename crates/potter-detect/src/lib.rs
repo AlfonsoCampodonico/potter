@@ -14,7 +14,7 @@ pub mod version;
 use potter_plan::Decision;
 
 pub use error::{DetectError, ProviderId};
-pub use options::{DetectOptions, NodeOptions, PhpOptions, RuntimeOverrides};
+pub use options::{DetectOptions, NodeOptions, PhpOptions, PythonOptions, RuntimeOverrides};
 pub use providers::{Detection, Provider};
 pub use repo::{RepoError, RepoView};
 pub use select::{Claim, ClaimKind, select};

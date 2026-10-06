@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 /// The schema identifier every plan carries.
 pub const SCHEMA: &str = "potter.plan/v1";
 
+/// Debian snapshot used by `Apt` steps unless `[apt] snapshot` is set.
+pub const DEFAULT_APT_SNAPSHOT: &str = "20261001T000000Z";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {

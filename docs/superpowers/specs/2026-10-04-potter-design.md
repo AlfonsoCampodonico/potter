@@ -1,7 +1,7 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Approved rev 1.4 (2026-10-05)
+**Status:** Approved rev 1.5 (2026-10-06)
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 
@@ -15,6 +15,31 @@
   - `potter-run` is dropped. kiln-init gains `services`, and nginx + php-fpm run as kiln services (§4, §6.1.1).
   - `NsExecutor` is built on vmkit's generalised `sandbox` and `net` modules instead of its own namespace code (§4, §9.4).
   - kiln's planned native RUN-free Dockerfile backend is cancelled. potter is the only Dockerfile implementation in the project family, and `kiln build --builder potter` becomes `auto`'s first choice (§2, §6.3).
+- **rev 1.5 (2026-10-06):** P1b refinements (implementation level).
+  - **Catalog lines refreshed to current releases (§7):**
+    - python 3.12/3.13/3.14 (default 3.13);
+    - ruby 3.3/3.4/4.0 (default 3.4);
+    - go 1.25/1.26/1.27 (default 1.27);
+    - rust 1.97/1.98/1.99 (default 1.99).
+    - Go 1.24 and Python 3.11 have aged out, and real repos already declare `go 1.26`.
+  - **Default ports:** Python 8000, Ruby 3000, Go and Rust 8080.
+  - **Python:**
+    - Dependencies go into a `/app/.venv` virtualenv that ships in the image; processes call its binaries by absolute path.
+    - `[target.x.python] package_manager` (uv, poetry, pipenv or pip) and `[target.x.python.django] collectstatic`.
+    - `-r`/`-c` includes in requirements files become inputs.
+  - **Ruby:**
+    - Gems install with `BUNDLE_DEPLOYMENT=1` into `/app/vendor/bundle`.
+    - A `ruby-` prefix in `.ruby-version` is accepted.
+    - A `worker` process is added for solid_queue (`bin/jobs`) or sidekiq.
+  - **Go:**
+    - Steps set `GOTOOLCHAIN=local`, so the go command never downloads a toolchain.
+    - The root `package main` binary is named `app`.
+    - With several main packages, `web` is the one named server, api, web or app; otherwise potter asks for `process.web.cmd`. The other mains become processes named after themselves.
+  - **Rust:**
+    - Stub sources are written by the `deps` Run step itself, followed by `cargo clean --release -p <members>` before the real build.
+    - Repo-derived paths and names used in shell commands must match `[A-Za-z0-9._/-]`.
+    - Multi-binary selection follows the Go rule, preferring the root package's binary.
+  - **Detector-added apt steps** are named `apt-detected` and `apt-detected-runtime`, from a small table: psycopg2/pg → libpq, mysqlclient/mysql2 → libmariadb.
 - **rev 1.4 (2026-10-05):** implementation-level refinements found while planning P1a. None changes a user decision.
   - **Catalog refs from P1a.** Detectors emit `Base::Catalog` refs from P1a onwards. Until P3, P2 maps those refs to upstream OCI images, so detectors don't change when the catalog arrives (§15).
   - **IR additions.**
@@ -383,10 +408,10 @@ runtime = ["libvips42"]
   - node 20/22/24
   - bun (current)
   - deno 2.x
-  - python 3.11/3.12/3.13, with uv, poetry and pipenv as tool layers
-  - ruby 3.3/3.4, with bundler
-  - go 1.24/1.25 (build-only)
-  - rust stable (build-only; the latest three toolchain versions, pinned)
+  - python 3.12/3.13/3.14, with uv, poetry and pipenv as tool layers
+  - ruby 3.3/3.4/4.0, with bundler
+  - go 1.25/1.26/1.27 (build-only)
+  - rust stable (build-only; the latest three toolchain versions, pinned: 1.97/1.98/1.99 at rev 1.5)
   - `static-server`
   - all on x86_64 and aarch64
 - **Layer manifest annotations:**

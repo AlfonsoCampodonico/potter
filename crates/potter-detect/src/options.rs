@@ -11,6 +11,7 @@ pub struct DetectOptions {
     pub runtime: RuntimeOverrides,
     pub php: PhpOptions,
     pub node: NodeOptions,
+    pub python: PythonOptions,
     /// The potter.toml key prefix used in decisions and hints, e.g. `target.api`. Empty means `target.app`.
     pub key_prefix: String,
 }
@@ -33,6 +34,10 @@ pub struct RuntimeOverrides {
     pub node: Option<String>,
     pub bun: Option<String>,
     pub deno: Option<String>,
+    pub python: Option<String>,
+    pub ruby: Option<String>,
+    pub go: Option<String>,
+    pub rust: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,4 +50,11 @@ pub struct PhpOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeOptions {
     pub package_manager: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PythonOptions {
+    pub package_manager: Option<String>,
+    /// `[target.x.python.django] collectstatic`; `None` means enabled.
+    pub collectstatic: Option<bool>,
 }

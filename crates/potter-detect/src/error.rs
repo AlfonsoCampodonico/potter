@@ -12,16 +12,24 @@ pub enum ProviderId {
     Bun,
     Deno,
     Static,
+    Python,
+    Ruby,
+    Go,
+    Rust,
 }
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 6] = [
+    pub const ALL: [ProviderId; 10] = [
         ProviderId::Php,
         ProviderId::Laravel,
         ProviderId::Node,
         ProviderId::Bun,
         ProviderId::Deno,
         ProviderId::Static,
+        ProviderId::Python,
+        ProviderId::Ruby,
+        ProviderId::Go,
+        ProviderId::Rust,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -32,6 +40,10 @@ impl ProviderId {
             ProviderId::Bun => "bun",
             ProviderId::Deno => "deno",
             ProviderId::Static => "static",
+            ProviderId::Python => "python",
+            ProviderId::Ruby => "ruby",
+            ProviderId::Go => "go",
+            ProviderId::Rust => "rust",
         }
     }
 
