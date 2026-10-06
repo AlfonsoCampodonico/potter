@@ -9,6 +9,7 @@ pub(crate) mod node;
 mod php;
 mod php_config;
 mod python;
+mod ruby;
 mod static_site;
 
 use potter_plan::{Decision, Target};
@@ -40,6 +41,7 @@ pub fn all() -> Vec<&'static dyn Provider> {
         &deno::DenoProvider,
         &static_site::StaticProvider,
         &python::PythonProvider,
+        &ruby::RubyProvider,
     ]
 }
 
