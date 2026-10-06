@@ -264,3 +264,52 @@ fn new_steps_with_the_same_anchor_keep_file_order() {
         ["deps-inputs", "deps", "first", "second", "source", "autoload"]
     );
 }
+
+#[test]
+fn export_extra_paths_for_detected_targets() {
+    let d = temp(&[
+        ("go.mod", "module x\n\ngo 1.26\n"),
+        ("main.go", "package main\n"),
+        ("data/seed.json", "{}"),
+        ("potter.toml", "[target.app]\nexport = [\"data\", \"/etc/app.conf\"]\n"),
+    ]);
+    let p = plan_repo(d.path(), None).unwrap();
+    let exports: Vec<(&str, &str)> = p.plan.targets[0]
+        .image
+        .export
+        .iter()
+        .map(|e| (e.path.as_str(), e.dest.as_str()))
+        .collect();
+    assert_eq!(
+        exports,
+        [
+            ("/out", "/out"),
+            ("/app/data", "/out/data"),
+            ("/etc/app.conf", "/etc/app.conf")
+        ]
+    );
+    assert!(
+        p.decisions[0]
+            .1
+            .iter()
+            .any(|d| d.field == "export" && d.value == "data")
+    );
+}
+
+#[test]
+fn export_rejects_escapes() {
+    let d = temp(&[
+        ("go.mod", "module x\n\ngo 1.26\n"),
+        ("main.go", "package main\n"),
+        ("potter.toml", "[target.app]\nexport = [\"../x\"]\n"),
+    ]);
+    match plan_repo(d.path(), None) {
+        Err(ConfigError::InTarget { source, .. }) => {
+            assert!(
+                matches!(*source, ConfigError::Invalid { ref key, .. } if key == "target.app.export"),
+                "{source}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+}

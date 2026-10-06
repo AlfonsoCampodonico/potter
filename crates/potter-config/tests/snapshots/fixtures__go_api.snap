@@ -1,0 +1,149 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"go-api\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "go",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "go",
+              "version": "1.27"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "go.mod"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "argv": [
+                "go",
+                "mod",
+                "download"
+              ]
+            },
+            "env": {
+              "GOCACHE": "/cache/gobuild",
+              "GOMODCACHE": "/cache/gomod",
+              "GOTOOLCHAIN": "local"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "gomod",
+                "target": "/cache/gomod",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "build",
+            "command": {
+              "shell": "go build -trimpath -ldflags=\"-s -w\" -o /out/app ."
+            },
+            "env": {
+              "CGO_ENABLED": "0",
+              "GOCACHE": "/cache/gobuild",
+              "GOMODCACHE": "/cache/gomod",
+              "GOTOOLCHAIN": "local"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "gomod",
+                "target": "/cache/gomod",
+                "sharing": "exclusive"
+              },
+              {
+                "id": "gobuild",
+                "target": "/cache/gobuild",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/out",
+            "dest": "/out",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "PORT": "8080"
+          },
+          "workdir": "/out",
+          "user": "root",
+          "labels": {},
+          "port": 8080
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "/out/app"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = go [detected: go.mod]
+app runtime.go = 1.27 [detected: go.mod go 1.26 (minimum)]
+app process.web = /out/app [detected: main.go is package main]
+app port = 8080 [default]

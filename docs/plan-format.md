@@ -38,15 +38,17 @@ checked in CI.
 
 | Key | Meaning |
 |---|---|
-| `[target.<name>]` `root`, `provider`, `port` | Build root (relative); force a provider (`php`, `laravel`, `node`, `bun`, `deno`, `static`, or `none` for an explicit plan); listen port. |
-| `[target.<name>.runtime]` `php`, `node`, `bun`, `deno`, `extensions` | Version lines and extra PHP extensions. Always wins over detection. |
+| `[target.<name>]` `root`, `provider`, `port` | Build root (relative); force a provider (`php`, `laravel`, `node`, `bun`, `deno`, `static`, `python`, `ruby`, `go`, `rust`, or `none` for an explicit plan); listen port. |
+| `[target.<name>.runtime]` `php`, `node`, `bun`, `deno`, `python`, `ruby`, `go`, `rust`, `extensions` | Version lines and extra PHP extensions. Always wins over detection. |
 | `[target.<name>.php]` `nginx_conf`, `fpm_pool`, `octane_server`, `port` | Replace the generated configs (repo-relative files); pick the Octane server; port alias. |
 | `[target.<name>.node]` `package_manager` | `npm`, `pnpm`, `yarn` or `bun`; its lockfile must exist. |
+| `[target.<name>.python]` `package_manager`; `[target.<name>.python.django]` `collectstatic` | `uv`, `poetry`, `pipenv` or `pip` (its lockfile must exist); turn Django's `collectstatic` step off. |
 | `[target.<name>.steps.<step>]` `run`, `inputs`, `skip`, `after`, `network`, `cache` | Override a detected step; with `after`, insert a new one. |
 | `[target.<name>.process.<process>]` `cmd` | Replace a process (drops its services). |
 | `[target.<name>.build]` `commands` | Appended build steps `user-build-<n>`. |
 | `[target.<name>.deploy]` `commands` | A `deploy` process the platform runs once before rollout. |
-| `[target.<name>.base]` `catalog`/`oci`, `run_catalog`/`run_oci`; `[target.<name>]` `export` | Explicit plans only. |
+| `[target.<name>]` `export` | Extra paths in the image: relative to the target root (copied under the image workdir, e.g. `/out/data` for Go/Rust) or absolute. Explicit plans default to `/app`. |
+| `[target.<name>.base]` `catalog`/`oci`, `run_catalog`/`run_oci` | Explicit plans only. |
 | `[apt]` `build`, `runtime`, `snapshot` | Debian packages from a pinned snapshot.debian.org date. |
 
 `potter plan --explain` prints where every decision came from: what a detector found (with its

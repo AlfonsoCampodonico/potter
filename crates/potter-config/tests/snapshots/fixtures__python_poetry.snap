@@ -1,0 +1,152 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"python-poetry\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "python",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "python",
+              "version": "3.14"
+            },
+            {
+              "name": "poetry"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "pyproject.toml",
+              "poetry.lock"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "shell": "poetry install --only main --no-root --no-interaction"
+            },
+            "env": {
+              "POETRY_CACHE_DIR": "/cache/poetry",
+              "POETRY_VIRTUALENVS_IN_PROJECT": "true"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "poetry",
+                "target": "/cache/poetry",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "project",
+            "command": {
+              "shell": "poetry install --only main --no-interaction"
+            },
+            "env": {
+              "POETRY_CACHE_DIR": "/cache/poetry",
+              "POETRY_VIRTUALENVS_IN_PROJECT": "true"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "poetry",
+                "target": "/cache/poetry",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "python",
+              "version": "3.14"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "PATH": "/app/.venv/bin:/usr/local/bin:/usr/bin:/bin",
+            "PORT": "8000",
+            "PYTHONUNBUFFERED": "1",
+            "VIRTUAL_ENV": "/app/.venv"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 8000
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "/app/.venv/bin/gunicorn",
+              "wsgi:app",
+              "--bind",
+              "0.0.0.0:8000"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = python [detected: pyproject.toml]
+app python.package_manager = poetry [detected: poetry.lock is present]
+app runtime.python = 3.14 [detected: pyproject.toml tool.poetry.dependencies.python = ^3.11]
+app port = 8000 [default]
+app process.web = /app/.venv/bin/gunicorn wsgi:app --bind 0.0.0.0:8000 [detected: wsgi.py defines `app`]

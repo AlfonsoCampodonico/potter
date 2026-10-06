@@ -93,7 +93,6 @@ fn options_mapping_and_validation() {
         ("[target.app]\nprovider = \"cobol\"\n", "target.app.provider"),
         ("[target.app]\nport = 0\n", "target.app.port"),
         ("[target.app.base]\ncatalog = [\"os-min\"]\n", "target.app.base"),
-        ("[target.app]\nexport = [\"/out\"]\n", "target.app.export"),
         ("[target.app]\nroot = \"../x\"\n", "target.app.root"),
         ("[target.App]\n", "target.App"),
         ("[target.app.steps.Bad]\nrun = \"x\"\n", "target.app.steps.Bad"),
@@ -113,4 +112,22 @@ fn potter_toml_must_be_a_regular_file() {
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir(d.path().join("potter.toml")).unwrap();
     assert!(matches!(load(d.path()), Err(ConfigError::Invalid { .. })));
+}
+
+#[test]
+fn p1b_keys_map_into_detect_options() {
+    let cfg = parse(
+        "[target.app.runtime]\npython = \"3.12\"\nruby = \"3.4\"\ngo = \"1.26\"\nrust = \"1.98\"\n\
+         [target.app.python]\npackage_manager = \"uv\"\n[target.app.python.django]\ncollectstatic = false\n",
+    )
+    .unwrap();
+    let Mode::Detect(o) = options_for("app", &cfg.target["app"]).unwrap() else {
+        panic!()
+    };
+    assert_eq!(o.runtime.python.as_deref(), Some("3.12"));
+    assert_eq!(o.runtime.ruby.as_deref(), Some("3.4"));
+    assert_eq!(o.runtime.go.as_deref(), Some("1.26"));
+    assert_eq!(o.runtime.rust.as_deref(), Some("1.98"));
+    assert_eq!(o.python.package_manager.as_deref(), Some("uv"));
+    assert_eq!(o.python.collectstatic, Some(false));
 }

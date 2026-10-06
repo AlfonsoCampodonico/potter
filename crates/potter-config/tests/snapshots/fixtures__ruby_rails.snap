@@ -1,0 +1,181 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"ruby-rails\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "ruby",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "ruby",
+              "version": "3.3"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "Gemfile",
+              "Gemfile.lock"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "argv": [
+                "bundle",
+                "install"
+              ]
+            },
+            "env": {
+              "BUNDLE_DEPLOYMENT": "1",
+              "BUNDLE_PATH": "/app/vendor/bundle",
+              "BUNDLE_USER_CACHE": "/cache/bundler",
+              "BUNDLE_WITHOUT": "development:test"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "bundler",
+                "target": "/cache/bundler",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "bootsnap",
+            "command": {
+              "argv": [
+                "bundle",
+                "exec",
+                "bootsnap",
+                "precompile",
+                "app/",
+                "lib/"
+              ]
+            },
+            "env": {
+              "BUNDLE_DEPLOYMENT": "1",
+              "BUNDLE_PATH": "/app/vendor/bundle",
+              "BUNDLE_WITHOUT": "development:test"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "assets",
+            "command": {
+              "argv": [
+                "bin/rails",
+                "assets:precompile"
+              ]
+            },
+            "env": {
+              "BUNDLE_DEPLOYMENT": "1",
+              "BUNDLE_PATH": "/app/vendor/bundle",
+              "BUNDLE_WITHOUT": "development:test",
+              "RAILS_ENV": "production",
+              "SECRET_KEY_BASE_DUMMY": "1"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "ruby",
+              "version": "3.3"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": [
+              "node_modules"
+            ]
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "BUNDLE_DEPLOYMENT": "1",
+            "BUNDLE_PATH": "/app/vendor/bundle",
+            "BUNDLE_WITHOUT": "development:test",
+            "PORT": "3000",
+            "RACK_ENV": "production",
+            "RAILS_ENV": "production"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 3000
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "bin/rails",
+              "server",
+              "-b",
+              "0.0.0.0"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = ruby [detected: Gemfile]
+app runtime.ruby = 3.3 [detected: .ruby-version = ruby-3.3.12]
+app port = 3000 [default]
+app process.web = bin/rails server [detected: Gemfile.lock includes rails]

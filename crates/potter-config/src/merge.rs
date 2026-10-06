@@ -1,6 +1,6 @@
 //! Applying potter.toml overrides onto detector output (spec §6.2, §18).
 
-use potter_plan::{CacheMount, Command, Decision, Process, Sharing, Step, Target, is_name};
+use potter_plan::{CacheMount, Command, Decision, Export, Process, Sharing, Step, Target, is_name, is_relative_path};
 
 use crate::error::ConfigError;
 use crate::file::{AptConfig, DEFAULT_APT_SNAPSHOT, StepConfig, TargetConfig};
@@ -64,6 +64,7 @@ pub fn apply(
     apply_processes(target, &prefix, tc, decisions)?;
     apply_commands(target, &prefix, tc, decisions);
     apply_apt(target, apt, decisions);
+    apply_exports(target, &prefix, tc, decisions)?;
     Ok(())
 }
 
@@ -276,4 +277,42 @@ pub(crate) fn apply_apt(target: &mut Target, apt: &AptConfig, decisions: &mut Ve
             "apt.runtime",
         ));
     }
+}
+
+/// One `export` entry: relative paths come from the build's `/app` and land under the image workdir.
+pub(crate) fn export_entry(entry: &str, workdir: &str, key: &str) -> Result<Export, ConfigError> {
+    if entry.starts_with('/') {
+        return Ok(Export {
+            path: entry.into(),
+            dest: entry.into(),
+            exclude: vec![],
+        });
+    }
+    if entry == "." || !is_relative_path(entry) {
+        return Err(ConfigError::invalid(
+            key,
+            format!("`{entry}` must be a path inside the target root or an absolute path"),
+        ));
+    }
+    let base = workdir.trim_end_matches('/');
+    Ok(Export {
+        path: format!("/app/{entry}"),
+        dest: format!("{base}/{entry}"),
+        exclude: vec![],
+    })
+}
+
+fn apply_exports(
+    target: &mut Target,
+    prefix: &str,
+    tc: &TargetConfig,
+    decisions: &mut Vec<Decision>,
+) -> Result<(), ConfigError> {
+    let key = format!("{prefix}.export");
+    for entry in tc.export.iter().flatten() {
+        let export = export_entry(entry, &target.image.config.workdir, &key)?;
+        target.image.export.push(export);
+        decisions.push(Decision::config("export", entry.as_str(), key.clone()));
+    }
+    Ok(())
 }

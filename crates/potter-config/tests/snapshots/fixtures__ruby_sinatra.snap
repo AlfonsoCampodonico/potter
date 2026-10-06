@@ -1,0 +1,164 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"ruby-sinatra\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "ruby",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "ruby",
+              "version": "3.3"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "apt",
+            "name": "apt-detected",
+            "packages": [
+              "libpq-dev"
+            ],
+            "snapshot": "20261001T000000Z"
+          },
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "Gemfile",
+              "Gemfile.lock"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "argv": [
+                "bundle",
+                "install"
+              ]
+            },
+            "env": {
+              "BUNDLE_DEPLOYMENT": "1",
+              "BUNDLE_PATH": "/app/vendor/bundle",
+              "BUNDLE_USER_CACHE": "/cache/bundler",
+              "BUNDLE_WITHOUT": "development:test"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "bundler",
+                "target": "/cache/bundler",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "ruby",
+              "version": "3.3"
+            }
+          ]
+        },
+        "runtime_steps": [
+          {
+            "kind": "apt",
+            "name": "apt-detected-runtime",
+            "packages": [
+              "libpq5"
+            ],
+            "snapshot": "20261001T000000Z"
+          }
+        ],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": [
+              "node_modules"
+            ]
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "BUNDLE_DEPLOYMENT": "1",
+            "BUNDLE_PATH": "/app/vendor/bundle",
+            "BUNDLE_WITHOUT": "development:test",
+            "PORT": "3000",
+            "RACK_ENV": "production"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 3000
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "bundle",
+              "exec",
+              "rackup",
+              "-o",
+              "0.0.0.0",
+              "-p",
+              "3000"
+            ],
+            "env": {}
+          },
+          "worker": {
+            "command": [
+              "bundle",
+              "exec",
+              "sidekiq"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = ruby [detected: Gemfile]
+app runtime.ruby = 3.3 [detected: Gemfile.lock RUBY VERSION = 3.3.6p108]
+app apt.build = libpq-dev [detected: gems that need system libraries]
+app port = 3000 [default]
+app process.web = rackup [detected: config.ru exists]
+app process.worker = bundle exec sidekiq [detected: Gemfile.lock includes sidekiq]

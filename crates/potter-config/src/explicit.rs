@@ -7,7 +7,7 @@ use potter_plan::{Base, CatalogRef, Chain, Command, Decision, Export, Image, Ima
 
 use crate::error::ConfigError;
 use crate::file::{AptConfig, TargetConfig};
-use crate::merge::{apply_apt, apply_commands, inputs_step, run_step};
+use crate::merge::{apply_apt, apply_commands, export_entry, inputs_step, run_step};
 
 fn parse_ref(s: &str) -> CatalogRef {
     match s.split_once('@') {
@@ -93,7 +93,18 @@ pub fn explicit_target(
             },
         );
     }
-    let export = tc.export.clone().unwrap_or_else(|| vec!["/app".into()]);
+    let export_key = format!("{prefix}.export");
+    let export = match &tc.export {
+        Some(list) => list
+            .iter()
+            .map(|e| export_entry(e, "/app", &export_key))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => vec![Export {
+            path: "/app".into(),
+            dest: "/app".into(),
+            exclude: vec![],
+        }],
+    };
     let mut config = ImageConfig::new("/app", "root");
     config.port = tc.port;
     let mut target = Target {
@@ -108,14 +119,7 @@ pub fn explicit_target(
         image: Image {
             base: run_base,
             runtime_steps: vec![],
-            export: export
-                .iter()
-                .map(|p| Export {
-                    path: p.clone(),
-                    dest: p.clone(),
-                    exclude: vec![],
-                })
-                .collect(),
+            export,
             files: vec![],
             config,
             processes,

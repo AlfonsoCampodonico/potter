@@ -35,6 +35,8 @@ pub struct TargetConfig {
     #[serde(default)]
     pub node: NodeConfig,
     #[serde(default)]
+    pub python: PythonConfig,
+    #[serde(default)]
     pub steps: IndexMap<String, StepConfig>,
     #[serde(default)]
     pub process: IndexMap<String, ProcessConfig>,
@@ -44,7 +46,9 @@ pub struct TargetConfig {
     pub deploy: CommandsConfig,
     /// Explicit plans only (`provider = "none"`).
     pub base: Option<BaseConfig>,
-    /// Explicit plans only: absolute paths exported into the image. Defaults to `/app`.
+    /// Extra paths exported into the image: relative to the target root (landing under the image
+    /// workdir) or absolute. Explicit plans default to `/app`; detected targets append to the
+    /// detector's exports.
     pub export: Option<Vec<String>>,
 }
 
@@ -57,6 +61,10 @@ pub struct RuntimeConfig {
     pub node: Option<String>,
     pub bun: Option<String>,
     pub deno: Option<String>,
+    pub python: Option<String>,
+    pub ruby: Option<String>,
+    pub go: Option<String>,
+    pub rust: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -67,6 +75,20 @@ pub struct PhpConfig {
     pub octane_server: Option<String>,
     /// Alias for `[target.x] port`.
     pub port: Option<u16>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonConfig {
+    pub package_manager: Option<String>,
+    #[serde(default)]
+    pub django: DjangoConfig,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DjangoConfig {
+    pub collectstatic: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

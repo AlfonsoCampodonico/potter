@@ -1,0 +1,155 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"rust-workspace\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "rust",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "rust",
+              "version": "1.99"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "Cargo.toml",
+              "Cargo.lock",
+              "crates/api/Cargo.toml",
+              "crates/core/Cargo.toml",
+              "crates/worker/Cargo.toml"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "shell": "mkdir -p crates/api/src && printf '%s\\n' 'fn main() {}' > crates/api/src/main.rs && mkdir -p crates/core/src && printf '%s\\n' '' > crates/core/src/lib.rs && mkdir -p crates/core && printf '%s\\n' 'fn main() {}' > crates/core/build.rs && mkdir -p crates/worker/src && printf '%s\\n' 'fn main() {}' > crates/worker/src/main.rs && cargo build --release --locked"
+            },
+            "env": {
+              "CARGO_HOME": "/cargo"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "cargo-registry",
+                "target": "/cargo/registry",
+                "sharing": "exclusive"
+              },
+              {
+                "id": "cargo-git",
+                "target": "/cargo/git",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "build",
+            "command": {
+              "shell": "cargo clean --release -p api -p core -p worker && cargo build --release --locked && mkdir -p /out && cp target/release/api target/release/worker /out/"
+            },
+            "env": {
+              "CARGO_HOME": "/cargo"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "cargo-registry",
+                "target": "/cargo/registry",
+                "sharing": "exclusive"
+              },
+              {
+                "id": "cargo-git",
+                "target": "/cargo/git",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/out",
+            "dest": "/out",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "PORT": "8080"
+          },
+          "workdir": "/out",
+          "user": "root",
+          "labels": {},
+          "port": 8080
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "/out/api"
+            ],
+            "env": {}
+          },
+          "worker": {
+            "command": [
+              "/out/worker"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = rust [detected: Cargo.toml]
+app runtime.rust = 1.99 [default]
+app process.web = /out/api [detected: binary target api]
+app port = 8080 [default]

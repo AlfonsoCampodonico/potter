@@ -1,0 +1,127 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"python-fastapi\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "python",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "python",
+              "version": "3.13"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "requirements.txt"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "shell": "python -m venv /app/.venv && /app/.venv/bin/pip install --no-input -r requirements.txt"
+            },
+            "env": {
+              "PIP_CACHE_DIR": "/cache/pip"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "pip",
+                "target": "/cache/pip",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "python",
+              "version": "3.13"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/app",
+            "dest": "/app",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "PATH": "/app/.venv/bin:/usr/local/bin:/usr/bin:/bin",
+            "PORT": "8000",
+            "PYTHONUNBUFFERED": "1",
+            "VIRTUAL_ENV": "/app/.venv"
+          },
+          "workdir": "/app",
+          "user": "root",
+          "labels": {},
+          "port": 8000
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "/app/.venv/bin/uvicorn",
+              "main:app",
+              "--host",
+              "0.0.0.0",
+              "--port",
+              "8000"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = python [detected: requirements.txt]
+app python.package_manager = pip [detected: requirements.txt is present]
+app runtime.python = 3.13 [default]
+app port = 8000 [default]
+app process.web = /app/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 [detected: main.py defines `app`]

@@ -1906,3 +1906,38 @@ fn pick_web(bins: &[&(String, String)], root_package: Option<&str>, opts: &Detec
 - [ ] **Step 2:** Implement the config keys. Generate snapshots with `INSTA_UPDATE=always`, then review each new snapshot's summary against spec §6.1.
 - [ ] **Step 3: Run** `cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --all`. Expected: everything passes.
 - [ ] **Step 4: Commit** `feat: P1b config keys, snapshots and docs`.
+
+---
+
+## Plan amendment (2026-10-06, at the user's request)
+
+### Task 7 addition: `export` for detected targets
+
+Go and Rust images ship only `/out`, so apps that read repo files at runtime (templates, `data/`) need a way to include them.
+
+- `[target.x] export = [...]` is now allowed for **every** target, not only `provider = "none"`.
+- **Relative entry** `p` (to the target root): `Export { path: "/app/<p>", dest: "<image workdir>/<p>" }`. Go and Rust run in `/out`, so `data` lands at `/out/data` and relative reads keep working.
+- **Absolute entry** `p`: `Export { path: p, dest: p }`.
+- **Detected targets:** entries are appended to the detector's exports. **Explicit plans:** the list replaces the default `/app`.
+- Each entry is recorded as a decision (`export`, origin `potter.toml target.x.export`).
+- Tests (in `crates/potter-config/tests/merge.rs`):
+  - `export_extra_paths_for_detected_targets`: a Go repo with `export = ["data"]` gains `/app/data → /out/data`.
+  - `export_rejects_escapes`: `"../x"` → `Invalid` with key `target.x.export`.
+
+### Task 8: zero-config monorepo targets
+
+When potter.toml declares no `[target.*]`, the root matches no provider, and directories below it do, each such directory becomes a target automatically.
+
+- **Candidates:** depth-1 directories with a manifest (`RepoView::manifest_dirs`), plus depth-2 directories under `apps/` and `services/` (`RepoView::manifest_dirs_under`).
+- **Names:** the directory path with `/` replaced by `-`, lower-cased, with characters outside `[a-z0-9._-]` mapped to `-` and the result truncated to 64. Collisions get `-2`, `-3`, …
+- **Decision:** each discovered target gets `target = <name>` (detected: `<dir>/ has a manifest and the root has none`).
+- **Unchanged:** a root that matches a provider stays a single target. `potter detect` (per directory) is unchanged. Explicit `[target.*]` always wins. Workspace-manifest discovery and `--affected` remain P6.
+- **Fixtures:**
+  - `fixtures/monorepo-root` gains `frontend/package-lock.json` and `backend/main.go`, so both targets plan.
+  - `fixtures/monorepo-targets` adds an explicit `[target.backend] root = "backend"` with `backend/main.go`.
+- **Tests:**
+  - `monorepo_root_hint_and_targets` becomes `monorepo_root_discovers_targets` (two targets, `frontend` (node) and `backend` (go), each with root = its directory);
+  - `apps_and_services_are_discovered` (tempdir with `apps/web` and `services/api`);
+  - `a_root_provider_disables_discovery`;
+  - `discovered_target_failure_names_the_target`.
+- **Spec:** rev 1.6 records the implicit monorepo targets and `export` for detected targets.

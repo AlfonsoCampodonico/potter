@@ -1,6 +1,6 @@
 //! potter.toml → detection options (spec §6.2).
 
-use potter_detect::{DetectOptions, NodeOptions, PhpOptions, ProviderId, RuntimeOverrides};
+use potter_detect::{DetectOptions, NodeOptions, PhpOptions, ProviderId, PythonOptions, RuntimeOverrides};
 use potter_plan::{is_name, is_relative_path};
 
 use crate::error::ConfigError;
@@ -56,7 +56,9 @@ pub fn options_for(name: &str, tc: &TargetConfig) -> Result<Mode, ConfigError> {
         Some(p) => Some(ProviderId::parse(p).ok_or_else(|| {
             ConfigError::invalid(
                 format!("{prefix}.provider"),
-                format!("unknown provider `{p}` (php, laravel, node, bun, deno, static or none)"),
+                format!(
+                    "unknown provider `{p}` (php, laravel, node, bun, deno, static, python, ruby, go, rust or none)"
+                ),
             )
         })?),
         None => None,
@@ -64,12 +66,6 @@ pub fn options_for(name: &str, tc: &TargetConfig) -> Result<Mode, ConfigError> {
     if tc.base.is_some() {
         return Err(ConfigError::invalid(
             format!("{prefix}.base"),
-            "only used with provider = \"none\"",
-        ));
-    }
-    if tc.export.is_some() {
-        return Err(ConfigError::invalid(
-            format!("{prefix}.export"),
             "only used with provider = \"none\"",
         ));
     }
@@ -82,7 +78,10 @@ pub fn options_for(name: &str, tc: &TargetConfig) -> Result<Mode, ConfigError> {
             node: tc.runtime.node.clone(),
             bun: tc.runtime.bun.clone(),
             deno: tc.runtime.deno.clone(),
-            ..Default::default()
+            python: tc.runtime.python.clone(),
+            ruby: tc.runtime.ruby.clone(),
+            go: tc.runtime.go.clone(),
+            rust: tc.runtime.rust.clone(),
         },
         php: PhpOptions {
             octane_server: tc.php.octane_server.clone(),
@@ -93,6 +92,9 @@ pub fn options_for(name: &str, tc: &TargetConfig) -> Result<Mode, ConfigError> {
             package_manager: tc.node.package_manager.clone(),
         },
         key_prefix: prefix,
-        ..Default::default()
+        python: PythonOptions {
+            package_manager: tc.python.package_manager.clone(),
+            collectstatic: tc.python.django.collectstatic,
+        },
     })))
 }

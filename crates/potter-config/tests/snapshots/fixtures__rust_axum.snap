@@ -1,0 +1,147 @@
+---
+source: crates/potter-config/tests/fixtures.rs
+expression: "render(\"rust-axum\")"
+---
+{
+  "schema": "potter.plan/v1",
+  "targets": [
+    {
+      "name": "app",
+      "root": ".",
+      "provider": "rust",
+      "build": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            },
+            {
+              "name": "rust",
+              "version": "1.99"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "kind": "inputs",
+            "name": "deps-inputs",
+            "include": [
+              "Cargo.toml",
+              "Cargo.lock",
+              "rust-toolchain.toml"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "deps",
+            "command": {
+              "shell": "mkdir -p src && printf '%s\\n' 'fn main() {}' > src/main.rs && mkdir -p src && printf '%s\\n' '' > src/lib.rs && cargo build --release --locked"
+            },
+            "env": {
+              "CARGO_HOME": "/cargo"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "cargo-registry",
+                "target": "/cargo/registry",
+                "sharing": "exclusive"
+              },
+              {
+                "id": "cargo-git",
+                "target": "/cargo/git",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "source",
+            "include": [
+              "**"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "build",
+            "command": {
+              "shell": "cargo clean --release -p axum-hello-world && cargo build --release --locked && mkdir -p /out && cp target/release/axum-hello-world /out/"
+            },
+            "env": {
+              "CARGO_HOME": "/cargo"
+            },
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [
+              {
+                "id": "cargo-registry",
+                "target": "/cargo/registry",
+                "sharing": "exclusive"
+              },
+              {
+                "id": "cargo-git",
+                "target": "/cargo/git",
+                "sharing": "exclusive"
+              }
+            ],
+            "secrets": []
+          }
+        ]
+      },
+      "image": {
+        "base": {
+          "kind": "catalog",
+          "layers": [
+            {
+              "name": "os-min"
+            }
+          ]
+        },
+        "runtime_steps": [],
+        "export": [
+          {
+            "path": "/out",
+            "dest": "/out",
+            "exclude": []
+          }
+        ],
+        "files": [],
+        "config": {
+          "env": {
+            "PORT": "8080"
+          },
+          "workdir": "/out",
+          "user": "root",
+          "labels": {},
+          "port": 8080
+        },
+        "processes": {
+          "web": {
+            "command": [
+              "/out/axum-hello-world"
+            ],
+            "env": {}
+          }
+        },
+        "services": {}
+      }
+    }
+  ]
+}
+
+# decisions
+app provider = rust [detected: Cargo.toml]
+app runtime.rust = 1.99 [default]
+app process.web = /out/axum-hello-world [detected: binary target axum-hello-world]
+app port = 8080 [default]
