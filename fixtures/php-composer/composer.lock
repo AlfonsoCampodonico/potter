@@ -1,0 +1,10 @@
+{
+    "packages": [
+        { "name": "monolog/monolog", "version": "3.7.0", "require": { "php": ">=8.1", "ext-json": "*", "psr/log": "^2.0 || ^3.0" } },
+        { "name": "psr/log", "version": "3.0.2", "require": { "php": ">=8.0.0" } }
+    ],
+    "packages-dev": [
+        { "name": "phpunit/phpunit", "version": "11.5.0", "require": { "ext-xdebug": "*" } }
+    ],
+    "platform": { "php": "^8.3", "ext-intl": "*" }
+}

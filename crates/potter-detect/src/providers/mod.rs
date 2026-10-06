@@ -2,6 +2,8 @@
 
 #[allow(dead_code)] // Every helper is used once all providers land (Task 13 removes this).
 pub(crate) mod common;
+mod php;
+mod php_config;
 
 use potter_plan::{Decision, Target};
 
@@ -24,7 +26,7 @@ pub trait Provider: Sync {
 }
 
 pub fn all() -> Vec<&'static dyn Provider> {
-    vec![]
+    vec![&php::PhpProvider]
 }
 
 pub fn get(id: ProviderId) -> Option<&'static dyn Provider> {

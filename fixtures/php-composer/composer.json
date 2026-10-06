@@ -1,0 +1,11 @@
+{
+    "name": "potter/php-composer",
+    "require": {
+        "php": "^8.3",
+        "ext-intl": "*",
+        "monolog/monolog": "^3.0"
+    },
+    "scripts": {
+        "post-install-cmd": ["php -r \"touch('POTTER_EXECUTED');\""]
+    }
+}
