@@ -6,9 +6,32 @@
   - Decisions D1–D4 were confirmed by the user on 2026-10-05: nested virtualization on C8i first; one VM per pod with one container; a 1 GiB default; CNI plus a fixed deny list.
 - `docs/superpowers/ROADMAP.md` is the proposed replacement for `playground/ROADMAP.md` (the three-repo consolidation). It still needs copying over: `cp docs/superpowers/ROADMAP.md ../ROADMAP.md`, run from the potter repo root.
 
+**P1a is implemented** (2026-10-06) on branch `p1a-plan-core`:
+- Plan: `docs/superpowers/plans/2026-10-05-potter-p1a-plan-core.md`. Spec rev 1.4.
+- Four crates: potter-plan, potter-detect, potter-config and the potter CLI.
+- 167 tests, clippy clean. A fresh whole-branch review found 1 Critical and 3 Important issues, all fixed with regression tests.
+
 **Next steps, in order:**
 1. ~~The user reviews the spec.~~ Done; approved.
-2. Run `superpowers:writing-plans` for milestone **P1a** (plan core plus the PHP/Laravel, Node, Bun, Deno and Static detectors). Each milestone in §15 gets its own plan.
+2. ~~P1a plan and implementation.~~ Done. Merging `p1a-plan-core` is the user's call.
+3. Plan **P1b**: the Python, Ruby, Go and Rust detectors.
+
+**Deferred minor findings from the P1a review** (fix in P1b/P2):
+- yarn.lock flavour detection swallows read errors and over-cap files, and should read a bounded prefix.
+- Some user errors exit 4 instead of 2 (a file given as PATH, an unreadable subdirectory).
+- Top-level JSON that isn't an object (composer.json, package.json) should be refused, naming the file.
+- Composer exact and `<=X.Y` constraints resolve to whole lines; P3 must carry the VersionSet so it picks a satisfying patch.
+- The NoProvider hint can suggest invalid TOML for odd directory names.
+- The Static out-dir error points at the wrong key.
+- `port` vs `php.port` conflicts are silent; explicit plans ignore `php.port`, `runtime`, `php` and `node` keys.
+- Invalid names in `runtime.extensions` are dropped silently.
+- `--json` is not terminal-safe; a bun `module`/`main` starting with `-` becomes a flag.
+- A PHP docroot of `.` exposes composer files and `vendor/`; add nginx denies.
+- The composer parser accepts two operators in a row.
+- JS deps inputs omit pnpm `patches/`, `.yarn/patches` and workspace manifests. **P2 must add these.**
+- There is no provider-level test with a composer.lock over 4 MiB.
+- Replacing Laravel's web process still ships the nginx and php-fpm layers and their configs.
+- **P2 must re-check `Target.root` for symlinks** and must not trust the plan.
 
 **Upstream follow-ups this design creates.** Raise each in the owning repo's session. Don't edit kiln or vmkit from a potter session.
 
