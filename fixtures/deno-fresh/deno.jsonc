@@ -1,0 +1,8 @@
+{
+  // Fresh-style tasks
+  "tasks": {
+    "build": "deno run -A dev.ts build",
+    "start": "deno run -A main.ts", // serves on PORT
+  },
+  "imports": { "fresh": "jsr:@fresh/core@^2.0.0" },
+}

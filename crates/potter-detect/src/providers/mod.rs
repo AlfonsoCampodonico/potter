@@ -1,8 +1,10 @@
 //! Language providers (spec §6.1). Each provider adds itself to `all()` in its own task.
 
+pub(crate) mod bun;
 #[allow(dead_code)] // Every helper is used once all providers land (Task 13 removes this).
 pub(crate) mod common;
-#[allow(dead_code)] // Bun and Static use the rest (Tasks 12–13).
+mod deno;
+#[allow(dead_code)] // Static uses the rest (Task 13).
 pub(crate) mod js;
 mod laravel;
 mod node;
@@ -30,7 +32,13 @@ pub trait Provider: Sync {
 }
 
 pub fn all() -> Vec<&'static dyn Provider> {
-    vec![&php::PhpProvider, &laravel::LaravelProvider, &node::NodeProvider]
+    vec![
+        &php::PhpProvider,
+        &laravel::LaravelProvider,
+        &node::NodeProvider,
+        &bun::BunProvider,
+        &deno::DenoProvider,
+    ]
 }
 
 pub fn get(id: ProviderId) -> Option<&'static dyn Provider> {
