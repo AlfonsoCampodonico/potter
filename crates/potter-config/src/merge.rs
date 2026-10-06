@@ -73,6 +73,8 @@ fn apply_steps(
     tc: &TargetConfig,
     decisions: &mut Vec<Decision>,
 ) -> Result<(), ConfigError> {
+    // New steps that share an `after` anchor keep their potter.toml order.
+    let mut last_inserted: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for (step_name, sc) in &tc.steps {
         let key = format!("{prefix}.steps.{step_name}");
         let steps = &mut target.build.steps;
@@ -105,8 +107,11 @@ fn apply_steps(
                         "`skip` only applies to existing steps",
                     ));
                 }
-                let at = position(steps, after)
+                position(steps, after)
                     .ok_or_else(|| ConfigError::invalid(format!("{key}.after"), format!("no step named `{after}`")))?;
+                let anchor = last_inserted.get(after).map_or(after.as_str(), String::as_str);
+                let at = position(steps, anchor).expect("the anchor or a step inserted after it exists");
+                last_inserted.insert(after.clone(), step_name.clone());
                 let mut new = Vec::new();
                 if let Some(inc) = &sc.inputs {
                     new.push(inputs_step(&inputs_name, inc));

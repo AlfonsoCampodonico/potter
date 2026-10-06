@@ -148,31 +148,6 @@ expression: "render(\"overrides\")"
             "owner": "0:0"
           },
           {
-            "kind": "inputs",
-            "name": "assets-inputs",
-            "include": [
-              "resources/**",
-              "vite.config.js",
-              "package.json"
-            ],
-            "exclude": [],
-            "dest": "/app",
-            "owner": "0:0"
-          },
-          {
-            "kind": "run",
-            "name": "assets",
-            "command": {
-              "shell": "npm run build:prod"
-            },
-            "env": {},
-            "workdir": "/app",
-            "user": "root",
-            "network": true,
-            "cache_mounts": [],
-            "secrets": []
-          },
-          {
             "kind": "run",
             "name": "autoload",
             "command": {
@@ -192,6 +167,31 @@ expression: "render(\"overrides\")"
             "name": "warm",
             "command": {
               "shell": "php artisan icons:cache"
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "inputs",
+            "name": "assets-inputs",
+            "include": [
+              "resources/**",
+              "vite.config.js",
+              "package.json"
+            ],
+            "exclude": [],
+            "dest": "/app",
+            "owner": "0:0"
+          },
+          {
+            "kind": "run",
+            "name": "assets",
+            "command": {
+              "shell": "npm run build:prod"
             },
             "env": {},
             "workdir": "/app",

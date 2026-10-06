@@ -18,9 +18,9 @@ fn laravel_with_two_lockfiles_uses_npm() {
             "node-deps-inputs",
             "node-deps",
             "source",
-            "assets",
             "autoload",
-            "discover"
+            "discover",
+            "assets"
         ]
     );
     assert_eq!(command(t, "node-deps"), "npm ci --no-audit --no-fund");

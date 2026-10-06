@@ -65,6 +65,7 @@ fn plan_target(
             "must be a relative path inside the repository",
         ));
     }
+    check_root(root, name, &rel)?;
     let opts = match options::options_for(name, tc)? {
         Mode::Explicit => return explicit::explicit_target(name, &rel, tc, apt),
         Mode::Detect(o) => *o,
@@ -81,4 +82,36 @@ fn plan_target(
     let mut decisions = detection.decisions;
     merge::apply(&mut target, name, tc, apt, &mut decisions)?;
     Ok((target, decisions))
+}
+
+/// A target root must be a real directory inside the repository: every component is checked
+/// without following symlinks, so a repo-controlled `root` can't lead outside it (P8).
+fn check_root(root: &Path, name: &str, rel: &str) -> Result<(), ConfigError> {
+    let key = format!("target.{name}.root");
+    let mut path = root.to_path_buf();
+    for component in rel.split('/').filter(|c| !c.is_empty() && *c != ".") {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(ConfigError::invalid(
+                    key,
+                    format!("`{rel}` passes through a symlink ({component})"),
+                ));
+            }
+            Ok(m) if !m.is_dir() => {
+                return Err(ConfigError::invalid(key, format!("`{rel}` is not a directory")));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ConfigError::invalid(key, format!("`{rel}` does not exist")));
+            }
+            Err(source) => {
+                return Err(ConfigError::Io {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
 }

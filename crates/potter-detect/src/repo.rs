@@ -140,6 +140,10 @@ impl RepoView {
         self.files.contains(rel)
     }
 
+    pub fn is_symlink(&self, rel: &str) -> bool {
+        self.symlinks.contains(rel)
+    }
+
     pub fn is_dir(&self, rel: &str) -> bool {
         self.dirs.contains(rel)
     }

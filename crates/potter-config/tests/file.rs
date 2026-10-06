@@ -106,3 +106,11 @@ fn options_mapping_and_validation() {
         }
     }
 }
+
+#[test]
+fn potter_toml_must_be_a_regular_file() {
+    // A directory and a FIFO take the same path; a FIFO would otherwise block the read forever.
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir(d.path().join("potter.toml")).unwrap();
+    assert!(matches!(load(d.path()), Err(ConfigError::Invalid { .. })));
+}

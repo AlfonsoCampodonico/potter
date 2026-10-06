@@ -232,3 +232,21 @@ fn config_extensions_are_added() {
         "{l:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_manifest_names_the_file() {
+    let outside = temp_repo(&[("composer.json", r#"{"require":{}}"#)]);
+    let r = temp_repo(&[("composer.lock", r#"{"packages":[]}"#)]);
+    std::os::unix::fs::symlink(outside.path().join("composer.json"), r.path().join("composer.json")).unwrap();
+    let e = detect_at(r.path(), &DetectOptions::default()).unwrap_err();
+    assert!(
+        matches!(&e, DetectError::Repo(potter_detect::RepoError::Symlink(p)) if p == "composer.json"),
+        "{e}"
+    );
+    let forced = DetectOptions {
+        provider: Some(potter_detect::ProviderId::Php),
+        ..Default::default()
+    };
+    assert!(matches!(detect_at(r.path(), &forced), Err(DetectError::Repo(_))));
+}

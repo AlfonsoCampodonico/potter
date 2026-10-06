@@ -132,23 +132,6 @@ expression: "render(\"laravel-horizon-pnpm\")"
           },
           {
             "kind": "run",
-            "name": "assets",
-            "command": {
-              "argv": [
-                "pnpm",
-                "run",
-                "build"
-              ]
-            },
-            "env": {},
-            "workdir": "/app",
-            "user": "root",
-            "network": true,
-            "cache_mounts": [],
-            "secrets": []
-          },
-          {
-            "kind": "run",
             "name": "autoload",
             "command": {
               "shell": "composer dump-autoload --optimize --no-dev --no-interaction --no-scripts"
@@ -171,6 +154,23 @@ expression: "render(\"laravel-horizon-pnpm\")"
                 "artisan",
                 "package:discover",
                 "--ansi"
+              ]
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "assets",
+            "command": {
+              "argv": [
+                "pnpm",
+                "run",
+                "build"
               ]
             },
             "env": {},

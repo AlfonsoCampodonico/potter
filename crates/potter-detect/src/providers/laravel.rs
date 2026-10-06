@@ -93,7 +93,8 @@ impl Provider for LaravelProvider {
                 layers.push(assets.runtime);
             }
             insert_after(&mut t.build.steps, "deps", assets.deps);
-            insert_after(&mut t.build.steps, "source", vec![assets.assets]);
+            // After autoload and discovery: Vite plugins such as Wayfinder run artisan during the build.
+            insert_after(&mut t.build.steps, "discover", vec![assets.assets]);
         }
 
         let worker: &[&str] = if horizon {

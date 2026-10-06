@@ -31,17 +31,17 @@ fn overrides_apply_in_order() {
             "node-deps-inputs",
             "node-deps",
             "source",
-            "assets-inputs",
-            "assets",
             "autoload",
             "warm",
+            "assets-inputs",
+            "assets",
             "user-build-1"
         ]
     );
     assert_eq!(cmd(t, "assets"), "npm run build:prod");
     assert_eq!(cmd(t, "warm"), "php artisan icons:cache");
     assert_eq!(cmd(t, "user-build-1"), "php artisan route:list");
-    match &t.build.steps[6] {
+    match &t.build.steps[8] {
         Step::Inputs { include, .. } => assert_eq!(include, &["resources/**", "vite.config.js", "package.json"]),
         other => panic!("{other:?}"),
     }
@@ -208,5 +208,59 @@ fn explicit_plan_needs_a_base_and_a_process() {
             .unwrap_err()
             .to_string()
             .contains("target.x.process")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn target_root_through_a_symlink_is_refused() {
+    let outside = temp(&[
+        ("composer.json", r#"{"require":{}}"#),
+        ("composer.lock", r#"{"packages":[]}"#),
+        ("sub/composer.json", r#"{"require":{}}"#),
+        ("sub/composer.lock", r#"{"packages":[]}"#),
+    ]);
+    for (toml, link) in [
+        ("[target.api]\nroot = \"api\"\n", "api"),
+        ("[target.api]\nroot = \"link/sub\"\n", "link"),
+    ] {
+        let d = temp(&[("potter.toml", toml)]);
+        std::os::unix::fs::symlink(outside.path(), d.path().join(link)).unwrap();
+        match plan_repo(d.path(), None) {
+            Err(ConfigError::InTarget { source, .. }) => match *source {
+                ConfigError::Invalid { key, reason } => {
+                    assert_eq!(key, "target.api.root", "{toml}");
+                    assert!(reason.contains("symlink"), "{reason}");
+                }
+                other => panic!("{toml}: {other}"),
+            },
+            other => panic!("{toml}: expected a refusal, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn missing_target_root_is_a_config_error() {
+    let d = temp(&[("potter.toml", "[target.api]\nroot = \"nope\"\n")]);
+    match plan_repo(d.path(), None) {
+        Err(ConfigError::InTarget { source, .. }) => assert!(matches!(*source, ConfigError::Invalid { .. })),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn new_steps_with_the_same_anchor_keep_file_order() {
+    let d = temp(&[
+        ("composer.json", r#"{"require":{}}"#),
+        ("composer.lock", r#"{"packages":[]}"#),
+        (
+            "potter.toml",
+            "[target.app.steps.first]\nafter = \"deps\"\nrun = \"a\"\n[target.app.steps.second]\nafter = \"deps\"\nrun = \"b\"\n",
+        ),
+    ]);
+    let p = plan_repo(d.path(), None).unwrap();
+    assert_eq!(
+        names(&p.plan.targets[0]),
+        ["deps-inputs", "deps", "first", "second", "source", "autoload"]
     );
 }

@@ -145,23 +145,6 @@ expression: "render(\"laravel\")"
           },
           {
             "kind": "run",
-            "name": "assets",
-            "command": {
-              "argv": [
-                "npm",
-                "run",
-                "build"
-              ]
-            },
-            "env": {},
-            "workdir": "/app",
-            "user": "root",
-            "network": true,
-            "cache_mounts": [],
-            "secrets": []
-          },
-          {
-            "kind": "run",
             "name": "autoload",
             "command": {
               "shell": "composer dump-autoload --optimize --no-dev --no-interaction --no-scripts"
@@ -184,6 +167,23 @@ expression: "render(\"laravel\")"
                 "artisan",
                 "package:discover",
                 "--ansi"
+              ]
+            },
+            "env": {},
+            "workdir": "/app",
+            "user": "root",
+            "network": true,
+            "cache_mounts": [],
+            "secrets": []
+          },
+          {
+            "kind": "run",
+            "name": "assets",
+            "command": {
+              "argv": [
+                "npm",
+                "run",
+                "build"
               ]
             },
             "env": {},

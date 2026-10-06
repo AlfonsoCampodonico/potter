@@ -139,6 +139,10 @@ pub fn load(root: &Path) -> Result<ConfigFile, ConfigError> {
     if meta.file_type().is_symlink() {
         return Err(ConfigError::invalid(FILE_NAME, "must be a regular file, not a symlink"));
     }
+    // A FIFO or device would block or stream forever; only regular files are read.
+    if !meta.is_file() {
+        return Err(ConfigError::invalid(FILE_NAME, "must be a regular file"));
+    }
     if meta.len() > MAX_BYTES {
         return Err(ConfigError::TooLarge(meta.len()));
     }

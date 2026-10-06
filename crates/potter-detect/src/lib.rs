@@ -21,6 +21,7 @@ pub use select::{Claim, ClaimKind, select};
 
 /// Every provider's claim on this build root, in `ProviderId` order.
 pub fn claims(repo: &RepoView, opts: &DetectOptions) -> Result<Vec<Claim>, DetectError> {
+    refuse_symlinked_manifests(repo)?;
     let mut out = Vec::new();
     for p in providers::all() {
         if let Some(c) = p.claim(repo, opts)? {
@@ -35,6 +36,7 @@ pub fn detect(repo: &RepoView, opts: &DetectOptions, target: &str) -> Result<Det
     let (id, decision) = match opts.provider {
         Some(id) => {
             let p = providers::get(id).ok_or(DetectError::ForcedNotApplicable(id))?;
+            refuse_symlinked_manifests(repo)?;
             if p.claim(repo, opts)?.is_none() {
                 return Err(DetectError::ForcedNotApplicable(id));
             }
@@ -55,4 +57,15 @@ pub fn detect(repo: &RepoView, opts: &DetectOptions, target: &str) -> Result<Det
     let mut detection = provider.build(repo, opts, target)?;
     detection.decisions.insert(0, decision);
     Ok(detection)
+}
+
+/// Files whose presence decides which provider applies. A symlink in their place is an error that
+/// names the file, rather than a provider silently not seeing it.
+const ROOT_MANIFESTS: &[&str] = &["composer.json", "package.json", "deno.json", "deno.jsonc", "artisan"];
+
+fn refuse_symlinked_manifests(repo: &RepoView) -> Result<(), DetectError> {
+    match ROOT_MANIFESTS.iter().find(|m| repo.is_symlink(m)) {
+        Some(m) => Err(DetectError::Repo(RepoError::Symlink(m.to_string()))),
+        None => Ok(()),
+    }
 }
