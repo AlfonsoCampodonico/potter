@@ -1,15 +1,14 @@
-//! Language providers (spec §6.1). Each provider adds itself to `all()` in its own task.
+//! Language providers (spec §6.1).
 
 pub(crate) mod bun;
-#[allow(dead_code)] // Every helper is used once all providers land (Task 13 removes this).
 pub(crate) mod common;
 mod deno;
-#[allow(dead_code)] // Static uses the rest (Task 13).
 pub(crate) mod js;
 mod laravel;
-mod node;
+pub(crate) mod node;
 mod php;
 mod php_config;
+mod static_site;
 
 use potter_plan::{Decision, Target};
 
@@ -38,6 +37,7 @@ pub fn all() -> Vec<&'static dyn Provider> {
         &node::NodeProvider,
         &bun::BunProvider,
         &deno::DenoProvider,
+        &static_site::StaticProvider,
     ]
 }
 
