@@ -1,0 +1,719 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Plan",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Target"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "targets"
+  ],
+  "$defs": {
+    "Base": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "catalog"
+            },
+            "layers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CatalogRef"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "layers"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "digest": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "oci"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reference"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stage"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        }
+      ]
+    },
+    "CacheMount": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sharing": {
+          "$ref": "#/$defs/Sharing",
+          "default": "exclusive"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "target"
+      ]
+    },
+    "CatalogRef": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "Chain": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/Base"
+        },
+        "steps": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Step"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "base"
+      ]
+    },
+    "Command": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "argv"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "shell": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "shell"
+          ]
+        }
+      ]
+    },
+    "CopySource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "stage": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "stage"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "target"
+          ]
+        }
+      ]
+    },
+    "Export": {
+      "type": "object",
+      "properties": {
+        "dest": {
+          "type": "string"
+        },
+        "exclude": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "dest"
+      ]
+    },
+    "GeneratedFile": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "content",
+        "mode"
+      ]
+    },
+    "Image": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/Base"
+        },
+        "config": {
+          "$ref": "#/$defs/ImageConfig"
+        },
+        "export": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Export"
+          }
+        },
+        "files": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GeneratedFile"
+          }
+        },
+        "processes": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Process"
+          },
+          "default": {}
+        },
+        "runtime_steps": {
+          "description": "Runtime system packages; only `Step::Apt` is allowed here (checked by `validate`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Step"
+          }
+        },
+        "services": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Service"
+            }
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "base",
+        "config"
+      ]
+    },
+    "ImageConfig": {
+      "type": "object",
+      "properties": {
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "stop_signal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "type": "string"
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "workdir",
+        "user"
+      ]
+    },
+    "Process": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "workdir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ]
+    },
+    "Ready": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "unix": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "unix"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tcp": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "tcp"
+          ]
+        }
+      ]
+    },
+    "SecretRef": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "target"
+      ]
+    },
+    "Service": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "ready": {
+          "$ref": "#/$defs/Ready"
+        },
+        "stop_signal": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "command",
+        "ready",
+        "stop_signal"
+      ]
+    },
+    "Sharing": {
+      "type": "string",
+      "enum": [
+        "exclusive"
+      ]
+    },
+    "Step": {
+      "oneOf": [
+        {
+          "description": "A host-built layer of source files (spec §9.2).",
+          "type": "object",
+          "properties": {
+            "dest": {
+              "type": "string"
+            },
+            "exclude": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "inputs"
+            },
+            "name": {
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "include",
+            "dest",
+            "owner"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cache_mounts": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/CacheMount"
+              }
+            },
+            "command": {
+              "$ref": "#/$defs/Command"
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            },
+            "kind": {
+              "type": "string",
+              "const": "run"
+            },
+            "name": {
+              "type": "string"
+            },
+            "network": {
+              "type": "boolean",
+              "default": true
+            },
+            "secrets": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/SecretRef"
+              }
+            },
+            "timeout_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "user": {
+              "type": "string"
+            },
+            "workdir": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "command",
+            "workdir",
+            "user"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dest": {
+              "type": "string"
+            },
+            "from": {
+              "$ref": "#/$defs/CopySource"
+            },
+            "kind": {
+              "type": "string",
+              "const": "copy_from"
+            },
+            "mode": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "from",
+            "paths",
+            "dest",
+            "owner"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "apt"
+            },
+            "name": {
+              "type": "string"
+            },
+            "packages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "snapshot": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "packages",
+            "snapshot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            },
+            "kind": {
+              "type": "string",
+              "const": "meta"
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            },
+            "name": {
+              "type": "string"
+            },
+            "user": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workdir": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        }
+      ]
+    },
+    "Target": {
+      "type": "object",
+      "properties": {
+        "build": {
+          "$ref": "#/$defs/Chain"
+        },
+        "image": {
+          "$ref": "#/$defs/Image"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platform": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "The provider that produced this target, or \"none\" for an explicit plan.",
+          "type": "string"
+        },
+        "root": {
+          "description": "Relative to the repository root; \".\" is the root itself.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "root",
+        "provider",
+        "build",
+        "image"
+      ]
+    }
+  }
+}
