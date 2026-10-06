@@ -1,0 +1,47 @@
+{
+  "name": "nestjs-hello-world",
+  "version": "1.0.0",
+  "description": "A minimal NestJS service that says hello.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "start:dev": "nest start --watch",
+    "lint": "oxlint src/ test/",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage",
+    "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^12.0.1",
+    "@nestjs/core": "^12.0.1",
+    "@nestjs/platform-express": "^12.0.1",
+    "@nestjs/swagger": "^12.0.1",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^12.0.0",
+    "@nestjs/schematics": "^12.0.0",
+    "@nestjs/testing": "^12.0.1",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.15.0",
+    "@types/supertest": "^7.2.1",
+    "@vitest/coverage-v8": "^4.1.11",
+    "oxlint": "^1.80.0",
+    "prettier": "^3.6.0",
+    "supertest": "^7.2.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "nuxt-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "nuxt build", "dev": "nuxt dev" },
+  "dependencies": { "nuxt": "^3.15.0", "vue": "^3.5.13" }
+}

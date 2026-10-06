@@ -7,7 +7,6 @@ mod jsonc;
 mod options;
 pub mod providers;
 pub mod repo;
-#[allow(dead_code)] // Used from Task 10.
 pub(crate) mod scan;
 mod select;
 pub mod version;
