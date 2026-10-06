@@ -1,0 +1,15 @@
+[target.api]
+provider = "none"
+port = 8080
+export = ["/out/api"]
+
+[target.api.base]
+catalog = ["os-min", "go@1.25"]
+run_catalog = ["os-min"]
+
+[target.api.steps.build]
+run = "GOMODCACHE=/cache/gomod GOCACHE=/cache/gobuild CGO_ENABLED=0 go build -trimpath -o /out/api ."
+cache = ["gomod", "gobuild"]
+
+[target.api.process.web]
+cmd = ["/out/api"]

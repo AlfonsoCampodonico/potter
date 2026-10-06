@@ -1,0 +1,27 @@
+[target.app.runtime]
+php = "8.3"
+extensions = ["imagick"]
+
+[target.app.steps.assets]
+run = "npm run build:prod"
+inputs = ["resources/**", "vite.config.js", "package.json"]
+
+[target.app.steps.discover]
+skip = true
+
+[target.app.steps.warm]
+after = "autoload"
+run = "php artisan icons:cache"
+
+[target.app.process.web]
+cmd = ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8080"]
+
+[target.app.build]
+commands = ["php artisan route:list"]
+
+[target.app.deploy]
+commands = ["php artisan migrate --force", "php artisan config:cache"]
+
+[apt]
+build = ["libvips-dev"]
+runtime = ["libvips42"]
