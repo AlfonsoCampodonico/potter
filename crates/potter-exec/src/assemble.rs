@@ -11,10 +11,9 @@ use kiln_oci::{
     ContainerConfig, Descriptor, ImageConfig, ImageManifest, Platform, ResolvedImage, RootFs, canonical_json,
 };
 use kiln_store::{Digest, Store};
-use potter_plan::{Base, GeneratedFile, Image, Process, Target};
+use potter_plan::{Chain, GeneratedFile, Image, Process, Target};
 
-use crate::base::resolve_base;
-use crate::chain::{BuildCtx, LayerRef, run_chain};
+use crate::chain::{BuildCtx, LayerRef, run_chain, run_steps};
 use crate::error::{BuildError, io};
 use crate::merge::{ExportSpec, export_layer};
 use crate::tarball::{Meta, TarWriter, epoch};
@@ -131,32 +130,23 @@ pub fn build_target(
 ) -> Result<Built, BuildError> {
     let chain = run_chain(ctx, target, repo_root)?;
     let image = &target.image;
-    let run_base = if image.base == target.build.base {
-        chain.base.clone()
-    } else {
-        let Base::Oci { reference, digest } = &image.base else {
-            unreachable!("checked by run_chain")
-        };
-        resolve_base(ctx.store, reference, digest.as_deref(), &ctx.platform, ctx.auth.clone())?
-    };
-    let mut layers: Vec<LayerRef> = if image.export.is_empty() {
-        if image.base != target.build.base {
+    // The image's base: its own chain (the run base and its runtime steps), or with no exports
+    // the build chain itself.
+    let (base_env, mut layers): (BTreeMap<String, String>, Vec<LayerRef>) = if image.export.is_empty() {
+        if image.base != target.build.base || !image.runtime_steps.is_empty() {
             return Err(BuildError::Plan(format!(
-                "target {}: an image with its own base needs `export` paths",
+                "target {}: an image with its own base or runtime steps needs `export` paths",
                 target.name
             )));
         }
-        chain.layers.clone()
+        (chain.base.env(), chain.layers.clone())
     } else {
-        let mut layers: Vec<LayerRef> = run_base
-            .layers()
-            .iter()
-            .zip(run_base.diff_ids())
-            .map(|(d, id)| LayerRef {
-                descriptor: d.clone(),
-                diff_id: id.clone(),
-            })
-            .collect();
+        let run_chain = Chain {
+            base: image.base.clone(),
+            steps: image.runtime_steps.clone(),
+        };
+        let run = run_steps(ctx, &format!("{}:run", target.name), &run_chain, repo_root)?;
+        let mut layers = run.layers.clone();
         let store = ctx.store;
         let open: Vec<crate::merge::LayerOpen> = chain
             .layers
@@ -171,7 +161,7 @@ pub fn build_target(
         };
         let (file, _) = export_layer(&open, &spec, tmp(ctx)?)?;
         layers.push(store_layer(ctx.store, file, "export")?);
-        layers
+        (run.env.clone(), layers)
     };
     if !image.files.is_empty() {
         let file = files_layer(&image.files, tmp(ctx)?)?;
@@ -180,7 +170,7 @@ pub fn build_target(
 
     let config = image_config(
         &ctx.platform,
-        &run_base.env(),
+        &base_env,
         image,
         layers.iter().map(|l| l.diff_id.clone()).collect(),
     );

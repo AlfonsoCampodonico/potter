@@ -9,7 +9,7 @@ use kiln_oci::{Descriptor, Platform, media};
 use kiln_registry::DockerConfig;
 use kiln_store::{Digest, Store};
 use potter_cache::{Entry, ExecutorClass, Index, PotterHome, StepInput, Tenant, base_key, step_key};
-use potter_plan::{Base, Step, Target};
+use potter_plan::{Base, Chain, Step, Target};
 
 use crate::base::{BaseImage, layer_reader, resolve_base};
 use crate::error::{BuildError, io};
@@ -86,11 +86,8 @@ fn unsupported(what: String, milestone: &'static str) -> BuildError {
 
 fn check_base(base: &Base, what: &str) -> Result<(), BuildError> {
     match base {
-        Base::Oci { .. } => Ok(()),
-        Base::Catalog { .. } => Err(unsupported(
-            format!("the catalog base of {what} (set an `oci` base for now)"),
-            "P2b (a stopgap mapping to upstream images) and P3 (the catalog)",
-        )),
+        // Catalog bases are lowered onto upstream images until P3 (stopgap.rs).
+        Base::Oci { .. } | Base::Catalog { .. } => Ok(()),
         Base::Stage { .. } => Err(unsupported(
             format!("the stage base of {what}"),
             "P5 (the Dockerfile frontend)",
@@ -98,19 +95,13 @@ fn check_base(base: &Base, what: &str) -> Result<(), BuildError> {
     }
 }
 
-/// Refuses what P2a cannot build, naming it and the milestone that ships it.
+/// Refuses what potter cannot build yet, naming it and the milestone that ships it.
 pub fn check_supported(target: &Target) -> Result<(), BuildError> {
     let name = &target.name;
     check_base(&target.build.base, &format!("target {name}"))?;
     check_base(&target.image.base, &format!("target {name}'s image"))?;
     for step in &target.build.steps {
         match step {
-            Step::Apt { name: s, .. } => {
-                return Err(unsupported(
-                    format!("the apt step {s} of target {name}"),
-                    "P3 (the catalog)",
-                ));
-            }
             Step::CopyFrom { name: s, .. } => {
                 return Err(unsupported(
                     format!("the copy_from step {s} of target {name}"),
@@ -126,16 +117,10 @@ pub fn check_supported(target: &Target) -> Result<(), BuildError> {
             _ => {}
         }
     }
-    if !target.image.runtime_steps.is_empty() {
-        return Err(unsupported(
-            format!("the runtime_steps of target {name}"),
-            "P3 (the catalog)",
-        ));
-    }
     if !target.image.services.is_empty() {
         return Err(unsupported(
             format!("the services of target {name} (nginx and php-fpm)"),
-            "P2b, once kiln-init starts services",
+            "kiln milestone M3d (kiln-init services)",
         ));
     }
     Ok(())
@@ -188,10 +173,31 @@ fn home_of(passwd: Option<&str>, uid: u64) -> Option<String> {
 /// Runs `target`'s build chain from `repo_root`.
 pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Result<ChainState, BuildError> {
     check_supported(target)?;
-    let Base::Oci { reference, digest } = &target.build.base else {
-        unreachable!("checked above")
+    run_steps(ctx, &target.name, &target.build, &repo_root.join(&target.root))
+}
+
+/// Runs `chain` for the target `tname`, whose sources are under `source_root`. A catalog base
+/// is lowered onto its stopgap image and install steps; `apt` steps become installs.
+pub fn run_steps(ctx: &mut BuildCtx, tname: &str, chain: &Chain, source_root: &Path) -> Result<ChainState, BuildError> {
+    let (reference, digest, prelude) = match &chain.base {
+        Base::Oci { reference, digest } => (reference.clone(), digest.clone(), Vec::new()),
+        Base::Catalog { layers } => {
+            let lowered = crate::stopgap::lower(layers)?;
+            (lowered.reference, None, lowered.steps)
+        }
+        Base::Stage { .. } => check_base(&chain.base, tname).map(|()| unreachable!("stages are refused"))?,
     };
-    let base = resolve_base(ctx.store, reference, digest.as_deref(), &ctx.platform, ctx.auth.clone())?;
+    let steps: Vec<Step> = prelude
+        .into_iter()
+        .chain(chain.steps.iter().map(crate::stopgap::lower_step))
+        .collect();
+    let base = resolve_base(
+        ctx.store,
+        &reference,
+        digest.as_deref(),
+        &ctx.platform,
+        ctx.auth.clone(),
+    )?;
     let mut state = ChainState {
         layers: base
             .layers()
@@ -214,11 +220,11 @@ pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Resul
     let platform = ctx.platform.to_string();
     let mut key = base_key(&state.base.key_digest());
     let mut runs: Vec<PathBuf> = Vec::new();
-    let tname = target.name.clone();
+    let tname = tname.to_string();
     let mut warned = false;
     let warned_cgroups = &mut warned;
     let result = (|| -> Result<(), BuildError> {
-        for step in &target.build.steps {
+        for step in &steps {
             let sname = step.name().to_string();
             match step {
                 Step::Meta { env, workdir, user, .. } => {
@@ -242,7 +248,7 @@ pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Resul
                     std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
                     let file = tempfile::tempfile_in(ctx.home.runs()).map_err(io("creating an inputs layer"))?;
                     let spec = InputsSpec {
-                        root: &repo_root.join(&target.root),
+                        root: source_root,
                         include,
                         exclude,
                         dest,
@@ -528,16 +534,22 @@ mod tests {
     }
 
     #[test]
-    fn what_p2a_does_not_ship_is_refused_by_name() {
-        assert!(check_supported(&target(oci(), vec![run("ok")])).is_ok());
+    fn catalog_bases_apt_steps_and_runtime_steps_are_accepted() {
         let catalog = Base::Catalog {
-            layers: vec![CatalogRef::new("node", Some("22"))],
+            layers: vec![CatalogRef::new("os-min", None), CatalogRef::new("node", Some("22"))],
         };
         let apt = Step::Apt {
             name: "pkgs".into(),
             packages: vec!["curl".into()],
             snapshot: DEFAULT_APT_SNAPSHOT.into(),
         };
+        let mut t = target(catalog, vec![apt.clone(), run("ok")]);
+        t.image.runtime_steps.push(apt);
+        assert!(check_supported(&t).is_ok(), "{:?}", check_supported(&t));
+    }
+
+    #[test]
+    fn what_p2b_does_not_ship_is_refused_by_name() {
         let copy = Step::CopyFrom {
             name: "copy".into(),
             from: CopySource::Target("web".into()),
@@ -563,9 +575,9 @@ mod tests {
                 stop_signal: "SIGQUIT".into(),
             }],
         );
+        let stage = Base::Stage { name: "build".into() };
         let cases = [
-            (target(catalog, vec![]), "catalog"),
-            (target(oci(), vec![apt]), "pkgs"),
+            (target(stage, vec![]), "stage"),
             (target(oci(), vec![copy]), "copy"),
             (target(oci(), vec![secret]), "secret"),
             (services, "services"),
