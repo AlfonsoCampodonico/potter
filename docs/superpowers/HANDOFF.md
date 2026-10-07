@@ -93,3 +93,19 @@
 - **kiln M3b-2:** adds `kiln run --net -p [IP:]HOST:GUEST` (default bind 127.0.0.1). Without a network, resolv.conf gets `nameserver 127.0.0.1`.
 - **kiln spec rev 2.8:** the guest sends `Hello` first. potter §9.3 build mode must follow that order (fix in P4).
 - **kiln M3c:** owns `kiln build --builder potter` dispatch. potter P5 supplies the Dockerfile frontend.
+
+**P2a final review (2026-10-06):** 2 Critical and 7 Important findings, all fixed with regression tests. The Critical ones were seal hardlink order and link-header metadata. The Important ones included export hardlinks, kiln ingest before caching, exclusive cache mounts, stale-run sweeping and unpack caps. CI is green on ubuntu, macOS and the sandbox job.
+
+Deferred:
+- The 2 h build timeout.
+- Bounding a step's upper while it runs.
+- Cache-mount size caps.
+- The merge's in-memory entry map.
+- `SOURCE_DATE_EPOCH` doesn't reach `__seal`.
+- A full miss and a partial hit present different lowers: the sealed upper vs the unpacked layer.
+- `--tag` is checked only after the build.
+- Export isn't cached (§9.6 key).
+- The default tag lacks `:<git-short-sha>`.
+- A concurrent `tenant_key` can be read half-written (unused).
+- Named-user lookups re-read every layer.
+- A step gets no supplementary groups.
