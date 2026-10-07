@@ -1,4 +1,4 @@
-//! potter: build kiln microVM images from source. P1a ships planning only.
+//! potter: build kiln microVM images from source.
 
 mod render;
 
@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use potter_detect::{DetectOptions, RepoError, RepoView};
 use potter_plan::sanitize;
 
@@ -33,6 +33,26 @@ enum Cmd {
         #[arg(long)]
         explain: bool,
     },
+    /// Build images into the kiln store ($KILN_HOME)
+    Build {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Only build these targets (default: all)
+        #[arg(long)]
+        target: Vec<String>,
+        /// Where steps run; required, because the namespace executor isolates less than a VM
+        #[arg(long, value_enum)]
+        executor: Option<Executor>,
+        /// Whose cache this build uses
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Run every step, ignoring the cache
+        #[arg(long)]
+        no_cache: bool,
+        /// Tag the image (default potter/<target>:latest); with several targets, give none
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+    },
     /// Show which providers claim a directory
     Detect {
         #[arg(default_value = ".")]
@@ -56,6 +76,14 @@ enum Cmd {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Executor {
+    /// One microVM per target chain (P4)
+    Vm,
+    /// Rootless Linux namespaces (spec §9.4)
+    Ns,
+}
+
 fn fail(message: &str, code: u8) -> ExitCode {
     eprintln!("error: {}", sanitize(message));
     ExitCode::from(code)
@@ -70,6 +98,14 @@ fn main() -> ExitCode {
             explain,
         } => plan(&path, target.as_deref(), json, explain),
         Cmd::Detect { path } => detect(&path),
+        Cmd::Build {
+            path,
+            target,
+            executor,
+            tenant,
+            no_cache,
+            tags,
+        } => build(&path, &target, executor, &tenant, no_cache, &tags),
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
         Cmd::Seal { upper, out, skip } => helper(potter_exec::seal::seal_to_file(&upper, &out, &skip)),
     }
@@ -84,6 +120,113 @@ fn helper<T>(result: Result<T, potter_exec::BuildError>) -> ExitCode {
         Err(BuildError::OutputTooLarge(e)) => fail(&e, 5),
         Err(e) => fail(&e.to_string(), 4),
     }
+}
+
+fn build(
+    path: &Path,
+    only: &[String],
+    executor: Option<Executor>,
+    tenant: &str,
+    no_cache: bool,
+    tags: &[String],
+) -> ExitCode {
+    use potter_exec::chain::{BuildCtx, Progress, StepState};
+    const VM: &str = "the VM executor ships in milestone P4";
+    match executor {
+        None => {
+            return fail(
+                &format!(
+                    "choose an executor: {VM}; pass --executor ns to build in Linux namespaces, which isolate less than a VM"
+                ),
+                4,
+            );
+        }
+        Some(Executor::Vm) => return fail(&format!("{VM}; pass --executor ns to build in Linux namespaces"), 4),
+        Some(Executor::Ns) => {}
+    }
+    if !cfg!(target_os = "linux") {
+        return fail("the namespace executor needs Linux", 4);
+    }
+    if !tags.is_empty() && only.len() != 1 {
+        return fail("--tag needs exactly one --target", 2);
+    }
+    let planned = match potter_config::plan_repo(path, None) {
+        Ok(p) => p,
+        Err(e) => return fail(&e.to_string(), if e.is_infrastructure() { 4 } else { 2 }),
+    };
+    let targets: Vec<&potter_plan::Target> = planned
+        .plan
+        .targets
+        .iter()
+        .filter(|t| only.is_empty() || only.contains(&t.name))
+        .collect();
+    if let Some(missing) = only
+        .iter()
+        .find(|o| !planned.plan.targets.iter().any(|t| &&t.name == o))
+    {
+        return fail(&format!("no target named {missing:?}"), 2);
+    }
+    let setup = || -> Result<_, String> {
+        let store = kiln_store::Store::open(kiln_store::Store::default_root().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        let home = potter_cache::PotterHome::open(potter_cache::PotterHome::default_root().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        let potter = std::env::current_exe().map_err(|e| format!("finding potter itself: {e}"))?;
+        Ok((store, home, potter))
+    };
+    let (store, home, potter) = match setup() {
+        Ok(s) => s,
+        Err(e) => return fail(&e, 4),
+    };
+    let tenant = match potter_cache::Tenant::new(tenant) {
+        Ok(t) => t,
+        Err(e) => return fail(&e.to_string(), 2),
+    };
+    let index = match home.index(&tenant) {
+        Ok(i) => i,
+        Err(e) => return fail(&e.to_string(), 4),
+    };
+    let sandbox = potter_exec::sandboxed::SandboxCtx {
+        potter,
+        runs: home.runs(),
+    };
+    let mut progress = |p: Progress| match p {
+        Progress::Step { target, step, state } => {
+            let state = match state {
+                StepState::Cached => "cached".to_string(),
+                StepState::Running => "running".to_string(),
+                StepState::Done { secs } => format!("done ({secs:.1}s)"),
+                StepState::Failed => "failed".to_string(),
+            };
+            eprintln!("[{}] {}: {state}", sanitize(&target), sanitize(&step));
+        }
+        // Step output passes through unmodified (spec §11).
+        Progress::Log { target, step, line } => eprintln!("[{target}/{step}] {line}"),
+    };
+    let mut ctx = BuildCtx {
+        store: &store,
+        home: &home,
+        tenant: &tenant,
+        index: &index,
+        sandbox: &sandbox,
+        platform: kiln_oci::Platform::host(),
+        no_cache,
+        auth: kiln_registry::DockerConfig::from_env(),
+        progress: &mut progress,
+    };
+    for t in targets {
+        match potter_exec::assemble::build_target(&mut ctx, t, path, tags) {
+            Ok(b) => println!(
+                "{} {} (executed {}, cached {})",
+                sanitize(&b.reference),
+                b.digest,
+                b.executed,
+                b.cached
+            ),
+            Err(e) => return fail(&e.to_string(), e.exit_code()),
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn plan(path: &Path, target: Option<&str>, json: bool, explain: bool) -> ExitCode {

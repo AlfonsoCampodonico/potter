@@ -126,3 +126,19 @@ fn repo_text_in_errors_is_sanitised() {
     assert!(!err.contains('\u{1b}'), "{err:?}");
     assert!(err.contains("\\u{1b}"), "{err:?}");
 }
+
+#[test]
+fn build_never_picks_the_namespace_executor_by_itself() {
+    potter()
+        .args(["build"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("--executor ns"));
+    potter()
+        .args(["build", "--executor", "vm"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("P4"));
+}
