@@ -79,3 +79,17 @@
 - `export` accepts `/` and `./data`; `/app/../etc` fails later as an anonymous plan error. Normalise, and reject at the key.
 - Discovery can overlap `apps` with `apps/web` when `apps/` has its own manifest.
 - **P3:** exact patch pins (`ruby "3.3.6"`, PEP 440 `==3.12`, `.python-version` `3.12.4` with `UV_PYTHON_DOWNLOADS=never`) need catalog patch resolution. `rust-toolchain.toml` components and profile vs rustup in the catalog layer.
+
+**P2a (2026-10-06):** the build engine, on branch `p2-first-images`. Plan: `docs/superpowers/plans/2026-10-06-potter-p2a-engine.md`.
+- `potter build --executor ns` builds plans with OCI bases into `$KILN_HOME`.
+- It needs vmkit's generalised sandbox: vmkit PR #6, branch `sandbox-exec`, pinned at dbea230. Repin to the merge commit once merged.
+- Next is **P2b**: the stopgap catalog→upstream image mapping for detected targets (PHP extensions, composer, node, nginx), plus `services` once kiln-init starts them.
+
+**From the kiln session (2026-10-06), for P2b and later:**
+- **Omega minimal-API images:**
+  - The app reads `SERVER_HOST`/`SERVER_PORT` (default 127.0.0.1:8000), not `PORT`. The Laravel/Omega detector should set `SERVER_HOST=0.0.0.0` and `SERVER_PORT=<the plan's port>`.
+  - Omega's trusted-hosts check returns 400 unless the Host matches `APP_URL`. A hosting platform sets it; for local `kiln run`, pass `-e APP_URL=...`.
+  - Omega's `/up` skips global middleware and stays 200 while real routes fail. Health checks should hit a real route.
+- **kiln M3b-2:** adds `kiln run --net -p [IP:]HOST:GUEST` (default bind 127.0.0.1). Without a network, resolv.conf gets `nameserver 127.0.0.1`.
+- **kiln spec rev 2.8:** the guest sends `Hello` first. potter §9.3 build mode must follow that order (fix in P4).
+- **kiln M3c:** owns `kiln build --builder potter` dispatch. potter P5 supplies the Dockerfile frontend.
