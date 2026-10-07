@@ -15,3 +15,26 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
+  # The namespace executor end to end: vmkit's sandbox, at the rev potter-exec pins.
+  sandbox:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y uidmap busybox-static passt nftables
+      - name: A subordinate id range for the runner user
+        run: |
+          grep -q "^$USER:" /etc/subuid || echo "$USER:200000:65536" | sudo tee -a /etc/subuid
+          grep -q "^$USER:" /etc/subgid || echo "$USER:200000:65536" | sudo tee -a /etc/subgid
+      - name: vmkit's sandbox helper and its AppArmor profile
+        run: |
+          rev=$(grep -o 'vmkit", rev = "[0-9a-f]*' crates/potter-exec/Cargo.toml | grep -o '[0-9a-f]\{40\}')
+          git clone --quiet https://github.com/AlfonsoCampodonico/vmkit /tmp/vmkit
+          git -C /tmp/vmkit checkout --quiet "$rev"
+          cargo build --release --manifest-path /tmp/vmkit/Cargo.toml --bin vmkit-sandbox
+          sudo install -m 0755 /tmp/vmkit/target/release/vmkit-sandbox /usr/local/bin/vmkit-sandbox
+          /tmp/vmkit/scripts/install-apparmor.sh /usr/local/bin/vmkit-sandbox
+      - run: cargo test -p potter --test sandboxed --test build
+        env:
+          VMKIT_SANDBOX: /usr/local/bin/vmkit-sandbox
+          POTTER_REQUIRE_SANDBOX_TESTS: "1"

@@ -55,6 +55,21 @@ checked in CI.
 `potter plan --explain` prints where every decision came from: what a detector found (with its
 evidence), a potter.toml key, or a default.
 
+## Cache keys (spec §8.1)
+
+A chain's root key is `SHA-256("potter.cache/v1/base" ‖ len ‖ base manifest digest)`. Each step's key is SHA-256 over `"potter.cache/v1"`, then each of these fields as an 8-byte big-endian length followed by its bytes:
+
+1. the parent key (the previous step's, or the root);
+2. the step hash (the JCS of the step without `name` and `timeout_secs`);
+3. the inputs digest (an `inputs` step's layer, `sha256:…`, else empty);
+4. the SHA-256 of the JCS of the effective environment when the step runs (the base image's `Env`, then `meta` steps, then the step's own `env`);
+5. the secrets HMAC (empty until secrets are supported);
+6. the platform (`linux/arm64`);
+7. the executor class (`ns` or `vm`);
+8. the potter major version (`1`).
+
+The local index (`$POTTER_HOME/cache/<tenant>/index/<key-hex>`) maps a key to `{"layer": "sha256:…" | null, "class": "ns" | "vm", "created": <unix seconds>, "potter": "<version>"}`. A layer is an uncompressed OCI tar blob in `$KILN_HOME`; an entry whose blob is gone is a miss.
+
 ## Exit codes
 
 0 success · 2 usage, config, plan or detection error (including a missing path) · 4 other I/O errors.
