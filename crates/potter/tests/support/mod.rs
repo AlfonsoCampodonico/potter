@@ -40,6 +40,14 @@ fn subuid_start() -> u32 {
         .unwrap()
 }
 
+impl Drop for Ctx {
+    /// Unpacked layers and step leftovers belong to subordinate ids: only the sandbox can
+    /// remove them, and the temporary directory would otherwise keep them.
+    fn drop(&mut self) {
+        let _ = self.sandbox.remove(self.home.root());
+    }
+}
+
 impl Ctx {
     pub fn new() -> Option<Self> {
         if std::env::var_os("VMKIT_SANDBOX").is_none() {
