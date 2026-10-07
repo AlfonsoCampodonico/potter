@@ -12,6 +12,7 @@ pub mod merge;
 pub mod ns;
 pub mod sandboxed;
 pub mod seal;
+pub mod stopgap;
 pub mod tarball;
 #[cfg(test)]
 mod testing;
