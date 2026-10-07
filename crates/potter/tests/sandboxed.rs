@@ -270,3 +270,43 @@ fn a_target_assembles_into_a_kiln_image() {
     assert_eq!(p.user.as_deref(), Some("1000:1000"));
     assert_eq!(m.manifest.layers.len(), 3, "the base, the export and the files");
 }
+
+#[test]
+fn hardlinks_seal_target_first_with_the_inodes_metadata() {
+    let Some(ctx) = Ctx::new() else { return };
+    let base = ctx.busybox_lower();
+    // `foo-bar` sorts before `foo/x`, though the walk meets `foo/x` first.
+    let script = "mkdir -p /w/foo && echo x > /w/foo/x && chmod 755 /w/foo/x && chown 1000:1000 /w/foo/x && busybox ln /w/foo/x /w/foo-bar";
+    let ran = ctx.run(&base, script, "/", (0, 0), MINUTE);
+    assert!(ran.outcome.status.success(), "{:?}", ran.outcome.tail);
+    let (digest, _) = potter_exec::seal::seal_in_sandbox(&ctx.sandbox, &ran.upper, &ran.run, &ctx.store, &[]).unwrap();
+    let mut a = tar::Archive::new(ctx.store.open_blob(&digest).unwrap());
+    let mut seen: Vec<String> = Vec::new();
+    for e in a.entries().unwrap() {
+        let e = e.unwrap();
+        let path = e.path().unwrap().display().to_string();
+        if e.header().entry_type() == tar::EntryType::Link {
+            let target = e.link_name().unwrap().unwrap().display().to_string();
+            assert!(seen.contains(&target), "{path} -> {target} before its target");
+            assert_eq!(
+                (e.header().mode().unwrap() & 0o7777, e.header().uid().unwrap()),
+                (0o755, 1000)
+            );
+        }
+        seen.push(path);
+    }
+    assert!(
+        seen.contains(&"w/foo-bar".to_string()) && seen.contains(&"w/foo/x".to_string()),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_file_name_a_layer_cannot_hold_fails_the_step_not_the_sandbox() {
+    let Some(ctx) = Ctx::new() else { return };
+    let base = ctx.busybox_lower();
+    let ran = ctx.run(&base, "touch \"/$(printf '\\377')\"", "/", (0, 0), MINUTE);
+    assert!(ran.outcome.status.success(), "{:?}", ran.outcome.tail);
+    let err = ctx.seal(&ran).unwrap_err();
+    assert_eq!(err.exit_code(), 1, "{err}");
+}

@@ -117,7 +117,7 @@ fn helper<T>(result: Result<T, potter_exec::BuildError>) -> ExitCode {
     match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(BuildError::Hostile(e)) => fail(&e, 3),
-        Err(BuildError::OutputTooLarge(e)) => fail(&e, 5),
+        Err(BuildError::StepOutput(e)) => fail(&e, 5),
         Err(e) => fail(&e.to_string(), 4),
     }
 }

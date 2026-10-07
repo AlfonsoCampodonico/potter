@@ -52,8 +52,6 @@ struct Node {
     gid: u64,
     /// The layer the entry came from (opaque directories hide only lower layers).
     from: usize,
-    /// For a hardlink: the path it linked to.
-    link_of: Option<String>,
     xattrs: Vec<(String, Vec<u8>)>,
 }
 
@@ -134,7 +132,8 @@ fn merged(layers: &[LayerOpen]) -> Result<BTreeMap<String, Node>, BuildError> {
                     }
                 }
             }
-            let mut link_of = None;
+            // A hardlink shares its target's inode: its metadata, not the link header's.
+            let mut shared: Option<Node> = None;
             let kind = match entry.header().entry_type() {
                 tar::EntryType::Directory => Kind::Dir,
                 tar::EntryType::Regular | tar::EntryType::Continuous | tar::EntryType::GNUSparse => Kind::File {
@@ -149,14 +148,11 @@ fn merged(layers: &[LayerOpen]) -> Result<BTreeMap<String, Node>, BuildError> {
                 tar::EntryType::Link => {
                     let target = entry.link_name_bytes().unwrap_or_default();
                     let Some(target) = normalise(&target)? else { continue };
+                    // The inode as the target holds it now: a later replacement of the target
+                    // does not change what this link holds.
                     match map.get(&target) {
-                        Some(
-                            n @ Node {
-                                kind: Kind::File { .. },
-                                ..
-                            },
-                        ) => {
-                            link_of = Some(target.clone());
+                        Some(n) if matches!(n.kind, Kind::File { .. }) => {
+                            shared = Some(n.clone());
                             n.kind.clone()
                         }
                         _ => continue,
@@ -169,18 +165,18 @@ fn merged(layers: &[LayerOpen]) -> Result<BTreeMap<String, Node>, BuildError> {
             if kind != Kind::Dir {
                 remove_tree(&mut map, &path, None);
             }
-            map.insert(
-                path,
-                Node {
+            let node = match shared {
+                Some(target) => Node { from: li, ..target },
+                None => Node {
                     kind,
                     mode,
                     uid,
                     gid,
                     from: li,
-                    link_of,
                     xattrs,
                 },
-            );
+            };
+            map.insert(path, node);
         }
         for d in opaque {
             remove_tree(&mut map, &d, Some(li));
@@ -274,6 +270,19 @@ pub fn export_layer<W: Write>(
             }
         }
     }
+    // A path below an exported file or symlink cannot exist.
+    for path in chosen.keys() {
+        for (i, _) in path.match_indices('/') {
+            if let Some((_, n)) = chosen.get(&path[..i])
+                && n.kind != Kind::Dir
+            {
+                return Err(BuildError::Plan(format!(
+                    "the exports put /{path} below /{}, which is not a directory",
+                    &path[..i]
+                )));
+            }
+        }
+    }
     // Missing parents of every exported path, as root directories.
     let parents: Vec<String> = chosen
         .keys()
@@ -293,22 +302,20 @@ pub fn export_layer<W: Write>(
                     uid: 0,
                     gid: 0,
                     from: 0,
-                    link_of: None,
                     xattrs: Vec::new(),
                 },
             )
         });
     }
-    // Where each exported source path landed, for hardlinks that stay hardlinks.
-    let landed: BTreeMap<&str, &str> = chosen.iter().map(|(o, (src, _))| (src.as_str(), o.as_str())).collect();
-    let needed: BTreeSet<(usize, usize)> = chosen
-        .values()
-        .filter(|(_, n)| n.link_of.as_deref().is_none_or(|t| !landed.contains_key(t)))
-        .filter_map(|(_, n)| match n.kind {
-            Kind::File { layer, index, .. } => Some((layer, index)),
-            _ => None,
-        })
-        .collect();
+    // Exported paths sharing one inode's data: the first in path order holds the data, the
+    // others are hardlinks to it, written after it.
+    let mut holder: BTreeMap<(usize, usize), String> = BTreeMap::new();
+    for (path, (_, n)) in &chosen {
+        if let Kind::File { layer, index, .. } = n.kind {
+            holder.entry((layer, index)).or_insert_with(|| path.clone());
+        }
+    }
+    let needed: BTreeSet<(usize, usize)> = holder.keys().copied().collect();
     let mut staged = tempfile::tempfile_in(spec.spill_dir).map_err(io("creating the export spill file"))?;
     let offsets = spill(layers, &needed, &mut staged)?;
 
@@ -327,8 +334,16 @@ pub fn export_layer<W: Write>(
             Kind::Symlink(target) => tar.symlink(path, target, &meta),
             Kind::Fifo => tar.fifo(path, &meta),
             Kind::File { layer, index, size } => {
-                if let Some(target) = n.link_of.as_deref().and_then(|t| landed.get(t)) {
-                    tar.hardlink(path, target)
+                let first = &holder[&(*layer, *index)];
+                if first != path {
+                    let (_, h) = &chosen[first];
+                    let meta = Meta {
+                        mode: h.mode & 0o7777,
+                        uid: h.uid,
+                        gid: h.gid,
+                        mtime: spec.epoch,
+                    };
+                    tar.hardlink(path, first, &meta)
                 } else {
                     let at = offsets[&(*layer, *index)];
                     staged.seek(SeekFrom::Start(at)).map_err(io("reading staged data"))?;
@@ -506,6 +521,97 @@ mod tests {
         l1.file("app/x", b"file", &o);
         let out = export(&[layer(l0.finish()), layer(l1.finish())], &[("/app", "/app", &[])]);
         assert_eq!(paths(&out), ["app", "app/x"]);
+    }
+
+    /// (path, type, mode, uid, link target) of every entry, in stream order.
+    fn headers(layers: &[LayerOpen], exports: &[(&str, &str, &[&str])]) -> Vec<(String, char, u32, u64, String)> {
+        let exports: Vec<Export> = exports
+            .iter()
+            .map(|(p, d, x)| Export {
+                path: p.to_string(),
+                dest: d.to_string(),
+                exclude: x.iter().map(|s| s.to_string()).collect(),
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let spec = ExportSpec {
+            exports: &exports,
+            epoch: 0,
+            spill_dir: dir.path(),
+        };
+        let (bytes, _) = export_layer(layers, &spec, Vec::new()).unwrap();
+        let mut a = ::tar::Archive::new(bytes.as_slice());
+        a.entries()
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                let h = e.header();
+                let kind = if h.entry_type() == ::tar::EntryType::Link {
+                    'h'
+                } else {
+                    'x'
+                };
+                let link = e
+                    .link_name()
+                    .unwrap()
+                    .map(|l| l.display().to_string())
+                    .unwrap_or_default();
+                (
+                    e.path().unwrap().display().to_string(),
+                    kind,
+                    h.mode().unwrap(),
+                    h.uid().unwrap(),
+                    link,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_hardlink_never_precedes_its_target_and_carries_its_metadata() {
+        let exe = Opts::default().mode(0o755).uid(1000);
+        let mut l0 = TarBuilder::new();
+        // `perl` sorts before `perl5.36.0`, which holds the data in the source layer.
+        l0.dir("usr", &exe)
+            .file("usr/perl5.36.0", b"elf", &exe)
+            .hardlink("usr/perl", "usr/perl5.36.0");
+        let h = headers(&[layer(l0.finish())], &[("/usr", "/usr", &[])]);
+        let mut seen = Vec::new();
+        for (path, kind, mode, uid, link) in &h {
+            if *kind == 'h' {
+                assert!(
+                    seen.contains(link),
+                    "{path} links to {link} before it is written: {h:?}"
+                );
+            }
+            if path != "usr" {
+                assert_eq!((*mode & 0o7777, *uid), (0o755, 1000), "{path}: {h:?}");
+            }
+            seen.push(path.clone());
+        }
+        assert_eq!(h.iter().filter(|e| e.1 == 'h').count(), 1, "{h:?}");
+    }
+
+    #[test]
+    fn a_hardlink_whose_target_was_replaced_keeps_the_old_data() {
+        let o = Opts::default();
+        let mut l0 = TarBuilder::new();
+        l0.dir("d", &o).file("d/a", b"OLD", &o).hardlink("d/b", "d/a");
+        let mut l1 = TarBuilder::new();
+        l1.file("d/a", b"NEW", &o);
+        let out = export(&[layer(l0.finish()), layer(l1.finish())], &[("/d", "/d", &[])]);
+        let get = |p: &str| out.iter().find(|e| e.0 == p).unwrap().clone();
+        assert_eq!((get("d/a").1, get("d/a").4), ('f', b"NEW".to_vec()));
+        assert_eq!((get("d/b").1, get("d/b").4), ('f', b"OLD".to_vec()));
+    }
+
+    #[test]
+    fn exports_nesting_under_a_file_are_plan_errors() {
+        let o = Opts::default();
+        let mut t = TarBuilder::new();
+        t.file("f", b"x", &o).dir("d", &o).file("d/y", b"y", &o);
+        let err = run(&[layer(t.finish())], &[("/f", "/x", &[]), ("/d/y", "/x/y", &[])]).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
     }
 
     #[test]

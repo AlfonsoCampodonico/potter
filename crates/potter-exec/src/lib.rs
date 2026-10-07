@@ -6,6 +6,7 @@ pub mod assemble;
 pub mod base;
 pub mod chain;
 mod error;
+pub mod ingest;
 pub mod inputs;
 pub mod merge;
 pub mod ns;

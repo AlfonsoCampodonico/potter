@@ -107,7 +107,7 @@ pub fn helper_error(what: &str, out: &Output) -> BuildError {
     if out.status.code() == Some(HELPER_HOSTILE) {
         BuildError::Hostile(format!("{what}: {detail}"))
     } else if out.status.code() == Some(HELPER_TOO_LARGE) {
-        BuildError::OutputTooLarge(detail)
+        BuildError::StepOutput(detail)
     } else {
         BuildError::Infra(format!("{what} ({}): {stderr}", out.status))
     }

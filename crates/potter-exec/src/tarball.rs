@@ -126,9 +126,10 @@ impl<W: Write> TarWriter<W> {
         self.b.append_link(&mut header(EntryType::Symlink, m, 0), path, target)
     }
 
-    pub fn hardlink(&mut self, path: &str, target: &str) -> io::Result<()> {
-        self.b
-            .append_link(&mut header(EntryType::Link, &Meta::root(0, 0), 0), path, target)
+    /// A hardlink to `target`, written earlier in the stream. `m` is the shared inode's
+    /// metadata: readers (kiln, containerd) apply a link header's attributes to the inode.
+    pub fn hardlink(&mut self, path: &str, target: &str, m: &Meta) -> io::Result<()> {
+        self.b.append_link(&mut header(EntryType::Link, m, 0), path, target)
     }
 
     pub fn fifo(&mut self, path: &str, m: &Meta) -> io::Result<()> {

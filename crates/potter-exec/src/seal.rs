@@ -55,6 +55,8 @@ pub fn seal_in_sandbox(
     if !run.status.success() {
         return Err(helper_error("sealing the step", &run));
     }
+    let file = std::fs::File::open(&out).map_err(io(format!("opening {}", out.display())))?;
+    crate::ingest::validate_layer(std::io::BufReader::new(file), out_dir)?;
     let mut file = std::fs::File::open(&out).map_err(io(format!("opening {}", out.display())))?;
     let stored = store
         .put_reader(&mut file)
@@ -81,8 +83,14 @@ mod linux {
     use crate::tarball::{Meta, TarWriter};
 
     enum Item {
-        Dir { opaque: bool },
-        File { size: u64 },
+        Dir {
+            opaque: bool,
+        },
+        /// `inode` is set when the file has other links.
+        File {
+            size: u64,
+            inode: Option<(u64, u64)>,
+        },
         Hardlink(String),
         Symlink(String),
         Fifo,
@@ -129,7 +137,6 @@ mod linux {
         limits: &'a SealLimits,
         skip: &'a [String],
         entries: Vec<Entry>,
-        seen: HashMap<(u64, u64), String>,
         bytes: u64,
         epoch: u64,
     }
@@ -142,7 +149,12 @@ mod linux {
                     self.limits.max_depth
                 )));
             }
-            for name in names(dir, rel_dir).map_err(|e| BuildError::Hostile(e.to_string()))? {
+            let names = names(dir, rel_dir).map_err(|e| match e {
+                // A step may name its files as it likes; layers need UTF-8 paths.
+                BuildError::Plan(m) => BuildError::StepOutput(format!("the step's output cannot be a layer: {m}")),
+                e => BuildError::Hostile(e.to_string()),
+            })?;
+            for name in names {
                 if name.len() > self.limits.max_name {
                     return Err(BuildError::Hostile(format!(
                         "{rel_dir}: a name longer than {} bytes",
@@ -155,8 +167,8 @@ mod linux {
                     format!("{rel_dir}/{name}")
                 };
                 if self.entries.len() as u64 >= self.limits.max_entries {
-                    return Err(BuildError::OutputTooLarge(format!(
-                        "{} entries",
+                    return Err(BuildError::StepOutput(format!(
+                        "the build output exceeded {} entries",
                         self.limits.max_entries
                     )));
                 }
@@ -192,22 +204,13 @@ mod linux {
                         if skippable && size == 0 {
                             continue;
                         }
-                        let key = (st.st_dev, st.st_ino);
-                        if st.st_nlink > 1 {
-                            if let Some(first) = self.seen.get(&key) {
-                                self.entries.push(Entry {
-                                    rel,
-                                    item: Item::Hardlink(first.clone()),
-                                    meta,
-                                    xattrs: Vec::new(),
-                                });
-                                continue;
-                            }
-                            self.seen.insert(key, rel.clone());
-                        }
+                        let inode = (st.st_nlink > 1).then_some((st.st_dev, st.st_ino));
                         self.bytes += size;
                         if self.bytes > self.limits.max_bytes {
-                            return Err(BuildError::OutputTooLarge(format!("{} bytes", self.limits.max_bytes)));
+                            return Err(BuildError::StepOutput(format!(
+                                "the build output exceeded {} bytes",
+                                self.limits.max_bytes
+                            )));
                         }
                         let fd = openat(
                             dir,
@@ -218,7 +221,7 @@ mod linux {
                         .map_err(|e| io(format!("opening {rel}"))(e.into()))?;
                         self.entries.push(Entry {
                             rel,
-                            item: Item::File { size },
+                            item: Item::File { size, inode },
                             meta,
                             xattrs: xattrs(&fd),
                         });
@@ -275,12 +278,28 @@ mod linux {
             limits,
             skip: skip_if_empty,
             entries: Vec::new(),
-            seen: HashMap::new(),
             bytes: 0,
             epoch,
         };
         walk.walk(&root, "", 1)?;
         walk.entries.sort_by(|a, b| a.rel.cmp(&b.rel));
+        // Of the paths of one inode, the first in stream order holds the data; the others link
+        // to it, after it, with its metadata (readers apply a link's attributes to the inode).
+        let mut holders: HashMap<(u64, u64), (String, Meta)> = HashMap::new();
+        for e in &mut walk.entries {
+            if let Item::File { inode: Some(key), .. } = e.item {
+                match holders.get(&key) {
+                    Some((first, meta)) => {
+                        e.item = Item::Hardlink(first.clone());
+                        e.meta = *meta;
+                        e.xattrs.clear();
+                    }
+                    None => {
+                        holders.insert(key, (e.rel.clone(), e.meta));
+                    }
+                }
+            }
+        }
         let mut tar = TarWriter::new(out);
         let mut summary = SealSummary::default();
         for e in &walk.entries {
@@ -291,13 +310,13 @@ mod linux {
                     .pax_xattrs(&e.xattrs)
                     .and_then(|()| tar.dir(path, &e.meta))
                     .and_then(|()| if *opaque { tar.opaque(path) } else { Ok(()) }),
-                Item::File { size } => {
+                Item::File { size, .. } => {
                     let fd = open_beneath(&root, path)?;
                     summary.bytes += size;
                     tar.pax_xattrs(&e.xattrs)
                         .and_then(|()| tar.file(path, &e.meta, *size, &mut std::fs::File::from(fd)))
                 }
-                Item::Hardlink(target) => tar.hardlink(path, target),
+                Item::Hardlink(target) => tar.hardlink(path, target, &e.meta),
                 Item::Symlink(target) => tar.symlink(path, target, &e.meta),
                 Item::Fifo => tar.fifo(path, &e.meta),
                 Item::Whiteout => tar.whiteout(path),
