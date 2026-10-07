@@ -227,3 +227,46 @@ fn a_cache_mount_persists_and_stays_out_of_the_layer() {
         "hit\n"
     );
 }
+
+#[test]
+fn a_target_assembles_into_a_kiln_image() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[("src/a.txt", "a")]);
+    let mut target = ctx.target(
+        &base,
+        vec![
+            inputs("src", &["src/**"], "/app"),
+            run("build", "echo built > /app/out"),
+        ],
+    );
+    target.image.export.push(potter_plan::Export {
+        path: "/app".into(),
+        dest: "/app".into(),
+        exclude: vec![],
+    });
+    target.image.files.push(potter_plan::GeneratedFile {
+        path: "/etc/app.conf".into(),
+        content: "x=1\n".into(),
+        mode: 0o640,
+    });
+    target.image.config = potter_plan::ImageConfig::new("/app", "1000:1000");
+    target.image.config.env.insert("B".into(), "2".into());
+    let mut web = potter_plan::Process::new(&["/app/run"]);
+    web.env.insert("A".into(), "1".into());
+    target.image.processes.insert("web".into(), web);
+    let built = ctx.build(&target, repo.path(), &[]).unwrap();
+    assert_eq!(built.reference, "potter/app:latest");
+    let digest = kiln_image::resolve_name(&ctx.store, "potter/app:latest").unwrap();
+    assert_eq!(digest, built.digest);
+    let loaded = kiln_image::load(&ctx.store, &digest).unwrap();
+    let (_, m) = &loaded.entries[0];
+    let p = &m.config.process;
+    assert_eq!(p.entrypoint, ["/app/run"]);
+    for kv in ["A=1", "B=2", "PATH=/bin"] {
+        assert!(p.env.contains(&kv.to_string()), "{:?}", p.env);
+    }
+    assert_eq!(p.working_dir.as_deref(), Some("/app"));
+    assert_eq!(p.user.as_deref(), Some("1000:1000"));
+    assert_eq!(m.manifest.layers.len(), 3, "the base, the export and the files");
+}

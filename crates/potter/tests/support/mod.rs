@@ -181,6 +181,30 @@ impl Ctx {
         potter_exec::chain::run_chain(&mut ctx, target, repo)
     }
 
+    /// Builds `target` into the kiln store.
+    pub fn build(
+        &self,
+        target: &potter_plan::Target,
+        repo: &Path,
+        tags: &[String],
+    ) -> Result<potter_exec::assemble::Built, BuildError> {
+        let tenant = potter_cache::Tenant::local();
+        let index = self.home.index(&tenant).unwrap();
+        let mut progress = |_: potter_exec::chain::Progress| {};
+        let mut ctx = potter_exec::chain::BuildCtx {
+            store: &self.store,
+            home: &self.home,
+            tenant: &tenant,
+            index: &index,
+            sandbox: &self.sandbox,
+            platform: kiln_oci::Platform::host(),
+            no_cache: false,
+            auth: kiln_registry::DockerConfig::anonymous(),
+            progress: &mut progress,
+        };
+        potter_exec::assemble::build_target(&mut ctx, target, repo, tags)
+    }
+
     pub fn index_entries(&self) -> usize {
         std::fs::read_dir(self.home.root().join("cache/local/index")).map_or(0, |d| d.count())
     }

@@ -955,6 +955,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-image"
+version = "0.1.0"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=01e7a9fe288160cc2eef9dd1a4a205022b8aef77#01e7a9fe288160cc2eef9dd1a4a205022b8aef77"
+dependencies = [
+ "flate2",
+ "kiln-erofs",
+ "kiln-oci",
+ "kiln-registry",
+ "kiln-store",
+ "serde",
+ "serde_json",
+ "tar",
+ "thiserror",
+ "zstd",
+]
+
+[[package]]
 name = "kiln-oci"
 version = "0.1.0"
 source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=01e7a9fe288160cc2eef9dd1a4a205022b8aef77#01e7a9fe288160cc2eef9dd1a4a205022b8aef77"
@@ -1118,6 +1135,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "kiln-erofs",
+ "kiln-image",
  "kiln-oci",
  "kiln-registry",
  "kiln-store",
@@ -1182,6 +1200,7 @@ dependencies = [
  "flate2",
  "globset",
  "kiln-erofs",
+ "kiln-image",
  "kiln-oci",
  "kiln-registry",
  "kiln-store",
@@ -1944,7 +1963,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

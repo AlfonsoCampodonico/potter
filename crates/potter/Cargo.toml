@@ -14,6 +14,7 @@ potter-plan = { path = "../potter-plan" }
 
 [dev-dependencies]
 kiln-erofs = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
+kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
 kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
 kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
 kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
