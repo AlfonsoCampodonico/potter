@@ -109,3 +109,5 @@ Deferred:
 - A concurrent `tenant_key` can be read half-written (unused).
 - Named-user lookups re-read every layer.
 - A step gets no supplementary groups.
+
+**2026-10-07:** vmkit PR #6 is merged. potter pins vmkit `main` at c4363a2: #6 plus #7, which only changes the kernels workflow. P2a merges to potter main.

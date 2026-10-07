@@ -19,7 +19,7 @@ rustix = { version = "1.1.5", features = ["fs", "process"] }
 tar = "0.4.44"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "dbea230ef87d92f53a37db85b63890f07ad7ed13" }
+vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "c4363a2cfaf421aeaefad1e9c510040c1e0a0508" }
 zstd = "0.14.0"
 
 [dev-dependencies]
