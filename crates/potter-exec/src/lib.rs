@@ -2,8 +2,11 @@
 //! sealing, export and image assembly.
 #![forbid(unsafe_code)]
 
+pub mod base;
 mod error;
 pub mod inputs;
 pub mod tarball;
+#[cfg(test)]
+mod testing;
 
 pub use error::BuildError;
