@@ -51,6 +51,7 @@ pub enum Progress {
         step: String,
         state: StepState,
     },
+    Warning(String),
     Log {
         target: String,
         step: String,
@@ -214,6 +215,8 @@ pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Resul
     let mut key = base_key(&state.base.key_digest());
     let mut runs: Vec<PathBuf> = Vec::new();
     let tname = target.name.clone();
+    let mut warned = false;
+    let warned_cgroups = &mut warned;
     let result = (|| -> Result<(), BuildError> {
         for step in &target.build.steps {
             let sname = step.name().to_string();
@@ -310,18 +313,6 @@ pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Resul
                     if let Some(home) = home_of(passwd.as_deref(), uid) {
                         step_env.entry("HOME".into()).or_insert(home);
                     }
-                    let mut mounts = Vec::new();
-                    for m in cache_mounts {
-                        if !potter_plan::is_name(&m.id) {
-                            return Err(BuildError::Plan(format!(
-                                "step {sname}: the cache mount id {:?} is not a name",
-                                m.id
-                            )));
-                        }
-                        let dir = ctx.home.mounts(ctx.tenant).join(&m.id);
-                        std::fs::create_dir_all(&dir).map_err(io(format!("creating {}", dir.display())))?;
-                        mounts.push((dir, m.target.clone()));
-                    }
                     std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
                     let run = tempfile::Builder::new()
                         .prefix("step-")
@@ -329,6 +320,48 @@ pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Resul
                         .map_err(io("creating a step directory"))?
                         .keep();
                     runs.push(run.clone());
+                    let mut mounts = Vec::new();
+                    // Held until the step ends: exclusive mounts (spec §8.5).
+                    let mut held = Vec::new();
+                    for m in cache_mounts {
+                        if !potter_plan::is_name(&m.id) {
+                            return Err(BuildError::Plan(format!(
+                                "step {sname}: the cache mount id {:?} is not a name",
+                                m.id
+                            )));
+                        }
+                        let root = ctx.home.mounts(ctx.tenant);
+                        std::fs::create_dir_all(&root).map_err(io(format!("creating {}", root.display())))?;
+                        let lock_path = root.join(format!("{}.lock", m.id));
+                        let lock = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&lock_path)
+                            .map_err(io(format!("opening {}", lock_path.display())))?;
+                        let free =
+                            rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok();
+                        let dir = if free {
+                            held.push(lock);
+                            root.join(&m.id)
+                        } else {
+                            // Another build holds it: an empty scratch mount, slower but correct.
+                            (ctx.progress)(Progress::Warning(format!(
+                                "step {sname}: the cache mount {} is in use by another build; using an empty one",
+                                m.id
+                            )));
+                            run.join(format!("scratch-{}", m.id))
+                        };
+                        std::fs::create_dir_all(&dir).map_err(io(format!("creating {}", dir.display())))?;
+                        mounts.push((dir, m.target.clone()));
+                    }
+                    if !*warned_cgroups && !vmkit::sandbox::cgroups_available() {
+                        *warned_cgroups = true;
+                        (ctx.progress)(Progress::Warning(
+                            "no cgroup delegation (systemd user scopes): steps run without memory, CPU and task \
+                             limits, bounded only by their timeout"
+                                .into(),
+                        ));
+                    }
                     for d in ["upper", "work", "run"] {
                         std::fs::create_dir(run.join(d)).map_err(io("creating a step directory"))?;
                     }
@@ -368,6 +401,7 @@ pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Resul
                     };
                     let skip = mount_points(&step_run);
                     let outcome = run_step(step_run)?;
+                    drop(held);
                     if !outcome.status.success() {
                         (ctx.progress)(Progress::Step {
                             target: tname.clone(),

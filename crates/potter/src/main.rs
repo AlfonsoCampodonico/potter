@@ -190,6 +190,10 @@ fn build(
         potter,
         runs: home.runs(),
     };
+    let _lock = match potter_exec::sandboxed::begin_build(&sandbox, &home) {
+        Ok(l) => l,
+        Err(e) => return fail(&e.to_string(), e.exit_code()),
+    };
     let mut progress = |p: Progress| match p {
         Progress::Step { target, step, state } => {
             let state = match state {
@@ -200,6 +204,7 @@ fn build(
             };
             eprintln!("[{}] {}: {state}", sanitize(&target), sanitize(&step));
         }
+        Progress::Warning(w) => eprintln!("warning: {}", sanitize(&w)),
         // Step output passes through unmodified (spec §11).
         Progress::Log { target, step, line } => eprintln!("[{target}/{step}] {line}"),
     };

@@ -15,6 +15,23 @@ use potter_cache::PotterHome;
 use crate::error::BuildError;
 use crate::sandboxed::{SandboxCtx, helper_error};
 
+/// Bounds on one untrusted layer (P11): a decompression bomb stops here, not at a full disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnpackLimits {
+    pub max_entries: u64,
+    /// Bytes of file data written.
+    pub max_bytes: u64,
+}
+
+impl Default for UnpackLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: 1_000_000,
+            max_bytes: 32 << 30,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UnpackSummary {
     pub entries: u64,
@@ -80,7 +97,7 @@ mod linux {
         fsetxattr, futimens, linkat, mkdirat, mknodat, openat, statat, symlinkat, unlinkat, utimensat,
     };
 
-    use super::UnpackSummary;
+    use super::{UnpackLimits, UnpackSummary};
     use crate::error::{BuildError, io};
     use crate::merge::normalise;
     use crate::sandboxed::IDS;
@@ -170,7 +187,7 @@ mod linux {
     }
 
     /// Unpacks the tar stream `reader` into the empty directory `dest`.
-    pub fn unpack(reader: impl Read, dest: &Path) -> Result<UnpackSummary, BuildError> {
+    pub fn unpack(reader: impl Read, dest: &Path, limits: &UnpackLimits) -> Result<UnpackSummary, BuildError> {
         let dest = openat(
             CWD,
             dest,
@@ -179,6 +196,7 @@ mod linux {
         )
         .map_err(|e| io(format!("opening {}", dest.display()))(e.into()))?;
         let mut summary = UnpackSummary::default();
+        let mut written = 0u64;
         let mut archive = tar::Archive::new(reader);
         for entry in archive
             .entries()
@@ -189,6 +207,12 @@ mod linux {
                 continue;
             };
             summary.entries += 1;
+            if summary.entries > limits.max_entries {
+                return Err(hostile(format!(
+                    "the layer has more than {} entries",
+                    limits.max_entries
+                )));
+            }
             let parts: Vec<&str> = path.split('/').collect();
             let (name, dirs) = parts.split_last().expect("a normalised path has a component");
             let parent = parent_of(&dest, dirs, &path)?;
@@ -213,7 +237,10 @@ mod linux {
                 for ext in pax {
                     let ext = ext.map_err(bad)?;
                     if let Some(name) = ext.key().ok().and_then(|k| k.strip_prefix("SCHILY.xattr."))
+                        // overlayfs's own markers come only from whiteout entries: a base layer
+                        // must not hide files from the overlay that potter's own reads still see.
                         && name.starts_with("user.")
+                        && !name.starts_with("user.overlay.")
                     {
                         xattrs.push((name.to_string(), ext.value_bytes().to_vec()));
                     }
@@ -247,7 +274,13 @@ mod linux {
                     )
                     .map_err(|e| io(format!("creating {path}"))(e.into()))?;
                     let mut file = std::fs::File::from(f);
-                    std::io::copy(&mut entry, &mut file).map_err(|e| hostile(format!("{path}: {e}")))?;
+                    let room = limits.max_bytes.saturating_sub(written);
+                    let n = std::io::copy(&mut (&mut entry).take(room + 1), &mut file)
+                        .map_err(|e| hostile(format!("{path}: {e}")))?;
+                    written += n;
+                    if written > limits.max_bytes {
+                        return Err(hostile(format!("the layer holds more than {} bytes", limits.max_bytes)));
+                    }
                     file.flush().map_err(io(format!("writing {path}")))?;
                     finish(
                         &file.as_fd().try_clone_to_owned().map_err(io("dup"))?,
@@ -317,11 +350,52 @@ mod linux {
             .map_err(|e| BuildError::Plan(format!("layer {}: {e}", blob.display())))?;
         let file = std::fs::File::open(blob).map_err(io(format!("opening {}", blob.display())))?;
         let reader = crate::base::decompress(file, compression).map_err(io("decompressing"))?;
-        unpack(reader, dest)
+        unpack(reader, dest, &UnpackLimits::default())
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn unpack_blob(_blob: &Path, _media_type: &str, _dest: &Path) -> Result<UnpackSummary, BuildError> {
     Err(BuildError::Infra("unpacking layers needs Linux".into()))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use kiln_erofs::testtar::{Opts, TarBuilder};
+
+    use super::*;
+
+    /// Entries owned by the caller: unpacking them needs no namespace.
+    fn mine() -> Opts {
+        use std::os::unix::fs::MetadataExt;
+        let me = std::fs::metadata("/proc/self").unwrap();
+        Opts::default()
+            .uid(u64::from(me.uid()))
+            .gid(u64::from(me.gid()))
+            .mode(0o644)
+    }
+
+    #[test]
+    fn unpacking_stops_at_its_entry_and_byte_limits() {
+        let mut t = TarBuilder::new();
+        t.file("a", b"0123456789", &mine())
+            .file("b", b"x", &mine())
+            .file("c", b"y", &mine());
+        let tar = t.finish();
+        let few = UnpackLimits {
+            max_entries: 2,
+            max_bytes: 1 << 20,
+        };
+        let small = UnpackLimits {
+            max_entries: 100,
+            max_bytes: 5,
+        };
+        for limits in [few, small] {
+            let dest = tempfile::tempdir().unwrap();
+            let err = unpack(std::io::Cursor::new(tar.clone()), dest.path(), &limits).unwrap_err();
+            assert_eq!(err.exit_code(), 3, "{err}");
+        }
+        let dest = tempfile::tempdir().unwrap();
+        unpack(std::io::Cursor::new(tar), dest.path(), &UnpackLimits::default()).unwrap();
+    }
 }

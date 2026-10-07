@@ -78,6 +78,9 @@ impl PotterHome {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, CacheError> {
         let root = root.into();
         private_dir(&root)?;
+        // Unpacked layers hold set-id files owned by the caller: nobody else may reach them.
+        std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .map_err(|e| io_err(&root, e))?;
         Ok(Self { root })
     }
 
@@ -154,6 +157,17 @@ pub fn tenant_key(home: &PotterHome, tenant: &Tenant) -> Result<[u8; 32], CacheE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_existing_home_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("home");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        PotterHome::open(&root).unwrap();
+        assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
+    }
 
     #[test]
     fn tenant_names_are_checked_and_keys_are_private() {

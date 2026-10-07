@@ -310,3 +310,70 @@ fn a_file_name_a_layer_cannot_hold_fails_the_step_not_the_sandbox() {
     let err = ctx.seal(&ran).unwrap_err();
     assert_eq!(err.exit_code(), 1, "{err}");
 }
+
+#[test]
+fn a_base_layers_own_overlay_xattrs_are_dropped() {
+    let Some(ctx) = Ctx::new() else { return };
+    let dir = Opts::default().mode(0o755);
+    let mut t = TarBuilder::new();
+    t.dir(
+        "d",
+        &dir.clone().xattr("user.overlay.opaque", b"y").xattr("user.keep", b"1"),
+    )
+    .file("d/f", b"x", &Opts::default().mode(0o644));
+    let dest = ctx.unpack(&t.finish()).unwrap();
+    assert_eq!(xattr(&dest.join("d"), "user.overlay.opaque"), None);
+    assert_eq!(xattr(&dest.join("d"), "user.keep").as_deref(), Some(&b"1"[..]));
+}
+
+#[test]
+fn a_busy_cache_mount_gives_the_step_a_scratch_one() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[]);
+    let mounts = ctx.home.mounts(&potter_cache::Tenant::local());
+    std::fs::create_dir_all(mounts.join("c")).unwrap();
+    // Another build holds the mount.
+    let lock = std::fs::File::create(mounts.join("c.lock")).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let mut step = run("warm", "echo hit >> /cache/log; cat /cache/log > /seen");
+    if let potter_plan::Step::Run { cache_mounts, .. } = &mut step {
+        cache_mounts.push(potter_plan::CacheMount {
+            id: "c".into(),
+            target: "/cache".into(),
+            sharing: Default::default(),
+        });
+    }
+    let target = ctx.target(&base, vec![step]);
+    ctx.chain(&target, repo.path()).unwrap();
+    assert!(
+        !mounts.join("c/log").exists(),
+        "the step wrote into a mount another build holds"
+    );
+    drop(lock);
+}
+
+#[test]
+fn stale_run_directories_are_swept_when_no_build_runs() {
+    let Some(ctx) = Ctx::new() else { return };
+    let stale = ctx.home.runs().join("step-stale");
+    std::fs::create_dir_all(&stale).unwrap();
+    // A file owned by a subordinate id: the host user cannot delete it.
+    let out = ctx
+        .sandbox
+        .run_host(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                format!(
+                    "mkdir {0}/d && touch {0}/d/f && chown -R 1000:1000 {0}/d",
+                    stale.display()
+                ),
+            ],
+            std::slice::from_ref(&stale),
+        )
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let _lock = potter_exec::sandboxed::begin_build(&ctx.sandbox, &ctx.home).unwrap();
+    assert!(!stale.exists(), "the stale run directory survived");
+}

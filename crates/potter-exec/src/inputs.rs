@@ -263,10 +263,12 @@ pub(crate) fn open_beneath(root: &OwnedFd, rel: &str) -> Result<OwnedFd, BuildEr
         let here = parts[..=i].join("/");
         dir = Some(open_dir(dir.as_ref().unwrap_or(root), part, &here)?);
     }
+    // Non-blocking: a FIFO swapped in for the file must not hang the build (the caller checks
+    // the type with fstat).
     openat(
         dir.as_ref().unwrap_or(root),
         file,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(|e| io(format!("opening {rel}"))(e.into()))
@@ -277,7 +279,7 @@ fn potterignore(root: &OwnedFd) -> Result<String, BuildError> {
     let fd = match openat(
         root,
         ".potterignore",
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
         Ok(fd) => fd,
@@ -554,6 +556,27 @@ mod tests {
         ));
         let f = files(&build(t.path(), &["x"], &[]).unwrap());
         assert_eq!(f, ["app/x"], "a symlink nobody includes is never looked at");
+    }
+
+    #[test]
+    fn a_fifo_potterignore_fails_instead_of_hanging() {
+        let t = tree(&[("x", "x")]);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(t.path().join(".potterignore"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let root = t.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(build(&root, &["**"], &[]).map(|_| ()).map_err(|e| e.exit_code()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the build hung on a FIFO");
+        assert_eq!(result, Err(2));
     }
 
     #[test]

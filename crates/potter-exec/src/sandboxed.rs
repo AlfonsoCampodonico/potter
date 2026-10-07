@@ -32,6 +32,44 @@ pub struct SandboxCtx {
     pub runs: PathBuf,
 }
 
+/// Held for a whole build: other builds may run alongside, the sweep may not.
+pub struct BuildLock {
+    _file: std::fs::File,
+}
+
+/// Takes the build lock. When no other build runs, first removes what killed builds left
+/// behind: step directories and half-unpacked layers, which hold files of subordinate owners
+/// that only the sandbox can delete.
+pub fn begin_build(ctx: &SandboxCtx, home: &potter_cache::PotterHome) -> Result<BuildLock, BuildError> {
+    use rustix::fs::{FlockOperation, flock};
+    let path = home.root().join("build.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(crate::error::io(format!("opening {}", path.display())))?;
+    if flock(&file, FlockOperation::NonBlockingLockExclusive).is_ok() {
+        let stale = |dir: PathBuf, hidden_only: bool| -> Vec<PathBuf> {
+            std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| !hidden_only || e.file_name().to_string_lossy().starts_with('.'))
+                .map(|e| e.path())
+                .collect()
+        };
+        for p in stale(home.runs(), false)
+            .into_iter()
+            .chain(stale(home.unpacked(), true))
+        {
+            ctx.remove(&p)?;
+        }
+    }
+    // Shared for the rest of the build (a downgrade when the exclusive lock was taken).
+    flock(&file, FlockOperation::LockShared).map_err(|e| crate::error::io("taking the build lock")(e.into()))?;
+    Ok(BuildLock { _file: file })
+}
+
 /// Exit codes of potter's hidden helpers.
 pub const HELPER_HOSTILE: i32 = 3;
 pub const HELPER_TOO_LARGE: i32 = 5;

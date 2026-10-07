@@ -120,7 +120,15 @@ pub fn run_step(r: StepRun) -> Result<StepOutcome, BuildError> {
         },
         nest: true,
         seccomp: true,
-        limits: crate::sandboxed::limits(1 << 20, 16384),
+        limits: vmkit::sandbox::Limits {
+            // spec §10: --step-mem 4 GiB and --step-cpus 2 by default.
+            cgroup: Some(vmkit::sandbox::Cgroup {
+                memory_mib: 4096,
+                cpu_percent: 200,
+                tasks: 16384,
+            }),
+            ..crate::sandboxed::limits(1 << 20, 16384)
+        },
         run_dir: r.run_dir.join("sandbox"),
     };
     let mut child = sandbox::spawn(&spec, sandbox::Stdio::piped())
