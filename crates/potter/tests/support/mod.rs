@@ -105,6 +105,23 @@ pub fn busybox_root() -> Vec<u8> {
     t.finish()
 }
 
+/// The busybox root as an image on kiln's in-process registry; returns the reference.
+pub fn serve_busybox() -> (kiln_registry::testregistry::TestRegistry, tempfile::TempDir, String) {
+    use kiln_oci::testlayout::{LayoutBuilder, TestLayer};
+    let dir = tempfile::tempdir().unwrap();
+    let mut layout = LayoutBuilder::new(dir.path());
+    let config = kiln_oci::ContainerConfig {
+        env: Some(vec!["PATH=/bin".into()]),
+        ..Default::default()
+    };
+    let image = layout.image(&kiln_oci::Platform::host(), &[TestLayer::tar(busybox_root())], config);
+    layout.add(image, Some("1"));
+    let path = layout.finish();
+    let reg = kiln_registry::testregistry::TestRegistry::serve_layout(&path, Default::default());
+    let reference = format!("{}/lib/busybox:1", reg.host());
+    (reg, dir, reference)
+}
+
 /// A step's run: where its upper and run directory are.
 pub struct Ran {
     pub outcome: potter_exec::ns::StepOutcome,
@@ -114,6 +131,70 @@ pub struct Ran {
 }
 
 impl Ctx {
+    /// A target over `base` with `steps`, rooted at the repository.
+    pub fn target(&self, base: &str, steps: Vec<potter_plan::Step>) -> potter_plan::Target {
+        let base = potter_plan::Base::Oci {
+            reference: base.into(),
+            digest: None,
+        };
+        potter_plan::Target {
+            name: "app".into(),
+            root: ".".into(),
+            platform: None,
+            provider: "none".into(),
+            build: potter_plan::Chain {
+                base: base.clone(),
+                steps,
+            },
+            image: potter_plan::Image {
+                base,
+                runtime_steps: vec![],
+                export: vec![],
+                files: vec![],
+                config: potter_plan::ImageConfig::new("/", "0:0"),
+                processes: Default::default(),
+                services: Default::default(),
+            },
+        }
+    }
+
+    /// Runs `target`'s chain from `repo`.
+    pub fn chain(
+        &self,
+        target: &potter_plan::Target,
+        repo: &Path,
+    ) -> Result<potter_exec::chain::ChainState, BuildError> {
+        let tenant = potter_cache::Tenant::local();
+        let index = self.home.index(&tenant).unwrap();
+        let mut progress = |_: potter_exec::chain::Progress| {};
+        let mut ctx = potter_exec::chain::BuildCtx {
+            store: &self.store,
+            home: &self.home,
+            tenant: &tenant,
+            index: &index,
+            sandbox: &self.sandbox,
+            platform: kiln_oci::Platform::host(),
+            no_cache: false,
+            auth: kiln_registry::DockerConfig::anonymous(),
+            progress: &mut progress,
+        };
+        potter_exec::chain::run_chain(&mut ctx, target, repo)
+    }
+
+    pub fn index_entries(&self) -> usize {
+        std::fs::read_dir(self.home.root().join("cache/local/index")).map_or(0, |d| d.count())
+    }
+
+    /// The paths in a layer blob.
+    pub fn layer_paths(&self, layer: &potter_exec::chain::LayerRef) -> Vec<String> {
+        let blob = self.store.open_blob(&layer.descriptor.digest).unwrap();
+        tar::Archive::new(blob)
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().display().to_string())
+            .collect()
+    }
+
     /// The unpacked busybox root.
     pub fn busybox_lower(&self) -> PathBuf {
         self.unpack(&busybox_root()).unwrap()

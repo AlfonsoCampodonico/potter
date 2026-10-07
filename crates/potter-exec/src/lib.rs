@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod base;
+pub mod chain;
 mod error;
 pub mod inputs;
 pub mod merge;

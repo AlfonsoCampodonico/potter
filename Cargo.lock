@@ -1119,6 +1119,7 @@ dependencies = [
  "clap",
  "kiln-erofs",
  "kiln-oci",
+ "kiln-registry",
  "kiln-store",
  "potter-cache",
  "potter-config",

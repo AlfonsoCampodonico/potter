@@ -132,3 +132,98 @@ fn seal_refuses_hostile_depth() {
     assert!(ran.outcome.status.success(), "{:?}", ran.outcome.tail);
     assert_eq!(ctx.seal(&ran).unwrap_err().exit_code(), 3);
 }
+
+fn inputs(name: &str, include: &[&str], dest: &str) -> potter_plan::Step {
+    potter_plan::Step::Inputs {
+        name: name.into(),
+        include: include.iter().map(|s| s.to_string()).collect(),
+        exclude: vec![],
+        dest: dest.into(),
+        owner: "0:0".into(),
+    }
+}
+
+fn run(name: &str, script: &str) -> potter_plan::Step {
+    potter_plan::Step::Run {
+        name: name.into(),
+        command: potter_plan::Command::shell(script),
+        env: Default::default(),
+        workdir: "/".into(),
+        user: "0:0".into(),
+        network: false,
+        cache_mounts: vec![],
+        secrets: vec![],
+        timeout_secs: None,
+    }
+}
+
+fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (p, c) in files {
+        let path = dir.path().join(p);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, c).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn a_chain_runs_then_hits_and_undeclared_changes_keep_every_key() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[("src/a.txt", "a"), ("notes.md", "n")]);
+    let target = ctx.target(
+        &base,
+        vec![
+            inputs("src", &["src/**"], "/app"),
+            run("build", "cat /app/src/a.txt > /app/out && test ! -e /app/notes.md"),
+        ],
+    );
+    let first = ctx.chain(&target, repo.path()).unwrap();
+    assert_eq!((first.executed, first.cached), (1, 0));
+    std::fs::write(repo.path().join("notes.md"), "changed").unwrap();
+    let second = ctx.chain(&target, repo.path()).unwrap();
+    assert_eq!((second.executed, second.cached), (0, 1));
+    assert_eq!(first.layers, second.layers);
+    std::fs::write(repo.path().join("src/a.txt"), "b").unwrap();
+    assert_eq!(ctx.chain(&target, repo.path()).unwrap().executed, 1);
+}
+
+#[test]
+fn a_failing_step_reports_its_tail_and_caches_nothing() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[]);
+    let target = ctx.target(&base, vec![run("bad", "echo oops; exit 3")]);
+    let err = ctx.chain(&target, repo.path()).unwrap_err();
+    assert_eq!(err.exit_code(), 1, "{err}");
+    assert!(
+        matches!(&err, potter_exec::BuildError::StepFailed { tail, .. } if tail.iter().any(|l| l == "oops")),
+        "{err:?}"
+    );
+    assert_eq!(ctx.index_entries(), 0);
+}
+
+#[test]
+fn a_cache_mount_persists_and_stays_out_of_the_layer() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[]);
+    let mut step = run("warm", "echo hit >> /cache/log; wc -l < /cache/log > /count");
+    if let potter_plan::Step::Run { cache_mounts, .. } = &mut step {
+        cache_mounts.push(potter_plan::CacheMount {
+            id: "c".into(),
+            target: "/cache".into(),
+            sharing: Default::default(),
+        });
+    }
+    let target = ctx.target(&base, vec![step]);
+    let state = ctx.chain(&target, repo.path()).unwrap();
+    let paths = ctx.layer_paths(state.layers.last().unwrap());
+    assert!(paths.iter().any(|p| p == "count"), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.starts_with("cache")), "{paths:?}");
+    assert_eq!(
+        std::fs::read_to_string(ctx.home.mounts(&potter_cache::Tenant::local()).join("c/log")).unwrap(),
+        "hit\n"
+    );
+}
