@@ -15,6 +15,7 @@ potter-cache = { path = "../potter-cache" }
 potter-plan = { path = "../potter-plan" }
 rustix = { version = "1.1.5", features = ["fs"] }
 tar = "0.4.44"
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 zstd = "0.14.0"
 

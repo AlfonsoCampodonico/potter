@@ -5,6 +5,7 @@
 pub mod base;
 mod error;
 pub mod inputs;
+pub mod merge;
 pub mod tarball;
 #[cfg(test)]
 mod testing;
