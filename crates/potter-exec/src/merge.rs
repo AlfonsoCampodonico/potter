@@ -58,7 +58,7 @@ struct Node {
 }
 
 /// A layer path without `./`, a leading `/` refused, `..` refused; `None` for the root itself.
-fn normalise(raw: &[u8]) -> Result<Option<String>, BuildError> {
+pub(crate) fn normalise(raw: &[u8]) -> Result<Option<String>, BuildError> {
     let s = std::str::from_utf8(raw).map_err(|_| BuildError::Hostile("a layer path is not UTF-8".into()))?;
     if s.starts_with('/') {
         return Err(BuildError::Hostile(format!("the layer path {s:?} is absolute")));

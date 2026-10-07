@@ -6,8 +6,10 @@ pub mod base;
 mod error;
 pub mod inputs;
 pub mod merge;
+pub mod sandboxed;
 pub mod tarball;
 #[cfg(test)]
 mod testing;
+pub mod unpack;
 
 pub use error::BuildError;

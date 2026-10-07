@@ -38,6 +38,13 @@ enum Cmd {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Unpack a layer blob into an overlay lower directory (run inside the sandbox)
+    #[command(name = "__unpack", hide = true)]
+    Unpack {
+        blob: PathBuf,
+        media_type: String,
+        dest: PathBuf,
+    },
 }
 
 fn fail(message: &str, code: u8) -> ExitCode {
@@ -54,6 +61,16 @@ fn main() -> ExitCode {
             explain,
         } => plan(&path, target.as_deref(), json, explain),
         Cmd::Detect { path } => detect(&path),
+        Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
+    }
+}
+
+/// A sandboxed helper's exit: 0, 3 for a violation, 4 otherwise.
+fn helper<T>(result: Result<T, potter_exec::BuildError>) -> ExitCode {
+    match result {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e @ potter_exec::BuildError::Hostile(_)) => fail(&e.to_string(), 3),
+        Err(e) => fail(&e.to_string(), 4),
     }
 }
 

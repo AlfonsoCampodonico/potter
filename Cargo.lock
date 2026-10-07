@@ -1117,10 +1117,16 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "kiln-erofs",
+ "kiln-oci",
+ "kiln-store",
+ "potter-cache",
  "potter-config",
  "potter-detect",
+ "potter-exec",
  "potter-plan",
  "predicates",
+ "rustix",
  "serde_json",
  "tempfile",
 ]
@@ -1182,6 +1188,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "vmkit",
  "zstd",
 ]
 
@@ -1678,6 +1685,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "security-framework"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2159,6 +2175,19 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vmkit"
+version = "0.1.0"
+source = "git+https://github.com/AlfonsoCampodonico/vmkit?rev=dbea230ef87d92f53a37db85b63890f07ad7ed13#dbea230ef87d92f53a37db85b63890f07ad7ed13"
+dependencies = [
+ "libc",
+ "rustix",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "wait-timeout"
