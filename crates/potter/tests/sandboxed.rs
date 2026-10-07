@@ -6,6 +6,8 @@ mod support;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 use kiln_erofs::testtar::{Opts, TarBuilder};
+use std::time::Duration;
+
 use support::{Ctx, xattr};
 
 #[test]
@@ -62,4 +64,71 @@ fn hostile_layers_are_refused_and_leave_nothing_behind() {
     }
     let left: Vec<_> = std::fs::read_dir(ctx.home.unpacked()).unwrap().collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+const MINUTE: Duration = Duration::from_secs(60);
+
+#[test]
+fn a_step_runs_in_its_own_root_and_its_changes_seal_into_a_diff() {
+    let Some(ctx) = Ctx::new() else { return };
+    let base = ctx.busybox_lower();
+    let ran = ctx.run(
+        &base,
+        "mkdir -p /app && echo built >/app/out && rm /etc/motd && echo log-line",
+        "/",
+        (0, 0),
+        MINUTE,
+    );
+    assert!(ran.outcome.status.success(), "{:?}", ran.outcome.tail);
+    assert!(ran.lines.iter().any(|l| l == "log-line"), "{:?}", ran.lines);
+    let entries = ctx.seal(&ran).unwrap();
+    assert!(entries.contains(&("app/out".into(), 'f')), "{entries:?}");
+    assert!(entries.contains(&("etc/.wh.motd".into(), 'f')), "{entries:?}");
+    assert!(
+        !entries
+            .iter()
+            .any(|e| e.0.starts_with("proc/") || e.0.starts_with("dev/")),
+        "{entries:?}"
+    );
+}
+
+#[test]
+fn the_workdir_is_created_and_the_user_applied() {
+    let Some(ctx) = Ctx::new() else { return };
+    let base = ctx.busybox_lower();
+    let ran = ctx.run(&base, "pwd; id -u; echo $HOME", "/home/app/src", (1000, 1000), MINUTE);
+    assert_eq!(
+        ran.lines,
+        ["/home/app/src", "1000", "/home/app"],
+        "{:?}",
+        ran.outcome.tail
+    );
+}
+
+#[test]
+fn undeclared_host_files_are_not_visible() {
+    let Some(ctx) = Ctx::new() else { return };
+    let base = ctx.busybox_lower();
+    let script = format!("test -e {} && echo leak || echo absent", ctx.home.root().display());
+    let ran = ctx.run(&base, &script, "/", (0, 0), MINUTE);
+    assert_eq!(ran.lines, ["absent"], "{:?}", ran.outcome.tail);
+}
+
+#[test]
+fn a_timeout_kills_the_step() {
+    let Some(ctx) = Ctx::new() else { return };
+    let base = ctx.busybox_lower();
+    let ran = ctx.run(&base, "echo started; sleep 30", "/", (0, 0), Duration::from_secs(1));
+    assert!(ran.outcome.timed_out && !ran.outcome.status.success());
+    assert_eq!(ran.outcome.tail, ["started"]);
+}
+
+#[test]
+fn seal_refuses_hostile_depth() {
+    let Some(ctx) = Ctx::new() else { return };
+    let base = ctx.busybox_lower();
+    let deep = vec!["d"; 140].join("/");
+    let ran = ctx.run(&base, &format!("mkdir -p /{deep}"), "/", (0, 0), MINUTE);
+    assert!(ran.outcome.status.success(), "{:?}", ran.outcome.tail);
+    assert_eq!(ctx.seal(&ran).unwrap_err().exit_code(), 3);
 }

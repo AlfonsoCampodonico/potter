@@ -11,6 +11,18 @@ use crate::error::BuildError;
 /// Subordinate ids mapped in every sandbox potter starts (spec §9.4).
 pub const IDS: u32 = 65536;
 
+/// `open_files` and `processes`, capped at the caller's own hard limits: a sandbox cannot
+/// raise a hard limit.
+pub fn limits(open_files: u64, processes: u64) -> Limits {
+    use rustix::process::{Resource, getrlimit};
+    let hard = |r: Resource, want: u64| getrlimit(r).maximum.map_or(want, |max| want.min(max));
+    Limits {
+        open_files: hard(Resource::Nofile, open_files),
+        processes: hard(Resource::Nproc, processes),
+        cgroup: None,
+    }
+}
+
 /// How potter starts sandboxes.
 #[derive(Debug, Clone)]
 pub struct SandboxCtx {
@@ -22,6 +34,7 @@ pub struct SandboxCtx {
 
 /// Exit codes of potter's hidden helpers.
 pub const HELPER_HOSTILE: i32 = 3;
+pub const HELPER_TOO_LARGE: i32 = 5;
 
 impl SandboxCtx {
     /// Runs `program args` as root of the sandbox's user namespace, in the read-only host
@@ -54,11 +67,7 @@ impl SandboxCtx {
             network: Network::None,
             nest: false,
             seccomp: false,
-            limits: Limits {
-                open_files: 1 << 16,
-                processes: 1024,
-                cgroup: None,
-            },
+            limits: limits(1 << 16, 1024),
             run_dir: run_dir.path().to_path_buf(),
         };
         sandbox::spawn(&spec, sandbox::Stdio::piped())
@@ -94,8 +103,11 @@ impl SandboxCtx {
 /// The error for a failed helper run: a violation when it says so, else infrastructure.
 pub fn helper_error(what: &str, out: &Output) -> BuildError {
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let detail = stderr.strip_prefix("error: ").unwrap_or(&stderr).to_string();
     if out.status.code() == Some(HELPER_HOSTILE) {
-        BuildError::Hostile(format!("{what}: {stderr}"))
+        BuildError::Hostile(format!("{what}: {detail}"))
+    } else if out.status.code() == Some(HELPER_TOO_LARGE) {
+        BuildError::OutputTooLarge(detail)
     } else {
         BuildError::Infra(format!("{what} ({}): {stderr}", out.status))
     }

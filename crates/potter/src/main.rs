@@ -45,6 +45,15 @@ enum Cmd {
         media_type: String,
         dest: PathBuf,
     },
+    /// Seal an overlay upper into an OCI tar diff (run inside the sandbox)
+    #[command(name = "__seal", hide = true)]
+    Seal {
+        upper: PathBuf,
+        out: PathBuf,
+        /// A mount point left out when empty
+        #[arg(long = "skip")]
+        skip: Vec<String>,
+    },
 }
 
 fn fail(message: &str, code: u8) -> ExitCode {
@@ -62,14 +71,17 @@ fn main() -> ExitCode {
         } => plan(&path, target.as_deref(), json, explain),
         Cmd::Detect { path } => detect(&path),
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
+        Cmd::Seal { upper, out, skip } => helper(potter_exec::seal::seal_to_file(&upper, &out, &skip)),
     }
 }
 
-/// A sandboxed helper's exit: 0, 3 for a violation, 4 otherwise.
+/// A sandboxed helper's exit: 0, 3 for a violation, 5 for output over its limits, 4 otherwise.
 fn helper<T>(result: Result<T, potter_exec::BuildError>) -> ExitCode {
+    use potter_exec::BuildError;
     match result {
         Ok(_) => ExitCode::SUCCESS,
-        Err(e @ potter_exec::BuildError::Hostile(_)) => fail(&e.to_string(), 3),
+        Err(BuildError::Hostile(e)) => fail(&e, 3),
+        Err(BuildError::OutputTooLarge(e)) => fail(&e, 5),
         Err(e) => fail(&e.to_string(), 4),
     }
 }

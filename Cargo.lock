@@ -1128,7 +1128,9 @@ dependencies = [
  "predicates",
  "rustix",
  "serde_json",
+ "tar",
  "tempfile",
+ "vmkit",
 ]
 
 [[package]]

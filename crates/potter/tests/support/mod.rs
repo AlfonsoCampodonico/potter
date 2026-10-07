@@ -76,6 +76,114 @@ impl Ctx {
     }
 }
 
+/// A busybox root: the host's static busybox and its applets, `/etc/passwd` with root and `app`
+/// (1000, home `/home/app`), and the usual directories.
+pub fn busybox_root() -> Vec<u8> {
+    use kiln_erofs::testtar::{Opts, TarBuilder};
+    let dir = Opts::default().mode(0o755);
+    let file = Opts::default().mode(0o644);
+    let mut t = TarBuilder::new();
+    for d in ["bin", "etc", "proc", "sys", "dev", "root", "home"] {
+        t.dir(d, &dir);
+    }
+    t.dir("tmp", &Opts::default().mode(0o1777));
+    t.dir("home/app", &Opts::default().mode(0o755).uid(1000).gid(1000));
+    let busybox = std::fs::read("/usr/bin/busybox").expect("busybox-static at /usr/bin/busybox");
+    t.file("bin/busybox", &busybox, &Opts::default().mode(0o755));
+    for applet in [
+        "sh", "mkdir", "echo", "rm", "id", "pwd", "test", "sleep", "cat", "ls", "touch", "chown", "wc", "env", "printf",
+    ] {
+        t.symlink(&format!("bin/{applet}"), "busybox", &dir);
+    }
+    t.file(
+        "etc/passwd",
+        b"root:x:0:0::/root:/bin/sh\napp:x:1000:1000::/home/app:/bin/sh\n",
+        &file,
+    );
+    t.file("etc/group", b"root:x:0:\napp:x:1000:\n", &file);
+    t.file("etc/motd", b"hello\n", &file);
+    t.finish()
+}
+
+/// A step's run: where its upper and run directory are.
+pub struct Ran {
+    pub outcome: potter_exec::ns::StepOutcome,
+    pub upper: PathBuf,
+    pub run: PathBuf,
+    pub lines: Vec<String>,
+}
+
+impl Ctx {
+    /// The unpacked busybox root.
+    pub fn busybox_lower(&self) -> PathBuf {
+        self.unpack(&busybox_root()).unwrap()
+    }
+
+    /// `script` in `workdir` as `uid:gid` over `lower`, with `HOME` from the fixture's passwd.
+    pub fn run(&self, lower: &Path, script: &str, workdir: &str, ids: (u32, u32), timeout: std::time::Duration) -> Ran {
+        let runs = tempfile::Builder::new()
+            .prefix("step-")
+            .tempdir_in(self.home.runs())
+            .unwrap()
+            .keep();
+        for d in ["upper", "work", "run"] {
+            std::fs::create_dir_all(runs.join(d)).unwrap();
+        }
+        let home = if ids.0 == 1000 { "/home/app" } else { "/root" };
+        let mut lines = Vec::new();
+        let mut log = |l: &str| lines.push(l.to_string());
+        let outcome = potter_exec::ns::run_step(potter_exec::ns::StepRun {
+            lowers: vec![lower.to_path_buf()],
+            upper: runs.join("upper"),
+            work: runs.join("work"),
+            args: potter_exec::ns::wrap(&potter_plan::Command::shell(script), workdir),
+            env: [
+                ("PATH".to_string(), "/bin".to_string()),
+                ("HOME".to_string(), home.to_string()),
+            ]
+            .into(),
+            user: vmkit::sandbox::User {
+                uid: ids.0,
+                gid: ids.1,
+                groups: vec![],
+            },
+            network: false,
+            cache_mounts: vec![],
+            timeout,
+            run_dir: runs.join("run"),
+            log: &mut log,
+        })
+        .unwrap();
+        Ran {
+            outcome,
+            upper: runs.join("upper"),
+            run: runs.join("run"),
+            lines,
+        }
+    }
+
+    /// Seals a step's upper and lists the diff's (path, type).
+    pub fn seal(&self, ran: &Ran) -> Result<Vec<(String, char)>, BuildError> {
+        let (digest, _) = potter_exec::seal::seal_in_sandbox(&self.sandbox, &ran.upper, &ran.run, &self.store, &[])?;
+        let blob = self.store.open_blob(&digest).unwrap();
+        let mut a = tar::Archive::new(blob);
+        Ok(a.entries()
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                let kind = match e.header().entry_type() {
+                    tar::EntryType::Directory => 'd',
+                    tar::EntryType::Symlink => 'l',
+                    tar::EntryType::Link => 'h',
+                    tar::EntryType::Regular => 'f',
+                    _ => '?',
+                };
+                (e.path().unwrap().display().to_string(), kind)
+            })
+            .collect())
+    }
+}
+
 pub fn xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; 256];
     let n = rustix::fs::lgetxattr(path, name, &mut buf).ok()?;

@@ -152,7 +152,7 @@ enum Item {
     },
 }
 
-fn open_dir(dir: &OwnedFd, name: &str, rel: &str) -> Result<OwnedFd, BuildError> {
+pub(crate) fn open_dir(dir: &OwnedFd, name: &str, rel: &str) -> Result<OwnedFd, BuildError> {
     openat(
         dir,
         name,
@@ -163,7 +163,7 @@ fn open_dir(dir: &OwnedFd, name: &str, rel: &str) -> Result<OwnedFd, BuildError>
 }
 
 /// The names in `dir`, sorted bytewise.
-fn names(dir: &OwnedFd, rel: &str) -> Result<Vec<String>, BuildError> {
+pub(crate) fn names(dir: &OwnedFd, rel: &str) -> Result<Vec<String>, BuildError> {
     let listing = open_dir(dir, ".", rel)?;
     let mut out = Vec::new();
     for entry in Dir::new(listing).map_err(|e| io(format!("listing {rel}"))(e.into()))? {
@@ -255,7 +255,7 @@ impl Walk<'_> {
 }
 
 /// Opens `rel` below `root` one component at a time, never following a symlink.
-fn open_beneath(root: &OwnedFd, rel: &str) -> Result<OwnedFd, BuildError> {
+pub(crate) fn open_beneath(root: &OwnedFd, rel: &str) -> Result<OwnedFd, BuildError> {
     let mut parts: Vec<&str> = rel.split('/').collect();
     let file = parts.pop().unwrap_or_default();
     let mut dir: Option<OwnedFd> = None;

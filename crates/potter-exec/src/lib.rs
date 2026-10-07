@@ -6,7 +6,9 @@ pub mod base;
 mod error;
 pub mod inputs;
 pub mod merge;
+pub mod ns;
 pub mod sandboxed;
+pub mod seal;
 pub mod tarball;
 #[cfg(test)]
 mod testing;

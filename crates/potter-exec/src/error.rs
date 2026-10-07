@@ -22,6 +22,8 @@ pub enum BuildError {
     },
     #[error("sandbox violation: {0}")]
     Hostile(String),
+    #[error("the build output exceeded {0}")]
+    OutputTooLarge(String),
     #[error("{0}")]
     Infra(String),
 }
@@ -31,7 +33,7 @@ impl BuildError {
     /// sandbox or protocol violation, 4 infrastructure.
     pub fn exit_code(&self) -> u8 {
         match self {
-            BuildError::StepFailed { .. } => 1,
+            BuildError::StepFailed { .. } | BuildError::OutputTooLarge(_) => 1,
             BuildError::SymlinkEscape { .. }
             | BuildError::SpecialFile { .. }
             | BuildError::Unsupported { .. }
