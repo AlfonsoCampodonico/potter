@@ -61,7 +61,7 @@ impl OutputDisk {
         max_layer: u64,
     ) -> Result<(Digest, u64), BuildError> {
         let r = report;
-        if r.offset % ALIGN != 0 {
+        if !r.offset.is_multiple_of(ALIGN) {
             return Err(violation(r.id, format!("offset {} is not {ALIGN}-aligned", r.offset)));
         }
         if r.offset < self.cursor {
