@@ -21,5 +21,6 @@ pub mod tarball;
 #[cfg(test)]
 mod testing;
 pub mod unpack;
+pub mod vm;
 
 pub use error::BuildError;
