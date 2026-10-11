@@ -67,6 +67,18 @@ enum Cmd {
         /// plain: lines on stderr; json: one event per line on stdout (spec §11)
         #[arg(long, value_enum, default_value = "auto")]
         progress: ProgressMode,
+        /// Also push the image, with its SBOM and provenance attached: registry=<ref>
+        #[arg(long)]
+        output: Option<String>,
+        /// Sign the pushed image and its attestations with this PKCS#8 PEM key (spec §17)
+        #[arg(long)]
+        sign_key: Option<PathBuf>,
+        /// The builder id recorded in provenance
+        #[arg(long, default_value = "https://potter.dev/builder/local")]
+        builder_id: String,
+        /// The tenant's cache key: 32 bytes, raw or as 64 hex characters (default: kept in $POTTER_HOME)
+        #[arg(long)]
+        tenant_key_file: Option<PathBuf>,
     },
     /// Show which providers claim a directory
     Detect {
@@ -137,7 +149,19 @@ fn main() -> ExitCode {
             cache_from,
             cache_to,
             affected,
+            output,
+            sign_key,
+            builder_id,
+            tenant_key_file,
         } => {
+            let publish = match Publish::check(output.as_deref(), sign_key, builder_id, &target) {
+                Ok(p) => p,
+                Err((e, code)) => return fail(&e, code),
+            };
+            let tenant_key = match tenant_key_file.as_deref().map(read_tenant_key).transpose() {
+                Ok(k) => k,
+                Err((e, code)) => return fail(&e, code),
+            };
             let env = std::env::var("POTTER_REMOTE_CACHE").ok().filter(|v| !v.is_empty());
             let remotes = (cache_from.or_else(|| env.clone()), cache_to.or(env));
             build(
@@ -151,6 +175,8 @@ fn main() -> ExitCode {
                 progress == ProgressMode::Json,
                 remotes,
                 affected.as_deref(),
+                publish.as_ref(),
+                tenant_key,
             )
         }
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
@@ -215,6 +241,69 @@ fn changed_since(
     potter_exec::affected::affected(plan, path, &then, &then_root).map_err(|e| (e.to_string(), e.exit_code()))
 }
 
+/// Where a build publishes (spec §17, §18).
+struct Publish {
+    reference: kiln_registry::Reference,
+    sign_key: Option<PathBuf>,
+    builder_id: String,
+}
+
+impl Publish {
+    /// Checks the publishing flags before anything runs.
+    fn check(
+        output: Option<&str>,
+        sign_key: Option<PathBuf>,
+        builder_id: String,
+        targets: &[String],
+    ) -> Result<Option<Publish>, (String, u8)> {
+        let Some(output) = output else {
+            return match sign_key {
+                Some(_) => Err(("--sign-key needs --output".into(), 2)),
+                None => Ok(None),
+            };
+        };
+        let Some(r) = output.strip_prefix("registry=") else {
+            return Err((format!("--output: expected registry=<ref>, not {output:?}"), 2));
+        };
+        let reference =
+            kiln_registry::Reference::parse(r).map_err(|e| (format!("--output {r:?}: {e}"), 2))?;
+        if reference.digest().is_some() {
+            return Err((format!("--output {r:?}: name a tag, not a digest"), 2));
+        }
+        if targets.len() != 1 {
+            return Err(("--output needs exactly one --target".into(), 2));
+        }
+        if let Some(k) = &sign_key
+            && k.to_string_lossy().starts_with("kms://")
+        {
+            return Err(("--sign-key: KMS keys are not supported yet; pass a PKCS#8 PEM file".into(), 2));
+        }
+        Ok(Some(Publish {
+            reference,
+            sign_key,
+            builder_id,
+        }))
+    }
+}
+
+/// A `--tenant-key-file`: 32 raw bytes or 64 hex characters (a trailing newline allowed).
+fn read_tenant_key(path: &Path) -> Result<[u8; 32], (String, u8)> {
+    let bytes = std::fs::read(path).map_err(|e| (format!("--tenant-key-file {}: {e}", path.display()), 4))?;
+    let bad = || (format!("--tenant-key-file {}: expected 32 bytes or 64 hex characters", path.display()), 2);
+    if let Ok(k) = <[u8; 32]>::try_from(bytes.as_slice()) {
+        return Ok(k);
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| bad())?.trim_end_matches(['\n', '\r']);
+    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    let mut k = [0u8; 32];
+    for (i, b) in k.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+    }
+    Ok(k)
+}
+
 /// `id=<id>,src=<file>` flags as secret values.
 fn read_secrets(flags: &[String]) -> Result<std::collections::BTreeMap<String, Vec<u8>>, (String, u8)> {
     let mut out = std::collections::BTreeMap::new();
@@ -251,6 +340,8 @@ fn build(
     json: bool,
     remotes: (Option<String>, Option<String>),
     affected_ref: Option<&str>,
+    publish: Option<&Publish>,
+    tenant_key_flag: Option<[u8; 32]>,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
@@ -329,7 +420,7 @@ fn build(
         Ok(s) => s,
         Err((e, code)) => return fail(&e, code),
     };
-    let tenant_key = match potter_cache::tenant_key(&home, &tenant) {
+    let tenant_key = match tenant_key_flag.map(Ok).unwrap_or_else(|| potter_cache::tenant_key(&home, &tenant)) {
         Ok(k) => k,
         Err(e) => return fail(&e.to_string(), 4),
     };

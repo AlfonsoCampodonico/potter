@@ -142,3 +142,35 @@ fn build_never_picks_the_namespace_executor_by_itself() {
         .code(4)
         .stderr(predicate::str::contains("P4"));
 }
+
+fn build_fails(args: &[&str], code: i32, message: &str) {
+    potter()
+        .args(["build", "--executor", "ns"])
+        .args(args)
+        .arg(fixture("nestjs"))
+        .assert()
+        .code(code)
+        .stderr(predicate::str::contains(message));
+}
+
+#[test]
+fn output_flags_are_checked_before_anything_runs() {
+    build_fails(&["--output", "oci=x"], 2, "--output: expected registry=<ref>");
+    build_fails(&["--output", "registry=Bad Ref"], 2, "--output");
+    build_fails(&["--output", "registry=r.example/app:1"], 2, "--output needs exactly one --target");
+    build_fails(&["--sign-key", "k.pem", "--target", "app"], 2, "--sign-key needs --output");
+    build_fails(
+        &["--output", "registry=r.example/app:1", "--target", "app", "--sign-key", "kms://alias/x"],
+        2,
+        "KMS",
+    );
+}
+
+#[test]
+fn a_tenant_key_file_must_hold_32_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let short = dir.path().join("short");
+    std::fs::write(&short, b"abc").unwrap();
+    build_fails(&["--tenant-key-file", short.to_str().unwrap()], 2, "32 bytes or 64 hex");
+    build_fails(&["--tenant-key-file", "/nonexistent/key"], 4, "--tenant-key-file");
+}
