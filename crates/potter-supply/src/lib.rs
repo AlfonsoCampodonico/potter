@@ -3,3 +3,4 @@
 pub mod lockfiles;
 pub mod provenance;
 pub mod sbom;
+pub mod sign;
