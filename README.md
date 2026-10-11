@@ -31,7 +31,7 @@ Requirements (Linux only):
 - `pasta`, `nft` and `ip`;
 - vmkit's `vmkit-sandbox` helper (`$VMKIT_SANDBOX`, next to `potter`, or on `PATH`), with its AppArmor profile where Ubuntu restricts user namespaces.
 
-There's no implicit executor: the VM executor ships in P4, and potter never falls back to namespaces by itself.
+There's no implicit executor, and potter never falls back to namespaces by itself. `--executor vm` (one microVM per target chain, spec §9.3) is built against a backend trait and tested with a scripted VM; it fails with exit 4 until kiln's build mode (kiln M3e) is wired in.
 
 P2a builds plans with OCI bases, such as an explicit `potter.toml` target with `[target.x.base] oci = "..."`.
 These ship later:

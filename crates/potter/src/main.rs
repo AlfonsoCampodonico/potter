@@ -254,7 +254,7 @@ fn build(
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
-    const VM: &str = "the VM executor ships in milestone P4";
+    const VM: &str = "VM builds need kiln build mode (kiln M3e), which this potter does not have yet";
     match executor {
         None => {
             return fail(

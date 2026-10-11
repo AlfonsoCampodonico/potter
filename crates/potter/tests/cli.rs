@@ -140,5 +140,5 @@ fn build_never_picks_the_namespace_executor_by_itself() {
         .arg(fixture("explicit-go"))
         .assert()
         .code(4)
-        .stderr(predicate::str::contains("P4"));
+        .stderr(predicate::str::contains("kiln build mode (kiln M3e)"));
 }

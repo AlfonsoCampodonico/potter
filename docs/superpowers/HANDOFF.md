@@ -150,3 +150,9 @@ Deferred minors:
   - False positives: LFS, submodules, export attributes, untracked files (it compares the worktree, not HEAD, with the ref).
   - Unchanged targets don't show their last image ref.
 - **Next:** P6b (SBOM, provenance, signing, `potter verify`, build Jobs).
+
+**P4a (2026-10-11):** the potter side of the VM executor, on branch `p4a-vm-executor`. Plan: `docs/superpowers/plans/2026-10-11-potter-p4a-vm-executor.md`; ledger rulings in its SDD workspace.
+- `potter-exec/src/vm/`: `backend.rs` (`BuildBackend`/`BuildVm`, `BuildSpec`, `RunStep`, `StepOutcome`, `Exit`), `ingest.rs` (`OutputDisk::take`: P4 host-side checks of every guest report), `disks.rs` (erofs per layer cached by diff id, `plan_disks` device budget with a reserve for mid-chain layers, `squashed` via `kiln_erofs::squash`), `fake.rs` (scripted VM, feature `testing`), `mod.rs` (`Session`: one VM from the first miss, torn down on drop).
+- Trust ordering (§8.4, P3): the class is in every `Run` key; `ExecutorClass::lookup_order` makes vm builds look up vm keys only and ns builds fall back to vm. Host-built steps key with a fixed class so ns builds can follow vm chains.
+- Not yet: cache mounts in vm builds (refused, exit 2 — need ext4 mount disks from M3e); the real backend. `--executor vm` exits 4 naming kiln M3e.
+- **P4b** = pin the M3e kiln rev, implement `BuildBackend` over `kiln_run::build`, add KVM e2e tests. Asked of M3e (via the kiln session): accept a host-created output disk; report `max_virtio_devices`; inline secrets only on a tmpfs; kiln-init `mkdir -p` + `cd` the step's workdir; `StepSealed.entries` counts logical tar entries (pax/GNU long-name headers not counted); diffs never name absolute or `..` paths.
