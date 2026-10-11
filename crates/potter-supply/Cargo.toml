@@ -1,0 +1,16 @@
+[package]
+name = "potter-supply"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "potter's supply-chain records: lockfile components, SPDX SBOM, SLSA provenance and signatures (spec §17)"
+
+[dependencies]
+base64 = "0.22"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+potter-detect = { path = "../potter-detect" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1.0.151"
+sha2 = "0.10"
+thiserror = "2.0.21"
+toml = "0.9"
