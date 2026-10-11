@@ -393,6 +393,7 @@ fn build(
         platform: kiln_oci::Platform::host(),
         no_cache,
         auth: kiln_registry::DockerConfig::from_env(),
+        executor: potter_cache::ExecutorClass::Ns,
         secrets: &secrets,
         tenant_key,
         cache_from: cache_from.as_ref(),

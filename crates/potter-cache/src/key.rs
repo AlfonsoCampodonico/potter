@@ -20,7 +20,21 @@ pub enum ExecutorClass {
 }
 
 impl ExecutorClass {
-    fn as_str(self) -> &'static str {
+    /// The entry classes a build of this class looks up, most preferred first (spec §8.4): a
+    /// `vm` build uses `vm` keys only; an `ns` build tries the `vm` key when its own misses.
+    pub fn lookup_order(self) -> &'static [ExecutorClass] {
+        match self {
+            ExecutorClass::Vm => &[ExecutorClass::Vm],
+            ExecutorClass::Ns => &[ExecutorClass::Ns, ExecutorClass::Vm],
+        }
+    }
+
+    /// Whether a build of this class may use an entry of class `entry` (P3).
+    pub fn accepts(self, entry: ExecutorClass) -> bool {
+        self.lookup_order().contains(&entry)
+    }
+
+    pub fn as_str(self) -> &'static str {
         match self {
             ExecutorClass::Vm => "vm",
             ExecutorClass::Ns => "ns",
@@ -171,6 +185,19 @@ mod tests {
         let mut i = input(&step, &env);
         i.class = ExecutorClass::Vm;
         assert_ne!(k, step_key(&parent, &i).unwrap(), "class");
+    }
+
+    #[test]
+    fn a_vm_build_looks_up_vm_keys_only_and_an_ns_build_falls_back_to_vm() {
+        assert_eq!(ExecutorClass::Vm.lookup_order(), [ExecutorClass::Vm]);
+        assert_eq!(ExecutorClass::Ns.lookup_order(), [ExecutorClass::Ns, ExecutorClass::Vm]);
+        assert!(ExecutorClass::Ns.accepts(ExecutorClass::Vm));
+        assert!(ExecutorClass::Ns.accepts(ExecutorClass::Ns));
+        assert!(ExecutorClass::Vm.accepts(ExecutorClass::Vm));
+        assert!(
+            !ExecutorClass::Vm.accepts(ExecutorClass::Ns),
+            "P3: the reverse is never done"
+        );
     }
 
     #[test]

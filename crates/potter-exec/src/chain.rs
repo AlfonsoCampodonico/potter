@@ -33,6 +33,8 @@ pub struct BuildCtx<'a> {
     pub platform: Platform,
     pub no_cache: bool,
     pub auth: DockerConfig,
+    /// Who runs the steps: decides the keys looked up and the class of new entries (spec §8.4).
+    pub executor: ExecutorClass,
     /// Build secrets by id (spec §5.4).
     pub secrets: &'a BTreeMap<String, Vec<u8>>,
     /// The tenant's key: secrets enter cache keys as its HMAC.
@@ -282,7 +284,8 @@ pub fn run_steps(
             let sname = step.name().to_string();
             match step {
                 Step::Meta { env, workdir, user, .. } => {
-                    key = step_key(&key, &input(step, None, &state.env, &platform, &[])).map_err(cache_err)?;
+                    key = step_key(&key, &input(step, None, &state.env, &platform, &[], HOST_CLASS))
+                        .map_err(cache_err)?;
                     state.env.extend(env.clone());
                     if let Some(w) = workdir {
                         state.workdir = w.clone();
@@ -316,8 +319,11 @@ pub fn run_steps(
                         .store
                         .put_reader(&mut file)
                         .map_err(|e| BuildError::Infra(format!("storing the inputs of {sname}: {e}")))?;
-                    key = step_key(&key, &input(step, Some(&d.to_string()), &state.env, &platform, &[]))
-                        .map_err(cache_err)?;
+                    key = step_key(
+                        &key,
+                        &input(step, Some(&d.to_string()), &state.env, &platform, &[], HOST_CLASS),
+                    )
+                    .map_err(cache_err)?;
                     state.records.push(StepRecord {
                         chain: tname.clone(),
                         step: sname.clone(),
@@ -356,51 +362,69 @@ pub fn run_steps(
                     }
                     let secrets_key = potter_cache::secrets_digest(&ctx.tenant_key, &values);
                     let parent = key;
-                    key = step_key(&key, &input(step, None, &step_env, &platform, &secrets_key)).map_err(cache_err)?;
-                    let local = |ctx: &BuildCtx| {
+                    // One key per class this build may use, most preferred first (spec §8.4).
+                    let mut candidates = Vec::new();
+                    for &class in ctx.executor.lookup_order() {
+                        let k = step_key(&parent, &input(step, None, &step_env, &platform, &secrets_key, class))
+                            .map_err(cache_err)?;
+                        candidates.push((class, k));
+                    }
+                    key = candidates[0].1;
+                    let local = |ctx: &BuildCtx, class: ExecutorClass, k: &potter_cache::CacheKey| {
                         (!ctx.no_cache)
-                            .then(|| ctx.index.get(&key).ok().flatten())
+                            .then(|| ctx.index.get(k).ok().flatten())
                             .flatten()
-                            .and_then(|e| Some((Digest::parse(&e.layer?).ok()?, e.class)))
-                            .filter(|(d, _)| ctx.store.has_blob(d))
+                            // An entry under a key of another class was not written by potter.
+                            .filter(|e| e.class == class)
+                            .and_then(|e| Digest::parse(&e.layer?).ok())
+                            .filter(|d| ctx.store.has_blob(d))
                     };
-                    let mut hit = local(ctx).map(|(d, class)| (d, StepState::Cached, class));
+                    let mut hit = candidates
+                        .iter()
+                        .find_map(|&(class, k)| local(ctx, class, &k).map(|d| (d, StepState::Cached, class, k)));
                     // The longest remote prefix: asked until its first miss (spec §8.3).
                     if hit.is_none()
                         && !ctx.no_cache
                         && *remote_live
                         && let Some(remote) = ctx.cache_from
                     {
-                        let accept = [ExecutorClass::Ns, ExecutorClass::Vm];
-                        match remote.get(ctx.store, &key, &parent, &accept, &ctx.home.runs()) {
-                            Ok(Some(entry)) if entry.layer.is_some() => {
-                                ctx.index.put(&key, &entry).map_err(cache_err)?;
-                                hit = local(ctx).map(|(d, class)| (d, StepState::Pulled, class));
+                        for &(class, k) in &candidates {
+                            match remote.get(ctx.store, &k, &parent, &[class], &ctx.home.runs()) {
+                                Ok(Some(entry)) if entry.layer.is_some() => {
+                                    ctx.index.put(&k, &entry).map_err(cache_err)?;
+                                    hit = local(ctx, class, &k).map(|d| (d, StepState::Pulled, class, k));
+                                    break;
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    *remote_live = false;
+                                    (ctx.progress)(Progress::Warning(format!(
+                                        "step {sname}: the remote cache failed, building locally: {e}"
+                                    )));
+                                    break;
+                                }
                             }
-                            Ok(_) => *remote_live = false,
-                            Err(e) => {
-                                *remote_live = false;
-                                (ctx.progress)(Progress::Warning(format!(
-                                    "step {sname}: the remote cache failed, building locally: {e}"
-                                )));
-                            }
+                        }
+                        if hit.is_none() {
+                            *remote_live = false;
                         }
                     }
                     // A local hit is published too, so a remote holds every step of a chain.
-                    if let (Some((d, StepState::Cached, class)), Some(remote)) = (&hit, ctx.cache_to) {
+                    if let (Some((d, StepState::Cached, class, key)), Some(remote)) = (&hit, ctx.cache_to) {
                         let entry = Entry {
                             layer: Some(d.to_string()),
                             class: *class,
                             created: now(),
                             potter: env!("CARGO_PKG_VERSION").into(),
                         };
-                        if let Err(e) = remote.put(ctx.store, &key, &parent, &entry) {
+                        if let Err(e) = remote.put(ctx.store, key, &parent, &entry) {
                             (ctx.progress)(Progress::Warning(format!(
                                 "step {sname}: pushing to the remote cache failed: {e}"
                             )));
                         }
                     }
-                    if let Some((d, how, class)) = hit {
+                    if let Some((d, how, class, k)) = hit {
+                        key = k;
                         let size = ctx.store.blob_size(&d).map_err(|e| BuildError::Infra(e.to_string()))?;
                         state.records.push(StepRecord {
                             chain: tname.clone(),
@@ -422,7 +446,13 @@ pub fn run_steps(
                         });
                         continue;
                     }
-                    // A miss: every layer so far, unpacked, top first.
+                    // A miss: the step runs under this build's own class.
+                    key = candidates
+                        .iter()
+                        .find(|(c, _)| *c == ctx.executor)
+                        .expect("a build looks up its own class")
+                        .1;
+                    // Every layer so far, unpacked, top first.
                     for (i, layer) in state.layers.iter().enumerate() {
                         if lowers[i].is_none() {
                             lowers[i] = Some(ensure_unpacked(ctx.sandbox, ctx.store, &layer.descriptor, ctx.home)?);
@@ -569,7 +599,7 @@ pub fn run_steps(
                         seal_in_sandbox(ctx.sandbox, &run.join("upper"), &run.join("run"), ctx.store, &skip)?;
                     let entry = Entry {
                         layer: Some(d.to_string()),
-                        class: ExecutorClass::Ns,
+                        class: ctx.executor,
                         created: now(),
                         potter: env!("CARGO_PKG_VERSION").into(),
                     };
@@ -592,7 +622,7 @@ pub fn run_steps(
                         step: sname.clone(),
                         key: Some(key.hex()),
                         layer: d.clone(),
-                        class: Some(ExecutorClass::Ns),
+                        class: Some(ctx.executor),
                     });
                     state.layers.push(LayerRef {
                         descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
@@ -642,8 +672,11 @@ pub fn run_steps(
                         .put_reader(&mut file)
                         .map_err(|e| BuildError::Infra(format!("storing the copy of {sname}: {e}")))?;
                     // Like inputs, the layer's digest is the step's input (spec §8.1).
-                    key = step_key(&key, &input(step, Some(&d.to_string()), &state.env, &platform, &[]))
-                        .map_err(cache_err)?;
+                    key = step_key(
+                        &key,
+                        &input(step, Some(&d.to_string()), &state.env, &platform, &[], HOST_CLASS),
+                    )
+                    .map_err(cache_err)?;
                     state.records.push(StepRecord {
                         chain: tname.clone(),
                         step: sname.clone(),
@@ -668,19 +701,26 @@ pub fn run_steps(
     result.map(|()| state)
 }
 
+/// The class in the key of a step the host builds (`Meta`, `Inputs`, `CopyFrom`). It is the
+/// same for every executor, so an `ns` build can follow a `vm` chain through those steps; what
+/// keeps `vm` and `ns` entries apart is the class in each `Run` step's key, which every later
+/// key inherits through its parent (spec §8.4).
+const HOST_CLASS: ExecutorClass = ExecutorClass::Ns;
+
 fn input<'a>(
     step: &'a Step,
     inputs_digest: Option<&'a str>,
     env: &'a BTreeMap<String, String>,
     platform: &'a str,
     secrets: &'a [u8],
+    class: ExecutorClass,
 ) -> StepInput<'a> {
     StepInput {
         step,
         inputs_digest,
         env,
         platform,
-        class: ExecutorClass::Ns,
+        class,
         secrets,
     }
 }
@@ -781,6 +821,7 @@ mod tests {
             platform: kiln_oci::Platform::host(),
             no_cache: false,
             auth: kiln_registry::DockerConfig::anonymous(),
+            executor: ExecutorClass::Ns,
             secrets: &BTreeMap::new(),
             tenant_key: [0u8; 32],
             cache_from: None,

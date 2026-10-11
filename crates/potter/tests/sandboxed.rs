@@ -461,3 +461,22 @@ fn a_build_records_each_layer_with_its_key_and_executor_and_the_bases_it_used() 
     let again = ctx.build(&target, repo.path(), &[]).unwrap();
     assert_eq!(again.steps, first.steps);
 }
+
+#[test]
+fn an_entry_whose_class_does_not_match_its_key_is_a_miss() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[("src/a.txt", "a")]);
+    let target = ctx.target(&base, vec![run("build", "echo built > /out")]);
+    let first = ctx.chain(&target, repo.path()).unwrap();
+    assert_eq!(first.executed, 1);
+    // Relabel every entry: an ns key now claims a vm entry, which potter never writes.
+    let index = ctx.home.root().join("cache/local/index");
+    for e in std::fs::read_dir(&index).unwrap() {
+        let path = e.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace(r#""class":"ns""#, r#""class":"vm""#)).unwrap();
+    }
+    let again = ctx.chain(&target, repo.path()).unwrap();
+    assert_eq!((again.executed, again.cached), (1, 0));
+}
