@@ -111,3 +111,24 @@ Deferred:
 - A step gets no supplementary groups.
 
 **2026-10-07:** vmkit PR #6 is merged. potter pins vmkit `main` at c4363a2: #6 plus #7, which only changes the kernels workflow. P2a merges to potter main.
+
+**P2b (2026-10-11):** detected targets build through a stopgap catalog (`potter-exec/src/stopgap.rs`). Plan: `docs/superpowers/plans/2026-10-07-potter-p2b-stopgap.md`.
+- **Bases:** catalog bases are lowered onto upstream Debian trixie images.
+  - Build chains use the full images (with compilers); run bases use slim ones.
+  - Install steps cover PHP extensions (install-php-extensions), composer (with unzip and git), uv, poetry and pipenv, node beside php/ruby/python, bun beside php/ruby, nginx, and a busybox `static-server` shim.
+- **`apt` steps** run unpinned; the snapshot stays in the cache key through the environment.
+- **The image's run base** is its own cached chain (`<target>:run`).
+- **Verified in Lima against Docker Hub** (`POTTER_TEST_NETWORK=1`): Go, Flask and Node detected projects; composer dist installs; native gems.
+- **Still refused:**
+  - `services`, until kiln M3d lands; then write the `dev.kiln.services` label and pin kiln.
+  - Octane roadrunner and frankenphp.
+  - `copy_from`, secrets and stage bases.
+- **Deferred minors:**
+  - bun and deno versions are ignored;
+  - floating installer URLs must be pinned before a remote cache (P6);
+  - the executed/cached counts leave out the run chain;
+  - an OCI image base equal to the build base is resolved twice;
+  - the export-empty path takes its env differently from the run chain;
+  - `php-fpm` without `php` is dropped silently;
+  - the network tests assert little;
+  - `lower()` trusts input that callers validated.
