@@ -55,6 +55,9 @@ enum Cmd {
         /// A build secret for steps that mount it: id=<id>,src=<file>
         #[arg(long = "secret")]
         secrets: Vec<String>,
+        /// plain: lines on stderr; json: one event per line on stdout (spec §11)
+        #[arg(long, value_enum, default_value = "auto")]
+        progress: ProgressMode,
     },
     /// Show which providers claim a directory
     Detect {
@@ -77,6 +80,18 @@ enum Cmd {
         #[arg(long = "skip")]
         skip: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ProgressMode {
+    Auto,
+    Plain,
+    Json,
+}
+
+/// One `--progress json` event.
+fn emit(event: serde_json::Value) {
+    println!("{event}");
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -109,7 +124,17 @@ fn main() -> ExitCode {
             no_cache,
             tags,
             secrets,
-        } => build(&path, &target, executor, &tenant, no_cache, &tags, &secrets),
+            progress,
+        } => build(
+            &path,
+            &target,
+            executor,
+            &tenant,
+            no_cache,
+            &tags,
+            &secrets,
+            progress == ProgressMode::Json,
+        ),
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
         Cmd::Seal { upper, out, skip } => helper(potter_exec::seal::seal_to_file(&upper, &out, &skip)),
     }
@@ -159,8 +184,10 @@ fn build(
     no_cache: bool,
     tags: &[String],
     secret_flags: &[String],
+    json: bool,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
+    use serde_json::json;
     const VM: &str = "the VM executor ships in milestone P4";
     match executor {
         None => {
@@ -233,6 +260,19 @@ fn build(
         Err(e) => return fail(&e.to_string(), e.exit_code()),
     };
     let mut progress = |p: Progress| match p {
+        Progress::Step { target, step, state } if json => {
+            let (event, secs) = match state {
+                StepState::Cached => ("cache_hit", None),
+                StepState::Running => ("step_start", None),
+                StepState::Done { secs } => ("sealed", Some(secs)),
+                StepState::Failed => ("failed", None),
+            };
+            emit(json!({"event": event, "target": target, "step": step, "secs": secs}));
+        }
+        Progress::Warning(w) if json => emit(json!({"event": "warning", "message": w})),
+        Progress::Log { target, step, line } if json => {
+            emit(json!({"event": "log", "target": target, "step": step, "line": line}))
+        }
         Progress::Step { target, step, state } => {
             let state = match state {
                 StepState::Cached => "cached".to_string(),
@@ -261,6 +301,14 @@ fn build(
     };
     for t in targets {
         match potter_exec::assemble::build_target(&mut ctx, t, path, tags) {
+            Ok(b) if json => emit(json!({
+                "event": "target_built",
+                "target": b.target,
+                "reference": b.reference,
+                "digest": b.digest.to_string(),
+                "executed": b.executed,
+                "cached": b.cached,
+            })),
             Ok(b) => println!(
                 "{} {} (executed {}, cached {})",
                 sanitize(&b.reference),
@@ -268,7 +316,13 @@ fn build(
                 b.executed,
                 b.cached
             ),
-            Err(e) => return fail(&e.to_string(), e.exit_code()),
+            Err(e) => {
+                if json {
+                    let class = if e.exit_code() == 3 { "hostile" } else { "error" };
+                    emit(json!({"event": class, "target": t.name, "message": e.to_string(), "exit": e.exit_code()}));
+                }
+                return fail(&e.to_string(), e.exit_code());
+            }
         }
     }
     ExitCode::SUCCESS

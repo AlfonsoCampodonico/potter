@@ -200,3 +200,33 @@ fn native_gems_compile_on_the_ruby_build_base() {
     let (code, _, stderr) = build(&ctx, repo.path(), &[]);
     assert_eq!(code, 0, "{stderr}");
 }
+
+#[test]
+fn progress_json_is_one_event_per_line() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = project(&base);
+    let events = |extra: &[&str]| -> Vec<serde_json::Value> {
+        let mut args = vec!["--progress", "json"];
+        args.extend_from_slice(extra);
+        let (code, stdout, stderr) = build(&ctx, repo.path(), &args);
+        assert_eq!(code, 0, "{stderr}");
+        stdout
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l:?}: {e}")))
+            .collect()
+    };
+    let first = events(&[]);
+    let kinds: Vec<&str> = first.iter().map(|e| e["event"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"step_start") && kinds.contains(&"sealed"), "{kinds:?}");
+    let built = first.last().unwrap();
+    assert_eq!(built["event"], "target_built");
+    assert_eq!(built["target"], "app");
+    assert_eq!(built["reference"], "potter/app:latest");
+    assert_eq!(built["executed"], 1);
+    let second = events(&[]);
+    assert!(
+        second.iter().any(|e| e["event"] == "cache_hit" && e["step"] == "build"),
+        "{second:?}"
+    );
+}
