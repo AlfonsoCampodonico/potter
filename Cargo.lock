@@ -1278,6 +1278,7 @@ name = "potter"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "base64 0.22.1",
  "clap",
  "kiln-erofs",
  "kiln-image",
@@ -1289,6 +1290,7 @@ dependencies = [
  "potter-detect",
  "potter-exec",
  "potter-plan",
+ "potter-supply",
  "predicates",
  "rustix",
  "serde_json",
@@ -1352,6 +1354,7 @@ dependencies = [
  "kiln-store",
  "potter-cache",
  "potter-plan",
+ "potter-supply",
  "rustix",
  "serde",
  "serde_json",

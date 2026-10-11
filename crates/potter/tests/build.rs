@@ -350,3 +350,71 @@ fn local_hits_are_published_too() {
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("(executed 0, cached 1)"), "{stdout}\n{stderr}");
 }
+
+#[test]
+fn a_published_image_carries_signed_attestations_that_verify() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (reg, _dir, base) = support::serve_busybox();
+    let repo = project(&base);
+    std::fs::write(
+        repo.path().join("composer.lock"),
+        r#"{"packages":[{"name":"laravel/framework","version":"v11.0.0"}]}"#,
+    )
+    .unwrap();
+    let keys = tempfile::tempdir().unwrap();
+    let potter = || Command::cargo_bin("potter").unwrap();
+    assert!(
+        potter()
+            .args(["key", "generate"])
+            .arg(keys.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let image = format!("{}/acme/app:v1", reg.host());
+    let key = keys.path().join("potter.key");
+    let (code, stdout, stderr) = build(
+        &ctx,
+        repo.path(),
+        &[
+            "--target",
+            "app",
+            "--output",
+            &format!("registry={image}"),
+            "--sign-key",
+            key.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains(&format!("pushed {image}@sha256:")), "{stdout}");
+    assert!(stdout.contains("(3 attestations)"), "{stdout}");
+    let out = potter()
+        .args(["verify", &image, "--key"])
+        .arg(keys.path().join("potter.pub"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(text.matches(": verified").count(), 3, "{text}");
+
+    // The SBOM lists the lockfile's packages, read from the inputs layer.
+    let publisher = potter_exec::publish::Publisher::new(
+        &kiln_registry::Reference::parse(&image).unwrap(),
+        kiln_registry::DockerConfig::anonymous(),
+    )
+    .unwrap();
+    let subject = publisher.resolve("v1").unwrap();
+    let sbom = publisher
+        .referrers(&subject.digest)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.kind == Some(potter_exec::publish::Kind::Sbom))
+        .unwrap();
+    let (_, bundle) = publisher.fetch(&ctx.store, &sbom.descriptor).unwrap();
+    let bundle: serde_json::Value = serde_json::from_slice(&bundle).unwrap();
+    let payload = bundle["dsseEnvelope"]["payload"].as_str().unwrap();
+    use base64::Engine;
+    let statement = base64::engine::general_purpose::STANDARD.decode(payload).unwrap();
+    assert!(String::from_utf8_lossy(&statement).contains("laravel/framework"));
+}

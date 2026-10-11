@@ -18,6 +18,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Parsed once per run: the size of the largest variant does not matter.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Print the build plan for a repository
     Plan {
@@ -80,6 +82,19 @@ enum Cmd {
         #[arg(long)]
         tenant_key_file: Option<PathBuf>,
     },
+    /// Check a pushed image's SBOM, provenance and signature against a public key (spec §17)
+    Verify {
+        /// The image: <registry>/<repository>[:tag|@digest]
+        image: String,
+        /// The PEM public key the attestations must be signed with
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Manage signing keys
+    Key {
+        #[command(subcommand)]
+        command: KeyCmd,
+    },
     /// Show which providers claim a directory
     Detect {
         #[arg(default_value = ".")]
@@ -101,6 +116,12 @@ enum Cmd {
         #[arg(long = "skip")]
         skip: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum KeyCmd {
+    /// Write a new P-256 signing key: <dir>/potter.key (0600) and <dir>/potter.pub
+    Generate { dir: PathBuf },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -137,6 +158,10 @@ fn main() -> ExitCode {
             explain,
         } => plan(&path, target.as_deref(), json, explain),
         Cmd::Detect { path } => detect(&path),
+        Cmd::Verify { image, key } => verify(&image, &key),
+        Cmd::Key {
+            command: KeyCmd::Generate { dir },
+        } => key_generate(&dir),
         Cmd::Build {
             path,
             target,
@@ -265,8 +290,7 @@ impl Publish {
         let Some(r) = output.strip_prefix("registry=") else {
             return Err((format!("--output: expected registry=<ref>, not {output:?}"), 2));
         };
-        let reference =
-            kiln_registry::Reference::parse(r).map_err(|e| (format!("--output {r:?}: {e}"), 2))?;
+        let reference = kiln_registry::Reference::parse(r).map_err(|e| (format!("--output {r:?}: {e}"), 2))?;
         if reference.digest().is_some() {
             return Err((format!("--output {r:?}: name a tag, not a digest"), 2));
         }
@@ -276,7 +300,10 @@ impl Publish {
         if let Some(k) = &sign_key
             && k.to_string_lossy().starts_with("kms://")
         {
-            return Err(("--sign-key: KMS keys are not supported yet; pass a PKCS#8 PEM file".into(), 2));
+            return Err((
+                "--sign-key: KMS keys are not supported yet; pass a PKCS#8 PEM file".into(),
+                2,
+            ));
         }
         Ok(Some(Publish {
             reference,
@@ -289,11 +316,21 @@ impl Publish {
 /// A `--tenant-key-file`: 32 raw bytes or 64 hex characters (a trailing newline allowed).
 fn read_tenant_key(path: &Path) -> Result<[u8; 32], (String, u8)> {
     let bytes = std::fs::read(path).map_err(|e| (format!("--tenant-key-file {}: {e}", path.display()), 4))?;
-    let bad = || (format!("--tenant-key-file {}: expected 32 bytes or 64 hex characters", path.display()), 2);
+    let bad = || {
+        (
+            format!(
+                "--tenant-key-file {}: expected 32 bytes or 64 hex characters",
+                path.display()
+            ),
+            2,
+        )
+    };
     if let Ok(k) = <[u8; 32]>::try_from(bytes.as_slice()) {
         return Ok(k);
     }
-    let text = std::str::from_utf8(&bytes).map_err(|_| bad())?.trim_end_matches(['\n', '\r']);
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| bad())?
+        .trim_end_matches(['\n', '\r']);
     if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(bad());
     }
@@ -302,6 +339,130 @@ fn read_tenant_key(path: &Path) -> Result<[u8; 32], (String, u8)> {
         *b = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
     }
     Ok(k)
+}
+
+fn key_generate(dir: &Path) -> ExitCode {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let key = potter_supply::sign::SigningKey::generate();
+    let write = |name: &str, mode: u32, text: &str| -> Result<(), (String, u8)> {
+        let path = dir.join(name);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&path)
+            .map_err(|e| {
+                let code = if e.kind() == ErrorKind::AlreadyExists { 2 } else { 4 };
+                (format!("{}: {e}", path.display()), code)
+            })?;
+        f.write_all(text.as_bytes())
+            .map_err(|e| (format!("{}: {e}", path.display()), 4))
+    };
+    if let Err((e, code)) = write("potter.key", 0o600, &key.to_pem())
+        .and_then(|()| write("potter.pub", 0o644, &key.verifying_key().to_pem()))
+    {
+        return fail(&e, code);
+    }
+    println!("{}", dir.join("potter.pub").display());
+    ExitCode::SUCCESS
+}
+
+/// `potter verify`: 0 when every attestation verifies, 3 when any fails, 4 on registry errors.
+fn verify(image: &str, key: &Path) -> ExitCode {
+    let reference = match kiln_registry::Reference::parse(image) {
+        Ok(r) => r,
+        Err(e) => return fail(&format!("{image}: {e}"), 2),
+    };
+    let key = match std::fs::read_to_string(key) {
+        Ok(text) => match potter_supply::sign::VerifyingKey::from_pem(&text) {
+            Ok(k) => k,
+            Err(e) => return fail(&format!("--key {}: {e}", key.display()), 2),
+        },
+        Err(e) => return fail(&format!("--key {}: {e}", key.display()), 4),
+    };
+    let run = || -> Result<Vec<potter_exec::attest::Verdict>, potter_exec::BuildError> {
+        let publisher = potter_exec::publish::Publisher::new(&reference, kiln_registry::DockerConfig::from_env())?;
+        let subject = publisher.resolve(&reference.target())?;
+        let dir = tempfile::tempdir().map_err(|e| potter_exec::BuildError::Infra(e.to_string()))?;
+        let store = kiln_store::Store::open(dir.path()).map_err(|e| potter_exec::BuildError::Infra(e.to_string()))?;
+        println!("{}@{}", sanitize(&reference.to_string()), subject.digest);
+        potter_exec::attest::verify(&publisher, &store, &subject.digest, &key)
+    };
+    match run() {
+        Err(e) => fail(&e.to_string(), e.exit_code()),
+        Ok(verdicts) => {
+            let mut ok = true;
+            for v in verdicts {
+                match v.result {
+                    Ok(()) => println!("{}: verified", v.kind.as_str()),
+                    Err(why) => {
+                        ok = false;
+                        println!("{}: FAILED: {}", v.kind.as_str(), sanitize(&why));
+                    }
+                }
+            }
+            if ok { ExitCode::SUCCESS } else { ExitCode::from(3) }
+        }
+    }
+}
+
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    potter_exec::attest::rfc3339(secs)
+}
+
+/// The source revision of `path` and whether its tree has changes, when it is in git.
+fn source_revision(path: &Path) -> Option<(String, bool)> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    let rev = String::from_utf8(git(&["rev-parse", "HEAD"])?.stdout)
+        .ok()?
+        .trim()
+        .to_string();
+    let dirty = !git(&["status", "--porcelain"])?.stdout.is_empty();
+    Some((rev, dirty))
+}
+
+/// Pushes a built target and attaches its attestations (spec §17); returns their digests.
+#[allow(clippy::too_many_arguments)]
+fn publish_target(
+    store: &kiln_store::Store,
+    p: &Publish,
+    target: &potter_plan::Target,
+    built: &potter_exec::assemble::Built,
+    tenant: &str,
+    path: &Path,
+    started: &str,
+    key: Option<&potter_supply::sign::SigningKey>,
+    warn: &mut dyn FnMut(String),
+) -> Result<Vec<kiln_store::Digest>, potter_exec::BuildError> {
+    use potter_exec::publish::Publisher;
+    let publisher = Publisher::new(&p.reference, kiln_registry::DockerConfig::from_env())?;
+    let tag = p.reference.tag().unwrap_or("latest");
+    let subject = publisher.push_image(store, tag, &built.manifest_digest)?;
+    let subject_name = format!("{}/{}", p.reference.registry(), p.reference.repository());
+    let input = potter_exec::attest::AttestInput {
+        target,
+        built,
+        subject_name: &subject_name,
+        builder_id: &p.builder_id,
+        tenant,
+        source: source_revision(path),
+        started,
+        finished: &now_rfc3339(),
+    };
+    let attachments = potter_exec::attest::attestations(store, &input, key, warn)?;
+    publisher.attach(store, &subject, &attachments)
 }
 
 /// `id=<id>,src=<file>` flags as secret values.
@@ -420,7 +581,10 @@ fn build(
         Ok(s) => s,
         Err((e, code)) => return fail(&e, code),
     };
-    let tenant_key = match tenant_key_flag.map(Ok).unwrap_or_else(|| potter_cache::tenant_key(&home, &tenant)) {
+    let tenant_key = match tenant_key_flag
+        .map(Ok)
+        .unwrap_or_else(|| potter_cache::tenant_key(&home, &tenant))
+    {
         Ok(k) => k,
         Err(e) => return fail(&e.to_string(), 4),
     };
@@ -491,8 +655,57 @@ fn build(
         deps: Default::default(),
         progress: &mut progress,
     };
+    let sign_key = match publish
+        .and_then(|p| p.sign_key.as_deref())
+        .map(|k| potter_supply::sign::SigningKey::load(&k.to_string_lossy()).map_err(|e| format!("--sign-key: {e}")))
+    {
+        Some(Err(e)) => return fail(&e, 2),
+        Some(Ok(k)) => Some(k),
+        None => None,
+    };
+    let started = now_rfc3339();
     for t in targets {
-        match potter_exec::assemble::build_target(&mut ctx, t, path, if only.contains(&t.name) { tags } else { &[] }) {
+        let built =
+            potter_exec::assemble::build_target(&mut ctx, t, path, if only.contains(&t.name) { tags } else { &[] });
+        let built = match (built, publish) {
+            (Ok(b), Some(p)) if only.contains(&t.name) => {
+                let mut warn = |w: String| (ctx.progress)(Progress::Warning(w));
+                match publish_target(
+                    &store,
+                    p,
+                    t,
+                    &b,
+                    tenant.as_str(),
+                    path,
+                    &started,
+                    sign_key.as_ref(),
+                    &mut warn,
+                ) {
+                    Ok(referrers) => {
+                        if json {
+                            emit(json!({
+                                "event": "published",
+                                "target": b.target,
+                                "reference": p.reference.to_string(),
+                                "digest": b.manifest_digest.to_string(),
+                                "referrers": referrers.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+                            }));
+                        } else {
+                            println!(
+                                "pushed {}@{} ({} attestations)",
+                                sanitize(&p.reference.to_string()),
+                                b.manifest_digest,
+                                referrers.len()
+                            );
+                        }
+                        Ok(b)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            (r, _) => r,
+        };
+        match built {
             Ok(b) if json => emit(json!({
                 "event": "target_built",
                 "target": b.target,

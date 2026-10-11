@@ -4,6 +4,7 @@
 
 pub mod affected;
 pub mod assemble;
+pub mod attest;
 pub mod base;
 pub mod chain;
 mod error;
