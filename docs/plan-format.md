@@ -70,6 +70,38 @@ A chain's root key is `SHA-256("potter.cache/v1/base" ‖ len ‖ base manifest 
 
 The local index (`$POTTER_HOME/cache/<tenant>/index/<key-hex>`) maps a key to `{"layer": "sha256:…" | null, "class": "ns" | "vm", "created": <unix seconds>, "potter": "<version>"}`. A layer is an uncompressed OCI tar blob in `$KILN_HOME`; an entry whose blob is gone is a miss.
 
+## Secrets in keys (spec §5.4)
+
+A step's secrets field (item 5 above) is `HMAC-SHA256(tenant_key, id ‖ 0x00 ‖ value)` for each secret it mounts, concatenated in id order. The tenant key is 32 random bytes in `$POTTER_HOME/tenants/<tenant>/key`. The values themselves never enter a key, a layer or the index.
+
+## Remote cache entries (spec §8.3)
+
+An entry is an OCI image manifest tagged `<key-hex>` in the repository `<prefix>/<tenant>/cache` of the cache registry.
+- `artifactType` is `application/vnd.potter.cache.v1+json`.
+- Its config, of type `application/vnd.potter.cache.config.v1+json`, is `{"class": "ns" | "vm", "potter": "<version>", "parent": "<parent key hex>"}`.
+- Its one layer (none for steps without a layer) is the step's uncompressed tar, `application/vnd.oci.image.layer.v1.tar`.
+
+On pull, blobs are digest-verified, and the layer must pass kiln's layer ingest before it is used.
+
+## Progress events (`--progress json`, spec §11)
+
+One JSON object per line on stdout, with `event` set to one of:
+
+| `event` | Fields | Meaning |
+|---|---|---|
+| `step_start` | `target`, `step` | A step starts running. |
+| `cache_hit` | `target`, `step` | A step was found in the local or remote cache. |
+| `sealed` | `target`, `step`, `secs` | A step finished, and its diff is a layer. |
+| `pushed` | `target`, `step` | A step's entry reached the remote cache. |
+| `failed` | `target`, `step` | A step failed. |
+| `log` | `target`, `step`, `line` | One line of step output, unmodified except secret redaction. |
+| `warning` | `message` | |
+| `unchanged` | `target` | `--affected` skipped the target. |
+| `target_built` | `target`, `reference`, `digest`, `executed`, `cached` | |
+| `error`, `hostile` | `target`, `message`, `exit` | The build failed. `hostile` is a sandbox violation (exit 3). |
+
+A run base's steps report under the target name `<target>:run`.
+
 ## Exit codes
 
 0 success · 2 usage, config, plan or detection error (including a missing path) · 4 other I/O errors.

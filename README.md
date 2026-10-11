@@ -49,6 +49,21 @@ Each is refused by name with exit 2.
 
 Layer blobs live in `$KILN_HOME`.
 
+## Caching, monorepos and secrets
+
+- **Remote cache:** `--cache-to <registry>[/<prefix>]` publishes every sealed step, and `--cache-from` looks up local misses there. `POTTER_REMOTE_CACHE` sets both.
+  - Entries live under `<prefix>/<tenant>/cache`, so tenants share nothing.
+  - Pulled layers are verified.
+  - A cache failure is a warning, never a failed build.
+- **Graph:** targets build after the targets they copy from. A `potter.toml` step can be `copy = { from = "web", paths = ["/app/dist"], dest = "/srv/www", owner = "33:33" }` instead of `run`; it follows the placement rules of `COPY --from`.
+- **`--affected <git-ref>`:** builds only the targets whose plan or inputs changed since the ref, plus what they copy from. The rest are reported `unchanged`.
+- **Secrets:** `--secret id=<id>,src=<file>`, used by steps that list `secrets = ["<id>"]`.
+  - Each is mounted read-only at `/run/secrets/<id>`, for that step only.
+  - It never reaches a layer.
+  - It enters the cache key as a tenant-keyed HMAC.
+  - Its value is redacted from logs (best effort).
+- **`--progress json`:** one event per line on stdout; the event schema is in `docs/plan-format.md`.
+
 ## Exit codes
 
 | Code | Meaning |
