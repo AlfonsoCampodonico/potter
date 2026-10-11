@@ -289,3 +289,47 @@ cmd = ["/bin/cat", "/app/dist/index.html"]
     let order: Vec<&str> = stdout.lines().map(|l| l.split_whitespace().next().unwrap()).collect();
     assert_eq!(order, ["potter/web:latest", "potter/api:latest"], "{stdout}");
 }
+
+#[test]
+fn affected_builds_only_targets_that_changed_since_a_ref() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = tempfile::tempdir().unwrap();
+    let target = |name: &str| {
+        format!(
+            "[target.{name}]\nprovider = \"none\"\nroot = \"{name}\"\n[target.{name}.base]\noci = \"{base}\"\n[target.{name}.steps.build]\nrun = \"cat /app/x > /app/out\"\n[target.{name}.process.web]\ncmd = [\"/bin/cat\", \"/app/out\"]\n"
+        )
+    };
+    let toml = format!("{}\n{}", target("web"), target("api"));
+    write(
+        repo.path(),
+        &[("potter.toml", toml.as_str()), ("web/x", "w"), ("api/x", "a")],
+    );
+    let git = |args: &[&str]| {
+        let s = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(s.status.success(), "{}", String::from_utf8_lossy(&s.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "one"]);
+    std::fs::write(repo.path().join("api/x"), "changed").unwrap();
+    let (code, stdout, stderr) = build(&ctx, repo.path(), &["--affected", "HEAD"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("web: unchanged"), "{stdout}");
+    assert!(stdout.contains("potter/api:latest"), "{stdout}");
+    assert!(!stdout.contains("potter/web:latest"), "{stdout}");
+    let (code, _, stderr) = build(&ctx, repo.path(), &["--affected", "no-such-ref"]);
+    assert_eq!(code, 2, "{stderr}");
+}

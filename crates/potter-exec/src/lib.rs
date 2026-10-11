@@ -2,6 +2,7 @@
 //! sealing, export and image assembly.
 #![forbid(unsafe_code)]
 
+pub mod affected;
 pub mod assemble;
 pub mod base;
 pub mod chain;

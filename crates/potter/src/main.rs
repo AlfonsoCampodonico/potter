@@ -61,6 +61,9 @@ enum Cmd {
         /// Publish sealed steps to this remote cache (default $POTTER_REMOTE_CACHE)
         #[arg(long)]
         cache_to: Option<String>,
+        /// Only build targets that changed since this git ref (spec §10)
+        #[arg(long)]
+        affected: Option<String>,
         /// plain: lines on stderr; json: one event per line on stdout (spec §11)
         #[arg(long, value_enum, default_value = "auto")]
         progress: ProgressMode,
@@ -133,6 +136,7 @@ fn main() -> ExitCode {
             progress,
             cache_from,
             cache_to,
+            affected,
         } => {
             let env = std::env::var("POTTER_REMOTE_CACHE").ok().filter(|v| !v.is_empty());
             let remotes = (cache_from.or_else(|| env.clone()), cache_to.or(env));
@@ -146,6 +150,7 @@ fn main() -> ExitCode {
                 &secrets,
                 progress == ProgressMode::Json,
                 remotes,
+                affected.as_deref(),
             )
         }
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
@@ -162,6 +167,49 @@ fn helper<T>(result: Result<T, potter_exec::BuildError>) -> ExitCode {
         Err(BuildError::StepOutput(e)) => fail(&e, 5),
         Err(e) => fail(&e.to_string(), 4),
     }
+}
+
+/// The targets of `plan` (planned at `path`) that changed since `git_ref`: the ref's tree comes
+/// from `git archive`, and a tree that cannot be planned makes every target changed.
+fn changed_since(
+    path: &Path,
+    git_ref: &str,
+    plan: &potter_plan::Plan,
+) -> Result<std::collections::BTreeSet<String>, (String, u8)> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .map_err(|e| (format!("--affected needs git: {e}"), 4u8))
+    };
+    let top = git(&["rev-parse", "--show-toplevel"])?;
+    if !top.status.success() {
+        return Err((format!("--affected: {} is not in a git repository", path.display()), 2));
+    }
+    let top = std::path::PathBuf::from(String::from_utf8_lossy(&top.stdout).trim());
+    let here = path
+        .canonicalize()
+        .map_err(|e| (format!("{}: {e}", path.display()), 4))?;
+    let rel = here
+        .strip_prefix(top.canonicalize().unwrap_or(top.clone()))
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let archive = git(&["archive", "--format=tar", git_ref, "--"])?;
+    if !archive.status.success() {
+        let why = String::from_utf8_lossy(&archive.stderr).trim().to_string();
+        return Err((format!("--affected {git_ref}: {why}"), 2));
+    }
+    let tree = tempfile::tempdir().map_err(|e| (format!("--affected: {e}"), 4))?;
+    tar::Archive::new(archive.stdout.as_slice())
+        .unpack(tree.path())
+        .map_err(|e| (format!("--affected: unpacking {git_ref}: {e}"), 4))?;
+    let then_root = tree.path().join(&rel);
+    let then = potter_config::plan_repo(&then_root, None)
+        .map(|p| p.plan)
+        .unwrap_or_else(|_| potter_plan::Plan::new(vec![]));
+    potter_exec::affected::affected(plan, path, &then, &then_root).map_err(|e| (e.to_string(), e.exit_code()))
 }
 
 /// `id=<id>,src=<file>` flags as secret values.
@@ -199,6 +247,7 @@ fn build(
     secret_flags: &[String],
     json: bool,
     remotes: (Option<String>, Option<String>),
+    affected_ref: Option<&str>,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
@@ -225,8 +274,34 @@ fn build(
         Ok(p) => p,
         Err(e) => return fail(&e.to_string(), if e.is_infrastructure() { 4 } else { 2 }),
     };
+    // With --affected, the selection shrinks to the targets that changed since the ref.
+    let mut selected: Vec<String> = only.to_vec();
+    if let Some(r) = affected_ref {
+        let changed = match changed_since(path, r, &planned.plan) {
+            Ok(c) => c,
+            Err((e, code)) => return fail(&e, code),
+        };
+        let pool: Vec<String> = if only.is_empty() {
+            planned.plan.targets.iter().map(|t| t.name.clone()).collect()
+        } else {
+            only.to_vec()
+        };
+        selected = Vec::new();
+        for name in pool {
+            if changed.contains(&name) {
+                selected.push(name);
+            } else if json {
+                emit(json!({"event": "unchanged", "target": name}));
+            } else {
+                println!("{}: unchanged", sanitize(&name));
+            }
+        }
+        if selected.is_empty() {
+            return ExitCode::SUCCESS;
+        }
+    }
     // Every selected target, after the targets it copies from (spec §10).
-    let order = match potter_exec::graph::order(&planned.plan.targets, only) {
+    let order = match potter_exec::graph::order(&planned.plan.targets, &selected) {
         Ok(o) => o,
         Err(e) => return fail(&e.to_string(), e.exit_code()),
     };

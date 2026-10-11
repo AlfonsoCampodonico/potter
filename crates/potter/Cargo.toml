@@ -16,13 +16,13 @@ potter-detect = { path = "../potter-detect" }
 potter-exec = { path = "../potter-exec" }
 potter-plan = { path = "../potter-plan" }
 serde_json = "1.0.151"
+tar = "0.4.44"
+tempfile = "3.27.0"
 
 [dev-dependencies]
 kiln-erofs = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
 kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
 rustix = { version = "1.1.5", features = ["fs"] }
-tar = "0.4.44"
 vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "c4363a2cfaf421aeaefad1e9c510040c1e0a0508" }
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
-tempfile = "3.27.0"
