@@ -99,8 +99,28 @@ One JSON object per line on stdout, with `event` set to one of:
 | `unchanged` | `target` | `--affected` skipped the target. |
 | `target_built` | `target`, `reference`, `digest`, `executed`, `cached` | |
 | `error`, `hostile` | `target`, `message`, `exit` | The build failed. `hostile` is a sandbox violation (exit 3). |
+| `published` | `target`, `reference`, `digest`, `referrers` | `--output` pushed the image (`digest` is its OCI manifest) and attached the attestations. |
 
 A run base's steps report under the target name `<target>:run`.
+
+## Image annotations (spec §5.1, §18)
+
+Every image manifest potter writes carries:
+
+- the plan's `labels`;
+- `dev.potter.port`: the listen port, when the plan has one;
+- `dev.potter.process.<name>`: each process's command as a JSON array;
+- `dev.potter.target`: the canonical hash (hex) of the target that built it.
+
+## Attestations (spec §17)
+
+Each is an OCI image manifest with `subject` set to the image, an empty config (`application/vnd.oci.empty.v1+json`), one layer holding the attestation, and the annotation `dev.potter.attestation` = `sbom`, `provenance` or `signature`. The referrers tag schema index at `sha256-<hex>` lists them; potter replaces its own kinds there and keeps every other descriptor.
+
+- **Signed** (`--sign-key`): `artifactType` and layer type `application/vnd.dev.sigstore.bundle.v0.3+json`.
+  - `sbom`, `provenance`: a DSSE envelope (`payloadType` `application/vnd.in-toto+json`) around an in-toto v1 statement whose subject is the image digest. Predicate types `https://spdx.dev/Document/v2.3` (the SPDX 2.3 document) and `https://slsa.dev/provenance/v1`.
+  - `signature`: a `messageSignature` over the image manifest bytes (ECDSA P-256, SHA-256).
+  - `verificationMaterial.publicKey.hint` is the base64 SHA-256 of the public key's SPKI DER; `tlogEntries` is empty (no transparency log in v1).
+- **Unsigned**: `artifactType` `application/vnd.in-toto+json`, the statement itself; no `signature` referrer.
 
 ## Exit codes
 

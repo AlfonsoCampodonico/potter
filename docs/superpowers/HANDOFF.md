@@ -150,3 +150,14 @@ Deferred minors:
   - False positives: LFS, submodules, export attributes, untracked files (it compares the worktree, not HEAD, with the ref).
   - Unchanged targets don't show their last image ref.
 - **Next:** P6b (SBOM, provenance, signing, `potter verify`, build Jobs).
+
+**P6b (2026-10-11):** supply chain and build Jobs. Plan: `docs/superpowers/plans/2026-10-11-potter-p6b-supply-chain.md`.
+- New crate `potter-supply`: lockfile parsers (12 formats, bounded), SPDX 2.3 SBOM, SLSA v1 provenance, sigstore bundle v0.3 signing and verification (P-256).
+- `potter-exec`: `publish` (image push and referrers, tag-schema fallback), `attest` (assembly from host-side evidence only, and `verify`), per-layer build records (`Built.steps`, `Built.bases`, `Built.manifest_digest`), manifest annotations (`dev.potter.port`, `dev.potter.process.<name>`, `dev.potter.target`).
+- CLI: `--output registry=`, `--sign-key`, `--builder-id`, `--tenant-key-file`, `potter verify`, `potter key generate`.
+- Not yet: KMS signing (`kms://` refused, exit 2), keyless signing, attestations for store-only builds, the catalog index digest in provenance (P3).
+
+**From the kiln session (2026-10-11):**
+- kiln build mode is kiln milestone M3e, owned by the kiln session; potter P4a codes against a local `BuildBackend` trait and P4b swaps in `kiln_run::build` at M3e's merge rev. Don't write kiln code from potter.
+- Services (M3d) is validated and its plan is being written. potter's side doesn't change: set `ContainerConfig.labels["dev.kiln.services"]` (the agreed JSON) and call `convert_resolved`; `kiln_image::types::services_from_label` and `validate_services` fail early. Images with services get config `schemaVersion: 2`; stop runs in reverse start order; TCP readiness probes 127.0.0.1, so services listen on loopback or 0.0.0.0. Pin the rev the kiln session sends after M3d merges (M3b-2 merges first).
+- vmkit kernels 6.18.54 are published: `ghcr.io/alfonsocampodonico/vmkit-kernels/base:6.18.54-{aarch64,x86_64}`.

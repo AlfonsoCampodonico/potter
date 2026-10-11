@@ -64,6 +64,16 @@ Layer blobs live in `$KILN_HOME`.
   - Its value is redacted from logs (best effort).
 - **`--progress json`:** one event per line on stdout; the event schema is in `docs/plan-format.md`.
 
+## Publishing and verifying
+
+- **`--output registry=<ref>`** (with exactly one `--target`) pushes the image after it builds and attaches three OCI referrers: an SPDX 2.3 SBOM, SLSA v1 provenance, and a signature over the image manifest.
+  - The SBOM lists the base images, catalog layers and the packages of the lockfiles in the target's declared inputs; nothing is guessed or scanned.
+  - The provenance records the target's plan hash, the source revision, the bases, and every layer with its cache key and the executor that produced it.
+  - Referrers are listed under the tag `sha256-<image digest hex>` (the OCI referrers tag schema), so any registry serves them.
+- **`--sign-key <pem>`** signs all three as sigstore bundles (v0.3, P-256). Without it the statements are attached unsigned and `potter verify` fails.
+- **`potter key generate <dir>`** writes `potter.key` (0600) and `potter.pub`.
+- **`potter verify <ref> --key <pub>`** checks every attestation against the key and the image digest; exit 3 when any fails.
+
 ## Exit codes
 
 | Code | Meaning |
