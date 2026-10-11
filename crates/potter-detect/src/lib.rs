@@ -3,7 +3,7 @@
 
 pub mod catalog;
 mod error;
-mod jsonc;
+pub mod jsonc;
 mod options;
 pub mod providers;
 pub mod repo;

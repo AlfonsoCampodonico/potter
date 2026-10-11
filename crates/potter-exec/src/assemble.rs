@@ -204,12 +204,29 @@ pub fn build_target(
             spill_dir: &spill,
         };
         let (file, _) = export_layer(&open, &spec, tmp(ctx)?)?;
-        layers.push(store_layer(ctx.store, file, "export")?);
+        let export = store_layer(ctx.store, file, "export")?;
+        // Re-packed on the host from the build chain's layers.
+        steps.push(StepRecord {
+            chain: target.name.clone(),
+            step: "potter:export".into(),
+            key: None,
+            layer: export.diff_id.clone(),
+            class: None,
+        });
+        layers.push(export);
         (run.env.clone(), layers)
     };
     if !image.files.is_empty() {
         let file = files_layer(&image.files, tmp(ctx)?)?;
-        layers.push(store_layer(ctx.store, file, "files")?);
+        let files = store_layer(ctx.store, file, "files")?;
+        steps.push(StepRecord {
+            chain: target.name.clone(),
+            step: "potter:files".into(),
+            key: None,
+            layer: files.diff_id.clone(),
+            class: None,
+        });
+        layers.push(files);
     }
 
     let config = image_config(

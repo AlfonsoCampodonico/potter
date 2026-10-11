@@ -14,6 +14,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 potter-config = { path = "../potter-config" }
 potter-detect = { path = "../potter-detect" }
 potter-exec = { path = "../potter-exec" }
+potter-supply = { path = "../potter-supply" }
 potter-plan = { path = "../potter-plan" }
 serde_json = "1.0.151"
 tar = "0.4.44"
@@ -25,4 +26,5 @@ kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9
 rustix = { version = "1.1.5", features = ["fs"] }
 vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "c4363a2cfaf421aeaefad1e9c510040c1e0a0508" }
 assert_cmd = "2.2.2"
+base64 = "0.22"
 predicates = "3.1.4"
