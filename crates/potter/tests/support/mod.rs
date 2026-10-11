@@ -188,6 +188,7 @@ impl Ctx {
             tenant_key: [7u8; 32],
             cache_from: None,
             cache_to: None,
+            deps: Default::default(),
             progress: &mut progress,
         };
         potter_exec::chain::run_chain(&mut ctx, target, repo)
@@ -216,6 +217,7 @@ impl Ctx {
             tenant_key: [7u8; 32],
             cache_from: None,
             cache_to: None,
+            deps: Default::default(),
             progress: &mut progress,
         };
         potter_exec::assemble::build_target(&mut ctx, target, repo, tags)
@@ -251,6 +253,7 @@ impl Ctx {
             tenant_key: [7u8; 32],
             cache_from: None,
             cache_to: None,
+            deps: Default::default(),
             progress: &mut progress,
         };
         let r = potter_exec::chain::run_chain(&mut ctx, target, repo);

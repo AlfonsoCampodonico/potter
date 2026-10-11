@@ -41,6 +41,8 @@ pub struct BuildCtx<'a> {
     pub cache_from: Option<&'a crate::remote::RemoteCache>,
     /// Where sealed steps are published.
     pub cache_to: Option<&'a crate::remote::RemoteCache>,
+    /// The final layers of the targets built so far, for `copy_from` (spec §9.6 step 2).
+    pub deps: BTreeMap<String, Vec<LayerRef>>,
     pub progress: &'a mut dyn FnMut(Progress),
 }
 
@@ -112,10 +114,15 @@ fn check_base(base: &Base, what: &str) -> Result<(), BuildError> {
 /// Refuses steps potter cannot run yet, naming them and the milestone that ships them.
 fn check_steps(what: &str, steps: &[Step]) -> Result<(), BuildError> {
     for step in steps {
-        if let Step::CopyFrom { name: s, .. } = step {
+        if let Step::CopyFrom {
+            name: s,
+            from: potter_plan::CopySource::Stage(_),
+            ..
+        } = step
+        {
             return Err(unsupported(
-                format!("the copy_from step {s} of {what}"),
-                "P6 (the graph)",
+                format!("the stage source of step {s} of {what}"),
+                "P5 (the Dockerfile frontend)",
             ));
         }
     }
@@ -546,7 +553,49 @@ pub fn run_steps(
                         },
                     });
                 }
-                Step::Apt { .. } | Step::CopyFrom { .. } => unreachable!("checked above"),
+                Step::CopyFrom {
+                    from,
+                    paths,
+                    dest,
+                    owner: who,
+                    mode,
+                    ..
+                } => {
+                    let potter_plan::CopySource::Target(source) = from else {
+                        unreachable!("check_steps refuses stages")
+                    };
+                    let source_layers = ctx.deps.get(source).cloned().ok_or_else(|| {
+                        BuildError::Plan(format!("step {sname} copies from {source}, which was not built first"))
+                    })?;
+                    let (uid, gid, _) = ids(who, ctx.store, &state.layers, &format!("step {sname}"))?;
+                    std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
+                    let file = tempfile::tempfile_in(ctx.home.runs()).map_err(io("creating a copy layer"))?;
+                    let spill = ctx.home.runs();
+                    let spec = crate::merge::CopySpec {
+                        paths,
+                        dest,
+                        owner: Some((uid, gid)),
+                        mode: *mode,
+                        epoch: epoch(),
+                        spill_dir: &spill,
+                    };
+                    let (mut file, _) = crate::merge::copy_layer(&openers(ctx.store, &source_layers), &spec, file)?;
+                    use std::io::Seek;
+                    file.rewind().map_err(io("reading the copy layer"))?;
+                    let (d, size) = ctx
+                        .store
+                        .put_reader(&mut file)
+                        .map_err(|e| BuildError::Infra(format!("storing the copy of {sname}: {e}")))?;
+                    // Like inputs, the layer's digest is the step's input (spec §8.1).
+                    key = step_key(&key, &input(step, Some(&d.to_string()), &state.env, &platform, &[]))
+                        .map_err(cache_err)?;
+                    state.layers.push(LayerRef {
+                        descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
+                        diff_id: d,
+                    });
+                    lowers.push(None);
+                }
+                Step::Apt { .. } => unreachable!("lowered to a run step"),
             }
         }
         Ok(())
@@ -654,11 +703,12 @@ mod tests {
             tenant_key: [0u8; 32],
             cache_from: None,
             cache_to: None,
+            deps: BTreeMap::new(),
             progress: &mut progress,
         };
         let copy = Step::CopyFrom {
             name: "copy".into(),
-            from: CopySource::Target("web".into()),
+            from: CopySource::Stage("build".into()),
             paths: vec!["/x".into()],
             dest: "/x".into(),
             owner: "0:0".into(),
@@ -670,7 +720,7 @@ mod tests {
         };
         let err = run_steps(&mut ctx, "app:run", &chain, dir.path(), crate::stopgap::Role::Run).unwrap_err();
         assert_eq!(err.exit_code(), 2, "{err}");
-        assert!(err.to_string().contains("copy"), "{err}");
+        assert!(err.to_string().contains("stage"), "{err}");
     }
 
     #[test]
@@ -692,7 +742,7 @@ mod tests {
     fn what_p2b_does_not_ship_is_refused_by_name() {
         let copy = Step::CopyFrom {
             name: "copy".into(),
-            from: CopySource::Target("web".into()),
+            from: CopySource::Stage("build".into()),
             paths: vec!["/x".into()],
             dest: "/x".into(),
             owner: "0:0".into(),
@@ -718,7 +768,7 @@ mod tests {
         let stage = Base::Stage { name: "build".into() };
         let cases = [
             (target(stage, vec![]), "stage"),
-            (target(oci(), vec![copy]), "copy"),
+            (target(oci(), vec![copy]), "stage"),
             (services, "services"),
         ];
         for (t, named) in cases {

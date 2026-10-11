@@ -6,6 +6,25 @@ use crate::error::ConfigError;
 use crate::file::{AptConfig, DEFAULT_APT_SNAPSHOT, StepConfig, TargetConfig};
 
 pub(crate) fn run_step(name: &str, command: Command, sc: &StepConfig, key: &str) -> Result<Step, ConfigError> {
+    if sc.copy.is_some() {
+        return Err(ConfigError::invalid(
+            key,
+            "`copy` steps belong to explicit plans (provider = \"none\")",
+        ));
+    }
+    let mut secrets = Vec::new();
+    for id in sc.secrets.as_deref().unwrap_or(&[]) {
+        if !is_name(id) {
+            return Err(ConfigError::invalid(
+                format!("{key}.secrets"),
+                format!("{id:?} is not a name"),
+            ));
+        }
+        secrets.push(potter_plan::SecretRef {
+            id: id.clone(),
+            target: format!("/run/secrets/{id}"),
+        });
+    }
     Ok(Step::Run {
         name: name.into(),
         command,
@@ -14,7 +33,7 @@ pub(crate) fn run_step(name: &str, command: Command, sc: &StepConfig, key: &str)
         user: "root".into(),
         network: sc.network.unwrap_or(true),
         cache_mounts: cache_mounts(sc.cache.as_deref().unwrap_or(&[]), key)?,
-        secrets: vec![],
+        secrets,
         timeout_secs: None,
     })
 }

@@ -110,6 +110,21 @@ pub struct StepConfig {
     pub network: Option<bool>,
     /// Cache mount ids, mounted at `/cache/<id>`.
     pub cache: Option<Vec<String>>,
+    /// Secret ids (from `potter build --secret`), mounted read-only at `/run/secrets/<id>`.
+    pub secrets: Option<Vec<String>>,
+    /// Instead of `run`: copy paths out of another target's build (explicit plans).
+    pub copy: Option<CopyConfig>,
+}
+
+/// `copy = { from = "web", paths = ["/app/dist"], dest = "/srv/www" }`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyConfig {
+    pub from: String,
+    pub paths: Vec<String>,
+    pub dest: String,
+    pub owner: Option<String>,
+    pub mode: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

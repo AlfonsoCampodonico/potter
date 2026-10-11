@@ -224,6 +224,63 @@ pub fn export_layer<W: Write>(
     out: W,
 ) -> Result<(W, ExportSummary), BuildError> {
     let map = merged(layers)?;
+    export_from(layers, &map, spec, None, None, out)
+}
+
+/// What a `copy_from` step copies (spec §9.6 step 2).
+pub struct CopySpec<'a> {
+    pub paths: &'a [String],
+    /// A trailing `/` makes it a directory for single files.
+    pub dest: &'a str,
+    pub owner: Option<(u64, u64)>,
+    pub mode: Option<u32>,
+    pub epoch: u64,
+    pub spill_dir: &'a Path,
+}
+
+/// One layer of `paths` from the merged view of `layers` at `dest`, as Docker's `COPY --from`
+/// places them: a directory's contents go into `dest`; a file becomes `dest`, or lands inside it
+/// when `dest` ends in `/` or several paths are copied.
+pub fn copy_layer<W: Write>(layers: &[LayerOpen], spec: &CopySpec, out: W) -> Result<(W, ExportSummary), BuildError> {
+    let map = merged(layers)?;
+    let into = spec.dest.ends_with('/') || spec.paths.len() > 1;
+    let dest = spec.dest.trim_end_matches('/');
+    let mut exports = Vec::new();
+    for p in spec.paths {
+        let rel = p.trim_matches('/');
+        let node = map
+            .get(rel)
+            .ok_or_else(|| BuildError::Plan(format!("copy_from: {p} does not exist in the source")))?;
+        let to = if node.kind == Kind::Dir || !into {
+            dest.to_string()
+        } else {
+            let base = rel.rsplit('/').next().unwrap_or(rel);
+            format!("{dest}/{base}")
+        };
+        exports.push(Export {
+            path: p.clone(),
+            dest: if to.is_empty() { "/".into() } else { to },
+            exclude: vec![],
+        });
+    }
+    let export = ExportSpec {
+        exports: &exports,
+        epoch: spec.epoch,
+        spill_dir: spec.spill_dir,
+    };
+    export_from(layers, &map, &export, spec.owner, spec.mode, out)
+}
+
+/// The selection of `spec` from `map` (the merged view of `layers`), with optional owner and
+/// mode overrides, as one flattened layer.
+fn export_from<W: Write>(
+    layers: &[LayerOpen],
+    map: &BTreeMap<String, Node>,
+    spec: &ExportSpec,
+    owner: Option<(u64, u64)>,
+    mode: Option<u32>,
+    out: W,
+) -> Result<(W, ExportSummary), BuildError> {
     // The output: path -> (source path, node).
     let mut chosen: BTreeMap<String, (String, Node)> = BTreeMap::new();
     for e in spec.exports {
@@ -245,7 +302,7 @@ pub fn export_layer<W: Write>(
             }
             k.strip_prefix(&src)?.strip_prefix('/').map(str::to_string)
         };
-        for (k, node) in &map {
+        for (k, node) in map {
             let Some(rel) = under(k) else { continue };
             let excluded = !rel.is_empty()
                 && excludes.iter().any(|m| {
@@ -265,8 +322,13 @@ pub fn export_layer<W: Write>(
             if out_path.is_empty() {
                 continue;
             }
-            if chosen.insert(out_path.clone(), (k.clone(), node.clone())).is_some() {
-                return Err(BuildError::Plan(format!("two exports write /{out_path}")));
+            match chosen.get(&out_path) {
+                // Two directories at one place merge, as COPY merges them.
+                Some((_, prev)) if prev.kind == Kind::Dir && node.kind == Kind::Dir => continue,
+                Some(_) => return Err(BuildError::Plan(format!("two exports write /{out_path}"))),
+                None => {
+                    chosen.insert(out_path.clone(), (k.clone(), node.clone()));
+                }
             }
         }
     }
@@ -322,10 +384,12 @@ pub fn export_layer<W: Write>(
     let mut tar = TarWriter::new(out);
     let mut summary = ExportSummary { entries: 0, bytes: 0 };
     for (path, (_, n)) in &chosen {
+        let symlink = matches!(n.kind, Kind::Symlink(_));
+        let (uid, gid) = owner.unwrap_or((n.uid, n.gid));
         let meta = Meta {
-            mode: n.mode & 0o7777,
-            uid: n.uid,
-            gid: n.gid,
+            mode: mode.filter(|_| !symlink).unwrap_or(n.mode & 0o7777),
+            uid,
+            gid,
             mtime: spec.epoch,
         };
         summary.entries += 1;
@@ -337,10 +401,11 @@ pub fn export_layer<W: Write>(
                 let first = &holder[&(*layer, *index)];
                 if first != path {
                     let (_, h) = &chosen[first];
+                    let (uid, gid) = owner.unwrap_or((h.uid, h.gid));
                     let meta = Meta {
-                        mode: h.mode & 0o7777,
-                        uid: h.uid,
-                        gid: h.gid,
+                        mode: mode.unwrap_or(h.mode & 0o7777),
+                        uid,
+                        gid,
                         mtime: spec.epoch,
                     };
                     tar.hardlink(path, first, &meta)
@@ -612,6 +677,98 @@ mod tests {
         t.file("f", b"x", &o).dir("d", &o).file("d/y", b"y", &o);
         let err = run(&[layer(t.finish())], &[("/f", "/x", &[]), ("/d/y", "/x/y", &[])]).unwrap_err();
         assert_eq!(err.exit_code(), 2, "{err}");
+    }
+
+    fn copy(
+        layers: &[LayerOpen],
+        paths: &[&str],
+        dest: &str,
+        owner: Option<(u64, u64)>,
+        mode: Option<u32>,
+    ) -> Result<Out, BuildError> {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        let spec = CopySpec {
+            paths: &paths,
+            dest,
+            owner,
+            mode,
+            epoch: 0,
+            spill_dir: dir.path(),
+        };
+        let (bytes, _) = copy_layer(layers, &spec, Vec::new())?;
+        let mut a = ::tar::Archive::new(bytes.as_slice());
+        Ok(a.entries()
+            .unwrap()
+            .map(|e| {
+                let mut e = e.unwrap();
+                let h = e.header().clone();
+                let kind = if h.entry_type() == ::tar::EntryType::Directory {
+                    'd'
+                } else {
+                    'f'
+                };
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut e, &mut data).unwrap();
+                (
+                    e.path().unwrap().display().to_string(),
+                    kind,
+                    h.mode().unwrap(),
+                    h.uid().unwrap(),
+                    data,
+                )
+            })
+            .collect())
+    }
+
+    fn built() -> Vec<LayerOpen<'static>> {
+        let o = Opts::default().mode(0o755).uid(1000).gid(1000);
+        let mut t = TarBuilder::new();
+        t.dir("app", &o)
+            .dir("app/dist", &o)
+            .file("app/dist/index.html", b"<h1>", &o)
+            .dir("app/dist/js", &o)
+            .file("app/dist/js/a.js", b"a", &o)
+            .file("app/bin", b"elf", &o);
+        vec![layer(t.finish())]
+    }
+
+    #[test]
+    fn copying_a_directory_copies_its_contents_into_dest() {
+        let out = copy(&built(), &["/app/dist"], "/srv/www", None, None).unwrap();
+        assert_eq!(
+            paths(&out),
+            ["srv", "srv/www", "srv/www/index.html", "srv/www/js", "srv/www/js/a.js"]
+        );
+    }
+
+    #[test]
+    fn copying_a_file_lands_at_dest_or_inside_a_dest_directory() {
+        let to_name = copy(&built(), &["/app/bin"], "/usr/local/bin/app", None, None).unwrap();
+        assert!(paths(&to_name).contains(&"usr/local/bin/app"));
+        let into_dir = copy(&built(), &["/app/bin"], "/usr/local/bin/", None, None).unwrap();
+        assert!(paths(&into_dir).contains(&"usr/local/bin/bin"));
+        let several = copy(&built(), &["/app/bin", "/app/dist"], "/opt", None, None).unwrap();
+        assert!(
+            paths(&several).contains(&"opt/bin") && paths(&several).contains(&"opt/index.html"),
+            "{:?}",
+            paths(&several)
+        );
+    }
+
+    #[test]
+    fn owner_and_mode_override_every_copied_entry() {
+        let out = copy(&built(), &["/app/dist"], "/srv/www", Some((33, 33)), Some(0o640)).unwrap();
+        let f = out.iter().find(|e| e.0 == "srv/www/index.html").unwrap();
+        assert_eq!((f.2 & 0o7777, f.3), (0o640, 33));
+        let kept = copy(&built(), &["/app/dist"], "/srv/www", None, None).unwrap();
+        let f = kept.iter().find(|e| e.0 == "srv/www/index.html").unwrap();
+        assert_eq!((f.2 & 0o7777, f.3), (0o755, 1000));
+    }
+
+    #[test]
+    fn copying_a_missing_path_is_a_plan_error() {
+        assert_eq!(copy(&built(), &["/nope"], "/x", None, None).unwrap_err().exit_code(), 2);
     }
 
     #[test]

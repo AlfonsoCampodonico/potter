@@ -129,6 +129,7 @@ pub fn build_target(
     tags: &[String],
 ) -> Result<Built, BuildError> {
     let chain = run_chain(ctx, target, repo_root)?;
+    ctx.deps.insert(target.name.clone(), chain.layers.clone());
     let image = &target.image;
     // The image's base: its own chain (the run base and its runtime steps), or with no exports
     // the build chain itself.

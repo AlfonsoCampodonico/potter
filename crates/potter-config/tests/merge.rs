@@ -489,3 +489,72 @@ fn declared_targets_merge_with_discovered_ones() {
         owned(&[("backend", "backend", "go")])
     );
 }
+
+fn repo_with(toml: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("potter.toml"), toml).unwrap();
+    dir
+}
+
+const TWO_TARGETS: &str = r#"
+[target.web]
+provider = "none"
+[target.web.base]
+oci = "node:22"
+[target.web.steps.build]
+run = "npm run build"
+[target.web.process.web]
+cmd = ["true"]
+
+[target.api]
+provider = "none"
+[target.api.base]
+oci = "debian:trixie-slim"
+[target.api.steps.assets]
+copy = { from = "web", paths = ["/app/dist"], dest = "/srv/www", owner = "33:33" }
+[target.api.steps.build]
+run = "make"
+secrets = ["npm", "gh"]
+[target.api.process.web]
+cmd = ["true"]
+"#;
+
+#[test]
+fn explicit_steps_copy_from_other_targets_and_mount_secrets() {
+    let dir = repo_with(TWO_TARGETS);
+    let p = plan_repo(dir.path(), None).unwrap();
+    let api = p.plan.targets.iter().find(|t| t.name == "api").unwrap();
+    let copy = api.build.steps.iter().find(|s| s.name() == "assets").unwrap();
+    match copy {
+        Step::CopyFrom {
+            from,
+            paths,
+            dest,
+            owner,
+            mode,
+            ..
+        } => {
+            assert_eq!(from, &potter_plan::CopySource::Target("web".into()));
+            assert_eq!(
+                (paths.as_slice(), dest.as_str(), owner.as_str(), *mode),
+                (&["/app/dist".to_string()][..], "/srv/www", "33:33", None)
+            );
+        }
+        other => panic!("{}", other.kind()),
+    }
+    match api.build.steps.iter().find(|s| s.name() == "build").unwrap() {
+        Step::Run { secrets, .. } => {
+            let s: Vec<(&str, &str)> = secrets.iter().map(|s| (s.id.as_str(), s.target.as_str())).collect();
+            assert_eq!(s, [("npm", "/run/secrets/npm"), ("gh", "/run/secrets/gh")]);
+        }
+        other => panic!("{}", other.kind()),
+    }
+}
+
+#[test]
+fn a_step_is_either_a_run_or_a_copy_and_secret_ids_are_names() {
+    let both = TWO_TARGETS.replace(r#"copy = { from = "web""#, "run = \"x\"\ncopy = { from = \"web\"");
+    assert!(plan_repo(repo_with(&both).path(), None).is_err());
+    let bad = TWO_TARGETS.replace(r#"secrets = ["npm", "gh"]"#, r#"secrets = ["../x"]"#);
+    assert!(plan_repo(repo_with(&bad).path(), None).is_err());
+}

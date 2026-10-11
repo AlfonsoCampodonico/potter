@@ -255,3 +255,37 @@ fn a_fresh_builder_gets_every_step_from_the_remote_cache_of_its_tenant() {
         "another tenant shares nothing: {stdout}"
     );
 }
+
+#[test]
+fn a_target_copies_out_of_another_built_before_it() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = tempfile::tempdir().unwrap();
+    let toml = format!(
+        r#"[target.api]
+provider = "none"
+[target.api.base]
+oci = "{base}"
+[target.api.steps.assets]
+copy = {{ from = "web", paths = ["/app/dist"], dest = "/srv/www", owner = "1000:1000" }}
+[target.api.steps.check]
+run = "test -f /srv/www/index.html && stat -c %u /srv/www/index.html > /app/owner"
+[target.api.process.web]
+cmd = ["/bin/cat", "/app/owner"]
+
+[target.web]
+provider = "none"
+[target.web.base]
+oci = "{base}"
+[target.web.steps.build]
+run = "mkdir -p /app/dist && echo '<h1>' > /app/dist/index.html"
+[target.web.process.web]
+cmd = ["/bin/cat", "/app/dist/index.html"]
+"#
+    );
+    write(repo.path(), &[("potter.toml", toml.as_str())]);
+    let (code, stdout, stderr) = build(&ctx, repo.path(), &["--target", "api"]);
+    assert_eq!(code, 0, "{stderr}");
+    let order: Vec<&str> = stdout.lines().map(|l| l.split_whitespace().next().unwrap()).collect();
+    assert_eq!(order, ["potter/web:latest", "potter/api:latest"], "{stdout}");
+}

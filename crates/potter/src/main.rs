@@ -225,18 +225,12 @@ fn build(
         Ok(p) => p,
         Err(e) => return fail(&e.to_string(), if e.is_infrastructure() { 4 } else { 2 }),
     };
-    let targets: Vec<&potter_plan::Target> = planned
-        .plan
-        .targets
-        .iter()
-        .filter(|t| only.is_empty() || only.contains(&t.name))
-        .collect();
-    if let Some(missing) = only
-        .iter()
-        .find(|o| !planned.plan.targets.iter().any(|t| &&t.name == o))
-    {
-        return fail(&format!("no target named {missing:?}"), 2);
-    }
+    // Every selected target, after the targets it copies from (spec §10).
+    let order = match potter_exec::graph::order(&planned.plan.targets, only) {
+        Ok(o) => o,
+        Err(e) => return fail(&e.to_string(), e.exit_code()),
+    };
+    let targets: Vec<&potter_plan::Target> = order.iter().map(|&i| &planned.plan.targets[i]).collect();
     let setup = || -> Result<_, String> {
         let store = kiln_store::Store::open(kiln_store::Store::default_root().map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
@@ -325,10 +319,11 @@ fn build(
         tenant_key,
         cache_from: cache_from.as_ref(),
         cache_to: cache_to.as_ref(),
+        deps: Default::default(),
         progress: &mut progress,
     };
     for t in targets {
-        match potter_exec::assemble::build_target(&mut ctx, t, path, tags) {
+        match potter_exec::assemble::build_target(&mut ctx, t, path, if only.contains(&t.name) { tags } else { &[] }) {
             Ok(b) if json => emit(json!({
                 "event": "target_built",
                 "target": b.target,

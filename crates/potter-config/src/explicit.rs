@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use potter_plan::{Base, CatalogRef, Chain, Command, Decision, Export, Image, ImageConfig, Process, Target};
+use potter_plan::{
+    Base, CatalogRef, Chain, Command, CopySource, Decision, Export, Image, ImageConfig, Process, Step, Target,
+};
 
 use crate::error::ConfigError;
 use crate::file::{AptConfig, TargetConfig};
@@ -54,6 +56,25 @@ pub fn explicit_target(
     let mut steps = vec![inputs_step("source", &["**".to_string()])];
     for (step_name, sc) in &tc.steps {
         let key = format!("{prefix}.steps.{step_name}");
+        if let Some(c) = &sc.copy {
+            if sc.run.is_some() || sc.inputs.is_some() || sc.cache.is_some() || sc.secrets.is_some() {
+                return Err(ConfigError::invalid(&key, "a step is either a `run` or a `copy`"));
+            }
+            steps.push(Step::CopyFrom {
+                name: step_name.clone(),
+                from: CopySource::Target(c.from.clone()),
+                paths: c.paths.clone(),
+                dest: c.dest.clone(),
+                owner: c.owner.clone().unwrap_or_else(|| "0:0".into()),
+                mode: c.mode,
+            });
+            decisions.push(Decision::config(
+                &format!("steps.{step_name}"),
+                format!("copy from {}", c.from),
+                key,
+            ));
+            continue;
+        }
         let run = sc
             .run
             .as_ref()
