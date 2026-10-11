@@ -95,28 +95,35 @@ fn check_base(base: &Base, what: &str) -> Result<(), BuildError> {
     }
 }
 
-/// Refuses what potter cannot build yet, naming it and the milestone that ships it.
-pub fn check_supported(target: &Target) -> Result<(), BuildError> {
-    let name = &target.name;
-    check_base(&target.build.base, &format!("target {name}"))?;
-    check_base(&target.image.base, &format!("target {name}'s image"))?;
-    for step in &target.build.steps {
+/// Refuses steps potter cannot run yet, naming them and the milestone that ships them.
+fn check_steps(what: &str, steps: &[Step]) -> Result<(), BuildError> {
+    for step in steps {
         match step {
             Step::CopyFrom { name: s, .. } => {
                 return Err(unsupported(
-                    format!("the copy_from step {s} of target {name}"),
+                    format!("the copy_from step {s} of {what}"),
                     "P6 (the graph)",
                 ));
             }
             Step::Run { name: s, secrets, .. } if !secrets.is_empty() => {
                 return Err(unsupported(
-                    format!("the secrets of step {s} of target {name}"),
+                    format!("the secrets of step {s} of {what}"),
                     "P6 (secrets)",
                 ));
             }
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// Refuses what potter cannot build yet, naming it and the milestone that ships it.
+pub fn check_supported(target: &Target) -> Result<(), BuildError> {
+    let name = &target.name;
+    check_base(&target.build.base, &format!("target {name}"))?;
+    check_base(&target.image.base, &format!("target {name}'s image"))?;
+    check_steps(&format!("target {name}"), &target.build.steps)?;
+    check_steps(&format!("target {name}'s image"), &target.image.runtime_steps)?;
     if !target.image.services.is_empty() {
         return Err(unsupported(
             format!("the services of target {name} (nginx and php-fpm)"),
@@ -173,19 +180,33 @@ fn home_of(passwd: Option<&str>, uid: u64) -> Option<String> {
 /// Runs `target`'s build chain from `repo_root`.
 pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Result<ChainState, BuildError> {
     check_supported(target)?;
-    run_steps(ctx, &target.name, &target.build, &repo_root.join(&target.root))
+    run_steps(
+        ctx,
+        &target.name,
+        &target.build,
+        &repo_root.join(&target.root),
+        crate::stopgap::Role::Build,
+    )
 }
 
 /// Runs `chain` for the target `tname`, whose sources are under `source_root`. A catalog base
 /// is lowered onto its stopgap image and install steps; `apt` steps become installs.
-pub fn run_steps(ctx: &mut BuildCtx, tname: &str, chain: &Chain, source_root: &Path) -> Result<ChainState, BuildError> {
+pub fn run_steps(
+    ctx: &mut BuildCtx,
+    tname: &str,
+    chain: &Chain,
+    source_root: &Path,
+    role: crate::stopgap::Role,
+) -> Result<ChainState, BuildError> {
+    check_base(&chain.base, tname)?;
+    check_steps(tname, &chain.steps)?;
     let (reference, digest, prelude) = match &chain.base {
         Base::Oci { reference, digest } => (reference.clone(), digest.clone(), Vec::new()),
         Base::Catalog { layers } => {
-            let lowered = crate::stopgap::lower(layers)?;
+            let lowered = crate::stopgap::lower(layers, role)?;
             (lowered.reference, None, lowered.steps)
         }
-        Base::Stage { .. } => check_base(&chain.base, tname).map(|()| unreachable!("stages are refused"))?,
+        Base::Stage { .. } => unreachable!("check_base refuses stages"),
     };
     let steps: Vec<Step> = prelude
         .into_iter()
@@ -531,6 +552,46 @@ mod tests {
             secrets: vec![],
             timeout_secs: None,
         }
+    }
+
+    #[test]
+    fn run_steps_refuses_unsupported_steps_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = kiln_store::Store::open(dir.path().join("kiln")).unwrap();
+        let home = PotterHome::open(dir.path().join("potter")).unwrap();
+        let tenant = Tenant::local();
+        let index = home.index(&tenant).unwrap();
+        let sandbox = crate::sandboxed::SandboxCtx {
+            potter: "/nonexistent/potter".into(),
+            runs: home.runs(),
+        };
+        let mut progress = |_: Progress| {};
+        let mut ctx = BuildCtx {
+            store: &store,
+            home: &home,
+            tenant: &tenant,
+            index: &index,
+            sandbox: &sandbox,
+            platform: kiln_oci::Platform::host(),
+            no_cache: false,
+            auth: kiln_registry::DockerConfig::anonymous(),
+            progress: &mut progress,
+        };
+        let copy = Step::CopyFrom {
+            name: "copy".into(),
+            from: CopySource::Target("web".into()),
+            paths: vec!["/x".into()],
+            dest: "/x".into(),
+            owner: "0:0".into(),
+            mode: None,
+        };
+        let chain = Chain {
+            base: oci(),
+            steps: vec![copy],
+        };
+        let err = run_steps(&mut ctx, "app:run", &chain, dir.path(), crate::stopgap::Role::Run).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("copy"), "{err}");
     }
 
     #[test]

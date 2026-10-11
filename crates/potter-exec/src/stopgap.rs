@@ -14,8 +14,25 @@ pub struct Lowered {
     pub steps: Vec<Step>,
 }
 
-/// Runtimes that decide the image; at most one per base (php may add node).
+/// Runtimes that decide the image.
 const RUNTIMES: [&str; 8] = ["php", "node", "bun", "deno", "python", "ruby", "go", "rust"];
+
+/// What a base is for: building wants compilers (full images), running wants slim ones. Both
+/// share Debian trixie, glibc and the `/usr/local` prefix, so what a build makes runs on the slim
+/// image (with the runtime libraries its `runtime_steps` add).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Build,
+    Run,
+}
+
+/// The JS runtimes a host runtime may add, installed by a step.
+fn secondary(host: &str, other: &str) -> bool {
+    matches!(
+        (host, other),
+        ("php" | "ruby" | "python", "node") | ("php" | "ruby", "bun")
+    )
+}
 
 /// Extensions every official php image already has.
 const PHP_BUILTIN: &[&str] = &[
@@ -52,6 +69,9 @@ const PHP_BUILTIN: &[&str] = &[
     "xmlwriter",
     "zlib",
 ];
+
+/// Python package managers a base may name.
+const PYTHON_TOOLS: [&str; 3] = ["uv", "poetry", "pipenv"];
 
 const APT_CLEAN: &str = "rm -rf /var/lib/apt/lists/*";
 
@@ -99,8 +119,15 @@ fn unsupported(what: String) -> BuildError {
     }
 }
 
-/// The upstream image and install steps for the catalog base `layers`.
-pub fn lower(layers: &[CatalogRef]) -> Result<Lowered, BuildError> {
+/// Downloads `url` and runs it with `runner` (no pipe: a failed download fails the step).
+fn fetch_and_run(url: &str, runner: &str) -> String {
+    format!(
+        "curl -fsSL -o /tmp/potter-installer {url} && {runner} /tmp/potter-installer && rm -f /tmp/potter-installer"
+    )
+}
+
+/// The upstream image and install steps for the catalog base `layers`, as `role` needs it.
+pub fn lower(layers: &[CatalogRef], role: Role) -> Result<Lowered, BuildError> {
     let listed = layers.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
     let version = |r: &CatalogRef| {
         r.version
@@ -112,11 +139,15 @@ pub fn lower(layers: &[CatalogRef]) -> Result<Lowered, BuildError> {
     let primary = match runtimes.as_slice() {
         [] => None,
         [one] => Some(*one),
-        many if has("php") && many.iter().all(|r| r.name == "php" || r.name == "node") => {
-            many.iter().copied().find(|r| r.name == "php")
+        many => {
+            let host = many
+                .iter()
+                .copied()
+                .find(|h| many.iter().all(|r| r.name == h.name || secondary(&h.name, &r.name)));
+            Some(host.ok_or_else(|| unsupported(format!("the base [{listed}], with several runtimes")))?)
         }
-        _ => return Err(unsupported(format!("the base [{listed}], with several runtimes"))),
     };
+    let full = role == Role::Build;
     let reference = match primary {
         None => "debian:trixie-slim".to_string(),
         Some(r) => {
@@ -124,10 +155,13 @@ pub fn lower(layers: &[CatalogRef]) -> Result<Lowered, BuildError> {
             match r.name.as_str() {
                 "php" if has("php-fpm") => format!("php:{v}-fpm-trixie"),
                 "php" => format!("php:{v}-cli-trixie"),
+                "node" if full => format!("node:{v}-trixie"),
                 "node" => format!("node:{v}-trixie-slim"),
                 "bun" => "oven/bun:1-slim".to_string(),
                 "deno" => "denoland/deno:debian".to_string(),
+                "python" if full => format!("python:{v}-trixie"),
                 "python" => format!("python:{v}-slim-trixie"),
+                "ruby" if full => format!("ruby:{v}-trixie"),
                 "ruby" => format!("ruby:{v}-slim-trixie"),
                 "go" => format!("golang:{v}-trixie"),
                 "rust" => format!("rust:{v}-slim-trixie"),
@@ -135,9 +169,9 @@ pub fn lower(layers: &[CatalogRef]) -> Result<Lowered, BuildError> {
             }
         }
     };
-    let php = primary.is_some_and(|r| r.name == "php");
+    let host = primary.map(|r| r.name.as_str()).unwrap_or_default();
+    let php = host == "php";
     let mut extensions = Vec::new();
-    let mut steps = Vec::new();
     for r in layers {
         let name = r.name.as_str();
         match name {
@@ -150,11 +184,13 @@ pub fn lower(layers: &[CatalogRef]) -> Result<Lowered, BuildError> {
                 }
             }
             "composer" if php => {}
-            "node" if php => {}
+            _ if secondary(host, name) => {}
+            _ if PYTHON_TOOLS.contains(&name) && host == "python" => {}
             "nginx" | "static-server" => {}
             _ => return Err(unsupported(format!("the catalog layer {r} in [{listed}]"))),
         }
     }
+    let mut steps = Vec::new();
     if !extensions.is_empty() {
         extensions.sort();
         extensions.dedup();
@@ -169,20 +205,40 @@ pub fn lower(layers: &[CatalogRef]) -> Result<Lowered, BuildError> {
         ));
     }
     if php && has("composer") {
+        // Composer unpacks dist archives with unzip and falls back to git sources.
         steps.push(install(
             "catalog-composer",
-            "curl -sSLf -o /usr/local/bin/composer https://getcomposer.org/download/latest-2.x/composer.phar \
-             && chmod 755 /usr/local/bin/composer"
-                .into(),
+            format!(
+                "{} && curl -sSLf -o /usr/local/bin/composer https://getcomposer.org/download/latest-2.x/composer.phar \
+                 && chmod 755 /usr/local/bin/composer",
+                apt_install("unzip git")
+            ),
         ));
     }
-    if let Some(node) = layers.iter().find(|r| r.name == "node" && php) {
+    for tool in PYTHON_TOOLS.iter().filter(|t| host == "python" && has(t)) {
+        steps.push(install(
+            &format!("catalog-{tool}"),
+            format!("pip install --no-cache-dir {tool}"),
+        ));
+    }
+    if let Some(node) = layers.iter().find(|r| r.name == "node" && secondary(host, "node")) {
         let v = version(node)?;
         steps.push(install(
             "catalog-node",
             format!(
-                "curl -fsSL https://deb.nodesource.com/setup_{v}.x | bash - && {}",
+                "{} && {}",
+                fetch_and_run(&format!("https://deb.nodesource.com/setup_{v}.x"), "bash"),
                 apt_install("nodejs").trim_start_matches("apt-get update && ")
+            ),
+        ));
+    }
+    if has("bun") && secondary(host, "bun") {
+        steps.push(install(
+            "catalog-bun",
+            format!(
+                "{} && {}",
+                apt_install("unzip"),
+                fetch_and_run("https://bun.sh/install", "BUN_INSTALL=/usr/local bash")
             ),
         ));
     }
@@ -283,7 +339,7 @@ mod tests {
                 "php:8.3-fpm-trixie",
             ),
         ] {
-            let l = lower(&refs(&layers)).unwrap();
+            let l = lower(&refs(&layers), Role::Run).unwrap();
             assert_eq!(l.reference, image, "{layers:?}");
             assert!(l.steps.is_empty(), "{layers:?}: {:?}", names(&l));
         }
@@ -291,16 +347,19 @@ mod tests {
 
     #[test]
     fn laravel_gets_extensions_composer_and_node_and_its_run_base_nginx() {
-        let build = lower(&refs(&[
-            ("os-min", None),
-            ("php", Some("8.4")),
-            ("php-ext-bcmath", Some("8.4")),
-            ("php-ext-mbstring", Some("8.4")),
-            ("php-ext-intl", Some("8.4")),
-            ("php-ext-redis", Some("8.4")),
-            ("composer", Some("2")),
-            ("node", Some("22")),
-        ]))
+        let build = lower(
+            &refs(&[
+                ("os-min", None),
+                ("php", Some("8.4")),
+                ("php-ext-bcmath", Some("8.4")),
+                ("php-ext-mbstring", Some("8.4")),
+                ("php-ext-intl", Some("8.4")),
+                ("php-ext-redis", Some("8.4")),
+                ("composer", Some("2")),
+                ("node", Some("22")),
+            ]),
+            Role::Build,
+        )
         .unwrap();
         assert_eq!(build.reference, "php:8.4-cli-trixie");
         assert_eq!(
@@ -310,20 +369,64 @@ mod tests {
         let exts = script(&build.steps[0]);
         assert!(exts.ends_with("install-php-extensions bcmath intl redis"), "{exts}");
         assert!(script(&build.steps[2]).contains("setup_22.x"));
-        let run = lower(&refs(&[
-            ("os-min", None),
-            ("php", Some("8.4")),
-            ("php-fpm", Some("8.4")),
-            ("nginx", None),
-        ]))
+        let run = lower(
+            &refs(&[
+                ("os-min", None),
+                ("php", Some("8.4")),
+                ("php-fpm", Some("8.4")),
+                ("nginx", None),
+            ]),
+            Role::Run,
+        )
         .unwrap();
         assert_eq!(run.reference, "php:8.4-fpm-trixie");
         assert_eq!(names(&run), ["catalog-nginx"]);
     }
 
     #[test]
+    fn build_bases_carry_compilers_and_run_bases_stay_slim() {
+        for (layers, build, run) in [
+            (vec![("ruby", Some("3.4"))], "ruby:3.4-trixie", "ruby:3.4-slim-trixie"),
+            (
+                vec![("python", Some("3.13"))],
+                "python:3.13-trixie",
+                "python:3.13-slim-trixie",
+            ),
+            (vec![("node", Some("22"))], "node:22-trixie", "node:22-trixie-slim"),
+            (vec![("go", Some("1.27"))], "golang:1.27-trixie", "golang:1.27-trixie"),
+        ] {
+            assert_eq!(lower(&refs(&layers), Role::Build).unwrap().reference, build);
+            assert_eq!(lower(&refs(&layers), Role::Run).unwrap().reference, run);
+        }
+    }
+
+    #[test]
+    fn composer_can_unpack_and_clone() {
+        let l = lower(&refs(&[("php", Some("8.4")), ("composer", Some("2"))]), Role::Build).unwrap();
+        let s = script(&l.steps[0]);
+        assert!(s.contains("unzip") && s.contains("git"), "{s}");
+    }
+
+    #[test]
+    fn python_tools_and_secondary_js_runtimes_install() {
+        for tool in ["uv", "poetry", "pipenv"] {
+            let l = lower(&refs(&[("python", Some("3.13")), (tool, None)]), Role::Build).unwrap();
+            assert_eq!(names(&l), [format!("catalog-{tool}").as_str()]);
+            assert!(script(&l.steps[0]).contains(&format!("pip install --no-cache-dir {tool}")));
+        }
+        let rails = lower(&refs(&[("ruby", Some("3.4")), ("node", Some("22"))]), Role::Build).unwrap();
+        assert_eq!(
+            (rails.reference.as_str(), names(&rails)),
+            ("ruby:3.4-trixie", vec!["catalog-node"])
+        );
+        let bun = lower(&refs(&[("php", Some("8.4")), ("bun", Some("1"))]), Role::Build).unwrap();
+        assert_eq!(names(&bun), ["catalog-bun"]);
+        assert!(script(&bun.steps[0]).contains("BUN_INSTALL=/usr/local"));
+    }
+
+    #[test]
     fn the_static_server_is_a_busybox_shim() {
-        let l = lower(&refs(&[("os-min", None), ("static-server", None)])).unwrap();
+        let l = lower(&refs(&[("os-min", None), ("static-server", None)]), Role::Run).unwrap();
         assert_eq!(l.reference, "debian:trixie-slim");
         assert_eq!(names(&l), ["catalog-static-server"]);
         let s = script(&l.steps[0]);
@@ -339,8 +442,9 @@ mod tests {
             vec![("os-min", None), ("erlang", Some("27"))],
             vec![("os-min", None), ("python", Some("3.13")), ("ruby", Some("3.4"))],
             vec![("os-min", None), ("go", None)],
+            vec![("os-min", None), ("php", Some("8.4")), ("roadrunner", None)],
         ] {
-            let err = lower(&refs(&layers)).unwrap_err();
+            let err = lower(&refs(&layers), Role::Build).unwrap_err();
             assert_eq!(err.exit_code(), 2, "{layers:?}: {err}");
         }
     }

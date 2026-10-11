@@ -145,7 +145,13 @@ pub fn build_target(
             base: image.base.clone(),
             steps: image.runtime_steps.clone(),
         };
-        let run = run_steps(ctx, &format!("{}:run", target.name), &run_chain, repo_root)?;
+        let run = run_steps(
+            ctx,
+            &format!("{}:run", target.name),
+            &run_chain,
+            &repo_root.join(&target.root),
+            crate::stopgap::Role::Run,
+        )?;
         let mut layers = run.layers.clone();
         let store = ctx.store;
         let open: Vec<crate::merge::LayerOpen> = chain

@@ -164,3 +164,39 @@ fn a_detected_node_server_builds_from_node_trixie() {
     );
     assert!(!entrypoint.is_empty());
 }
+
+/// An explicit plan over a catalog base: `layers` and one build step.
+fn catalog_project(layers: &[&str], run: &str, extra: &[(&str, &str)]) -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    let list = layers.iter().map(|l| format!("{l:?}")).collect::<Vec<_>>().join(", ");
+    let toml = format!(
+        "[target.app]\nprovider = \"none\"\n\n[target.app.base]\ncatalog = [{list}]\n\n[target.app.steps.deps]\nrun = {run:?}\n\n[target.app.process.web]\ncmd = [\"/bin/true\"]\n"
+    );
+    write(repo.path(), &[("potter.toml", toml.as_str())]);
+    write(repo.path(), extra);
+    repo
+}
+
+#[test]
+fn composer_installs_dist_packages_without_the_zip_extension() {
+    let Some(ctx) = Ctx::new().filter(|_| network()) else {
+        return;
+    };
+    let repo = catalog_project(
+        &["os-min", "php@8.4", "composer@2"],
+        "composer install --no-interaction --prefer-dist",
+        &[("composer.json", r#"{"require":{"psr/log":"^3"}}"#)],
+    );
+    let (code, _, stderr) = build(&ctx, repo.path(), &[]);
+    assert_eq!(code, 0, "{stderr}");
+}
+
+#[test]
+fn native_gems_compile_on_the_ruby_build_base() {
+    let Some(ctx) = Ctx::new().filter(|_| network()) else {
+        return;
+    };
+    let repo = catalog_project(&["os-min", "ruby@3.4"], "gem install nio4r --no-document", &[]);
+    let (code, _, stderr) = build(&ctx, repo.path(), &[]);
+    assert_eq!(code, 0, "{stderr}");
+}
