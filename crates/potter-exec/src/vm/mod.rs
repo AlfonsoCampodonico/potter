@@ -3,6 +3,7 @@
 //! steps it sends, and the ingest of what comes back, which trusts nothing the guest reports.
 
 pub mod backend;
+pub mod disks;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod ingest;
