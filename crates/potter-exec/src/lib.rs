@@ -10,6 +10,7 @@ pub mod ingest;
 pub mod inputs;
 pub mod merge;
 pub mod ns;
+pub mod remote;
 pub mod sandboxed;
 pub mod seal;
 pub mod stopgap;

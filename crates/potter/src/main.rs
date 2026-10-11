@@ -55,6 +55,12 @@ enum Cmd {
         /// A build secret for steps that mount it: id=<id>,src=<file>
         #[arg(long = "secret")]
         secrets: Vec<String>,
+        /// Look misses up in this remote cache: <registry>[/<prefix>] (default $POTTER_REMOTE_CACHE)
+        #[arg(long)]
+        cache_from: Option<String>,
+        /// Publish sealed steps to this remote cache (default $POTTER_REMOTE_CACHE)
+        #[arg(long)]
+        cache_to: Option<String>,
         /// plain: lines on stderr; json: one event per line on stdout (spec §11)
         #[arg(long, value_enum, default_value = "auto")]
         progress: ProgressMode,
@@ -125,16 +131,23 @@ fn main() -> ExitCode {
             tags,
             secrets,
             progress,
-        } => build(
-            &path,
-            &target,
-            executor,
-            &tenant,
-            no_cache,
-            &tags,
-            &secrets,
-            progress == ProgressMode::Json,
-        ),
+            cache_from,
+            cache_to,
+        } => {
+            let env = std::env::var("POTTER_REMOTE_CACHE").ok().filter(|v| !v.is_empty());
+            let remotes = (cache_from.or_else(|| env.clone()), cache_to.or(env));
+            build(
+                &path,
+                &target,
+                executor,
+                &tenant,
+                no_cache,
+                &tags,
+                &secrets,
+                progress == ProgressMode::Json,
+                remotes,
+            )
+        }
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
         Cmd::Seal { upper, out, skip } => helper(potter_exec::seal::seal_to_file(&upper, &out, &skip)),
     }
@@ -185,6 +198,7 @@ fn build(
     tags: &[String],
     secret_flags: &[String],
     json: bool,
+    remotes: (Option<String>, Option<String>),
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
@@ -247,6 +261,15 @@ fn build(
         Ok(k) => k,
         Err(e) => return fail(&e.to_string(), 4),
     };
+    let remote = |spec: &Option<String>| -> Result<Option<potter_exec::remote::RemoteCache>, potter_exec::BuildError> {
+        spec.as_deref()
+            .map(|s| potter_exec::remote::RemoteCache::parse(s, &tenant, kiln_registry::DockerConfig::from_env()))
+            .transpose()
+    };
+    let (cache_from, cache_to) = match (remote(&remotes.0), remote(&remotes.1)) {
+        (Ok(f), Ok(t)) => (f, t),
+        (Err(e), _) | (_, Err(e)) => return fail(&e.to_string(), e.exit_code()),
+    };
     let index = match home.index(&tenant) {
         Ok(i) => i,
         Err(e) => return fail(&e.to_string(), 4),
@@ -262,7 +285,8 @@ fn build(
     let mut progress = |p: Progress| match p {
         Progress::Step { target, step, state } if json => {
             let (event, secs) = match state {
-                StepState::Cached => ("cache_hit", None),
+                StepState::Cached | StepState::Pulled => ("cache_hit", None),
+                StepState::Pushed => ("pushed", None),
                 StepState::Running => ("step_start", None),
                 StepState::Done { secs } => ("sealed", Some(secs)),
                 StepState::Failed => ("failed", None),
@@ -276,6 +300,8 @@ fn build(
         Progress::Step { target, step, state } => {
             let state = match state {
                 StepState::Cached => "cached".to_string(),
+                StepState::Pulled => "cached (remote)".to_string(),
+                StepState::Pushed => "pushed".to_string(),
                 StepState::Running => "running".to_string(),
                 StepState::Done { secs } => format!("done ({secs:.1}s)"),
                 StepState::Failed => "failed".to_string(),
@@ -297,6 +323,8 @@ fn build(
         auth: kiln_registry::DockerConfig::from_env(),
         secrets: &secrets,
         tenant_key,
+        cache_from: cache_from.as_ref(),
+        cache_to: cache_to.as_ref(),
         progress: &mut progress,
     };
     for t in targets {

@@ -186,6 +186,8 @@ impl Ctx {
             auth: kiln_registry::DockerConfig::anonymous(),
             secrets: &Default::default(),
             tenant_key: [7u8; 32],
+            cache_from: None,
+            cache_to: None,
             progress: &mut progress,
         };
         potter_exec::chain::run_chain(&mut ctx, target, repo)
@@ -212,6 +214,8 @@ impl Ctx {
             auth: kiln_registry::DockerConfig::anonymous(),
             secrets: &Default::default(),
             tenant_key: [7u8; 32],
+            cache_from: None,
+            cache_to: None,
             progress: &mut progress,
         };
         potter_exec::assemble::build_target(&mut ctx, target, repo, tags)
@@ -245,6 +249,8 @@ impl Ctx {
             auth: kiln_registry::DockerConfig::anonymous(),
             secrets: &secrets,
             tenant_key: [7u8; 32],
+            cache_from: None,
+            cache_to: None,
             progress: &mut progress,
         };
         let r = potter_exec::chain::run_chain(&mut ctx, target, repo);

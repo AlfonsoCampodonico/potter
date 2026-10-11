@@ -37,14 +37,24 @@ pub struct BuildCtx<'a> {
     pub secrets: &'a BTreeMap<String, Vec<u8>>,
     /// The tenant's key: secrets enter cache keys as its HMAC.
     pub tenant_key: [u8; 32],
+    /// Where misses are looked up (spec §8.3).
+    pub cache_from: Option<&'a crate::remote::RemoteCache>,
+    /// Where sealed steps are published.
+    pub cache_to: Option<&'a crate::remote::RemoteCache>,
     pub progress: &'a mut dyn FnMut(Progress),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepState {
     Cached,
+    /// A hit from the remote cache, now in the local one.
+    Pulled,
+    /// Pushed to the remote cache.
+    Pushed,
     Running,
-    Done { secs: f64 },
+    Done {
+        secs: f64,
+    },
     Failed,
 }
 
@@ -239,6 +249,8 @@ pub fn run_steps(
     let tname = tname.to_string();
     let mut warned = false;
     let warned_cgroups = &mut warned;
+    let mut live = true;
+    let remote_live = &mut live;
     let result = (|| -> Result<(), BuildError> {
         for step in &steps {
             let sname = step.name().to_string();
@@ -310,14 +322,38 @@ pub fn run_steps(
                         values.push((s.id.clone(), value.clone()));
                     }
                     let secrets_key = potter_cache::secrets_digest(&ctx.tenant_key, &values);
+                    let parent = key;
                     key = step_key(&key, &input(step, None, &step_env, &platform, &secrets_key)).map_err(cache_err)?;
-                    let hit = (!ctx.no_cache)
-                        .then(|| ctx.index.get(&key).ok().flatten())
-                        .flatten()
-                        .and_then(|e| e.layer)
-                        .and_then(|l| Digest::parse(&l).ok())
-                        .filter(|d| ctx.store.has_blob(d));
-                    if let Some(d) = hit {
+                    let local = |ctx: &BuildCtx| {
+                        (!ctx.no_cache)
+                            .then(|| ctx.index.get(&key).ok().flatten())
+                            .flatten()
+                            .and_then(|e| e.layer)
+                            .and_then(|l| Digest::parse(&l).ok())
+                            .filter(|d| ctx.store.has_blob(d))
+                    };
+                    let mut hit = local(ctx).map(|d| (d, StepState::Cached));
+                    // The longest remote prefix: asked until its first miss (spec §8.3).
+                    if hit.is_none()
+                        && !ctx.no_cache
+                        && *remote_live
+                        && let Some(remote) = ctx.cache_from
+                    {
+                        match remote.get(ctx.store, &key, &ctx.home.runs()) {
+                            Ok(Some(entry)) if entry.layer.is_some() => {
+                                ctx.index.put(&key, &entry).map_err(cache_err)?;
+                                hit = local(ctx).map(|d| (d, StepState::Pulled));
+                            }
+                            Ok(_) => *remote_live = false,
+                            Err(e) => {
+                                *remote_live = false;
+                                (ctx.progress)(Progress::Warning(format!(
+                                    "step {sname}: the remote cache failed, building locally: {e}"
+                                )));
+                            }
+                        }
+                    }
+                    if let Some((d, how)) = hit {
                         let size = ctx.store.blob_size(&d).map_err(|e| BuildError::Infra(e.to_string()))?;
                         state.layers.push(LayerRef {
                             descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
@@ -328,7 +364,7 @@ pub fn run_steps(
                         (ctx.progress)(Progress::Step {
                             target: tname.clone(),
                             step: sname.clone(),
-                            state: StepState::Cached,
+                            state: how,
                         });
                         continue;
                     }
@@ -476,17 +512,26 @@ pub fn run_steps(
                     }
                     let (d, size) =
                         seal_in_sandbox(ctx.sandbox, &run.join("upper"), &run.join("run"), ctx.store, &skip)?;
-                    ctx.index
-                        .put(
-                            &key,
-                            &Entry {
-                                layer: Some(d.to_string()),
-                                class: ExecutorClass::Ns,
-                                created: now(),
-                                potter: env!("CARGO_PKG_VERSION").into(),
-                            },
-                        )
-                        .map_err(cache_err)?;
+                    let entry = Entry {
+                        layer: Some(d.to_string()),
+                        class: ExecutorClass::Ns,
+                        created: now(),
+                        potter: env!("CARGO_PKG_VERSION").into(),
+                    };
+                    ctx.index.put(&key, &entry).map_err(cache_err)?;
+                    if let Some(remote) = ctx.cache_to {
+                        // A push failure never fails the build (spec §12).
+                        match remote.put(ctx.store, &key, &parent, &entry) {
+                            Ok(()) => (ctx.progress)(Progress::Step {
+                                target: tname.clone(),
+                                step: sname.clone(),
+                                state: StepState::Pushed,
+                            }),
+                            Err(e) => (ctx.progress)(Progress::Warning(format!(
+                                "step {sname}: pushing to the remote cache failed: {e}"
+                            ))),
+                        }
+                    }
                     state.layers.push(LayerRef {
                         descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
                         diff_id: d,
@@ -607,6 +652,8 @@ mod tests {
             auth: kiln_registry::DockerConfig::anonymous(),
             secrets: &BTreeMap::new(),
             tenant_key: [0u8; 32],
+            cache_from: None,
+            cache_to: None,
             progress: &mut progress,
         };
         let copy = Step::CopyFrom {

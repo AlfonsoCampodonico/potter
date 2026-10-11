@@ -230,3 +230,28 @@ fn progress_json_is_one_event_per_line() {
         "{second:?}"
     );
 }
+
+#[test]
+fn a_fresh_builder_gets_every_step_from_the_remote_cache_of_its_tenant() {
+    let Some(a) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let cache = kiln_registry::testregistry::TestRegistry::start(Default::default());
+    let remote = format!("{}/potter", cache.host());
+    let repo = project(&base);
+    let (code, stdout, stderr) = build(&a, repo.path(), &["--cache-to", &remote]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("(executed 1, cached 0)"), "{stdout}");
+    assert!(stderr.contains("[app] build: pushed"), "{stderr}");
+    let b = Ctx::new().unwrap();
+    let (code, stdout, stderr) = build(&b, repo.path(), &["--cache-from", &remote]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("(executed 0, cached 1)"), "{stdout}\n{stderr}");
+    assert!(stderr.contains("[app] build: cached (remote)"), "{stderr}");
+    let c = Ctx::new().unwrap();
+    let (code, stdout, stderr) = build(&c, repo.path(), &["--cache-from", &remote, "--tenant", "other"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("(executed 1, cached 0)"),
+        "another tenant shares nothing: {stdout}"
+    );
+}
