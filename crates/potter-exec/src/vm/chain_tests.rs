@@ -378,3 +378,25 @@ fn cache_mounts_in_a_vm_build_are_refused_until_p4b() {
     let e = vm(&w, &target(&w, vec![step]), &fake).unwrap_err();
     assert_eq!(e.exit_code(), 2, "{e}");
 }
+
+#[test]
+fn a_vm_step_gets_the_same_home_default_as_an_ns_step() {
+    let w = world();
+    let mut nobody = run("a");
+    if let Step::Run { user, .. } = &mut nobody {
+        *user = "1000:1000".into();
+    }
+    let t = target(&w, vec![run("root"), nobody]);
+    let fake = FakeBackend::new(
+        31,
+        vec![Script::files(&[("app/r", "1")]), Script::files(&[("app/a", "1")])],
+    );
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    assert_eq!(f.steps[0].env.get("HOME").map(String::as_str), Some("/root"), "uid 0");
+    assert_eq!(
+        f.steps[1].env.get("HOME").map(String::as_str),
+        Some("/"),
+        "no passwd entry: as ns.rs"
+    );
+}

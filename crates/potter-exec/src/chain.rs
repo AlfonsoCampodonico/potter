@@ -485,6 +485,10 @@ pub fn run_steps(
                         if let Some(home) = home_of(passwd.as_deref(), uid) {
                             step_env.entry("HOME".into()).or_insert(home);
                         }
+                        // The namespace executor's default (ns.rs), so a step sees the same env.
+                        step_env
+                            .entry("HOME".into())
+                            .or_insert_with(|| if uid == 0 { "/root".into() } else { "/".into() });
                         if session.is_none() {
                             let rest = &steps[i + 1..];
                             let reserve = rest
