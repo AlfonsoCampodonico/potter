@@ -132,3 +132,21 @@ Deferred:
   - `php-fpm` without `php` is dropped silently;
   - the network tests assert little;
   - `lower()` trusts input that callers validated.
+
+**P6a (2026-10-11):** remote cache, target graph and `copy_from`, `--affected`, build secrets, `--progress json`. Plan: `docs/superpowers/plans/2026-10-11-potter-p6a-cache-graph.md`. After review, everything Critical and Important is fixed.
+
+Deferred minors:
+- **JSON events:**
+  - Under `--affected`, a dependency gets `unchanged` and then `target_built`.
+  - `pushed` comes before `sealed`.
+  - `cache_hit` doesn't say local or remote.
+  - Failures before the build loop emit no JSON `error`.
+- **Remote cache:**
+  - A scheme in `--cache-*` exits 4, not 2.
+  - `CacheConfig` refuses unknown fields.
+  - Blobs that fail validation stay until gc.
+- **`--affected`:**
+  - `git archive` is buffered whole and isn't limited to the path.
+  - False positives: LFS, submodules, export attributes, untracked files (it compares the worktree, not HEAD, with the ref).
+  - Unchanged targets don't show their last image ref.
+- **Next:** P6b (SBOM, provenance, signing, `potter verify`, build Jobs).
