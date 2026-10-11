@@ -52,6 +52,9 @@ enum Cmd {
         /// Tag the image (default potter/<target>:latest); with several targets, give none
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// A build secret for steps that mount it: id=<id>,src=<file>
+        #[arg(long = "secret")]
+        secrets: Vec<String>,
     },
     /// Show which providers claim a directory
     Detect {
@@ -105,7 +108,8 @@ fn main() -> ExitCode {
             tenant,
             no_cache,
             tags,
-        } => build(&path, &target, executor, &tenant, no_cache, &tags),
+            secrets,
+        } => build(&path, &target, executor, &tenant, no_cache, &tags, &secrets),
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
         Cmd::Seal { upper, out, skip } => helper(potter_exec::seal::seal_to_file(&upper, &out, &skip)),
     }
@@ -122,6 +126,31 @@ fn helper<T>(result: Result<T, potter_exec::BuildError>) -> ExitCode {
     }
 }
 
+/// `id=<id>,src=<file>` flags as secret values.
+fn read_secrets(flags: &[String]) -> Result<std::collections::BTreeMap<String, Vec<u8>>, (String, u8)> {
+    let mut out = std::collections::BTreeMap::new();
+    for flag in flags {
+        let (mut id, mut src) = (None, None);
+        for part in flag.split(',') {
+            match part.split_once('=') {
+                Some(("id", v)) => id = Some(v),
+                Some(("src", v)) => src = Some(v),
+                _ => return Err((format!("--secret {flag:?}: expected id=<id>,src=<file>"), 2)),
+            }
+        }
+        let (Some(id), Some(src)) = (id, src) else {
+            return Err((format!("--secret {flag:?}: expected id=<id>,src=<file>"), 2));
+        };
+        if !potter_plan::is_name(id) {
+            return Err((format!("--secret {flag:?}: {id:?} is not a name"), 2));
+        }
+        let value = std::fs::read(src).map_err(|e| (format!("--secret {id}: reading {src}: {e}"), 4))?;
+        out.insert(id.to_string(), value);
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build(
     path: &Path,
     only: &[String],
@@ -129,6 +158,7 @@ fn build(
     tenant: &str,
     no_cache: bool,
     tags: &[String],
+    secret_flags: &[String],
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     const VM: &str = "the VM executor ships in milestone P4";
@@ -182,6 +212,14 @@ fn build(
         Ok(t) => t,
         Err(e) => return fail(&e.to_string(), 2),
     };
+    let secrets = match read_secrets(secret_flags) {
+        Ok(s) => s,
+        Err((e, code)) => return fail(&e, code),
+    };
+    let tenant_key = match potter_cache::tenant_key(&home, &tenant) {
+        Ok(k) => k,
+        Err(e) => return fail(&e.to_string(), 4),
+    };
     let index = match home.index(&tenant) {
         Ok(i) => i,
         Err(e) => return fail(&e.to_string(), 4),
@@ -217,6 +255,8 @@ fn build(
         platform: kiln_oci::Platform::host(),
         no_cache,
         auth: kiln_registry::DockerConfig::from_env(),
+        secrets: &secrets,
+        tenant_key,
         progress: &mut progress,
     };
     for t in targets {

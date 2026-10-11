@@ -184,6 +184,8 @@ impl Ctx {
             platform: kiln_oci::Platform::host(),
             no_cache: false,
             auth: kiln_registry::DockerConfig::anonymous(),
+            secrets: &Default::default(),
+            tenant_key: [7u8; 32],
             progress: &mut progress,
         };
         potter_exec::chain::run_chain(&mut ctx, target, repo)
@@ -208,9 +210,46 @@ impl Ctx {
             platform: kiln_oci::Platform::host(),
             no_cache: false,
             auth: kiln_registry::DockerConfig::anonymous(),
+            secrets: &Default::default(),
+            tenant_key: [7u8; 32],
             progress: &mut progress,
         };
         potter_exec::assemble::build_target(&mut ctx, target, repo, tags)
+    }
+
+    /// Runs `target`'s chain with `secrets`, collecting the streamed log lines.
+    pub fn chain_with_secrets(
+        &self,
+        target: &potter_plan::Target,
+        repo: &Path,
+        secrets: &[(&str, &[u8])],
+    ) -> (Result<potter_exec::chain::ChainState, BuildError>, Vec<String>) {
+        let tenant = potter_cache::Tenant::local();
+        let index = self.home.index(&tenant).unwrap();
+        let secrets: std::collections::BTreeMap<String, Vec<u8>> =
+            secrets.iter().map(|(k, v)| (k.to_string(), v.to_vec())).collect();
+        let mut lines = Vec::new();
+        let mut progress = |p: potter_exec::chain::Progress| {
+            if let potter_exec::chain::Progress::Log { line, .. } = p {
+                lines.push(line);
+            }
+        };
+        let mut ctx = potter_exec::chain::BuildCtx {
+            store: &self.store,
+            home: &self.home,
+            tenant: &tenant,
+            index: &index,
+            sandbox: &self.sandbox,
+            platform: kiln_oci::Platform::host(),
+            no_cache: false,
+            auth: kiln_registry::DockerConfig::anonymous(),
+            secrets: &secrets,
+            tenant_key: [7u8; 32],
+            progress: &mut progress,
+        };
+        let r = potter_exec::chain::run_chain(&mut ctx, target, repo);
+        drop(ctx);
+        (r, lines)
     }
 
     pub fn index_entries(&self) -> usize {
@@ -262,6 +301,7 @@ impl Ctx {
             },
             network: false,
             cache_mounts: vec![],
+            secrets: vec![],
             timeout,
             run_dir: runs.join("run"),
             log: &mut log,

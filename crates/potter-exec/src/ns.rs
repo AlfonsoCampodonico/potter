@@ -31,6 +31,8 @@ pub struct StepRun<'a> {
     pub network: bool,
     /// Host directory and its target inside the step.
     pub cache_mounts: Vec<(PathBuf, String)>,
+    /// Secret files (host path, target), bound read-only for this step only (spec §5.4).
+    pub secrets: Vec<(PathBuf, String)>,
     pub timeout: Duration,
     /// Holds the sandbox's own files and the step's `resolv.conf`.
     pub run_dir: PathBuf,
@@ -69,6 +71,12 @@ pub fn mount_points(r: &StepRun) -> Vec<String> {
     if r.network {
         points.push("etc/resolv.conf".into());
     }
+    // A secret's mount point and the directories made for it.
+    for (_, t) in &r.secrets {
+        let t = t.trim_start_matches('/');
+        points.extend(t.match_indices('/').map(|(i, _)| t[..i].to_string()));
+        points.push(t.to_string());
+    }
     points
 }
 
@@ -84,6 +92,11 @@ pub fn run_step(r: StepRun) -> Result<StepOutcome, BuildError> {
             writable: true,
         })
         .collect();
+    mounts.extend(r.secrets.iter().map(|(source, target)| Mount::Bind {
+        source: source.clone(),
+        target: target.into(),
+        writable: false,
+    }));
     if r.network {
         let resolv = r.run_dir.join("resolv.conf");
         std::fs::write(&resolv, format!("nameserver {}\n", vmkit::net::NAMESERVER))

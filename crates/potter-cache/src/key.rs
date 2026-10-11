@@ -48,6 +48,25 @@ pub struct StepInput<'a> {
     /// e.g. `linux/arm64`.
     pub platform: &'a str,
     pub class: ExecutorClass,
+    /// [`secrets_digest`] of the secrets the step mounts (empty without any).
+    pub secrets: &'a [u8],
+}
+
+/// The key material of a step's secrets (spec §5.4): `HMAC-SHA256(tenant_key, id ‖ 0 ‖ value)`
+/// per secret, in id order. The values themselves never enter a key.
+pub fn secrets_digest(tenant_key: &[u8; 32], secrets: &[(String, Vec<u8>)]) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    let mut sorted: Vec<&(String, Vec<u8>)> = secrets.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = Vec::new();
+    for (id, value) in sorted {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(tenant_key).expect("HMAC takes any key length");
+        mac.update(id.as_bytes());
+        mac.update(&[0]);
+        mac.update(value);
+        out.extend_from_slice(&mac.finalize().into_bytes());
+    }
+    out
 }
 
 /// SHA-256 over `domain`, then each field as a big-endian u64 length and its bytes.
@@ -70,8 +89,6 @@ pub fn base_key(base_digest: &str) -> CacheKey {
 pub fn step_key(parent: &CacheKey, input: &StepInput) -> Result<CacheKey, CacheError> {
     let step = potter_plan::step_hash(input.step).map_err(CacheError::Plan)?;
     let env = potter_plan::hash_of(input.env).map_err(CacheError::Plan)?;
-    // Secrets (spec §5.4) join the key as an HMAC once they are supported; P2a has none.
-    let secrets: &[u8] = &[];
     Ok(hash(
         "potter.cache/v1",
         &[
@@ -79,7 +96,7 @@ pub fn step_key(parent: &CacheKey, input: &StepInput) -> Result<CacheKey, CacheE
             &step.0,
             input.inputs_digest.unwrap_or_default().as_bytes(),
             &env.0,
-            secrets,
+            input.secrets,
             input.platform.as_bytes(),
             input.class.as_str().as_bytes(),
             POTTER_MAJOR.as_bytes(),
@@ -116,6 +133,7 @@ mod tests {
             env,
             platform: "linux/arm64",
             class: ExecutorClass::Ns,
+            secrets: &[],
         }
     }
 
@@ -153,6 +171,35 @@ mod tests {
         let mut i = input(&step, &env);
         i.class = ExecutorClass::Vm;
         assert_ne!(k, step_key(&parent, &i).unwrap(), "class");
+    }
+
+    #[test]
+    fn secrets_enter_the_key_only_as_a_tenant_keyed_hmac() {
+        let env = BTreeMap::new();
+        let step = run("make");
+        let parent = base_key("sha256:aa");
+        let none = step_key(&parent, &input(&step, &env)).unwrap();
+        let k1 = [1u8; 32];
+        let a = secrets_digest(&k1, &[("npm".into(), b"token-a".to_vec())]);
+        let b = secrets_digest(&k1, &[("npm".into(), b"token-b".to_vec())]);
+        let other_tenant = secrets_digest(&[2u8; 32], &[("npm".into(), b"token-a".to_vec())]);
+        assert_ne!(a, b);
+        assert_ne!(a, other_tenant);
+        assert!(
+            !a.windows(7).any(|w| w == b"token-a"),
+            "the value itself never enters the key material"
+        );
+        // order of ids does not matter
+        let ab = secrets_digest(&k1, &[("a".into(), b"1".to_vec()), ("b".into(), b"2".to_vec())]);
+        let ba = secrets_digest(&k1, &[("b".into(), b"2".to_vec()), ("a".into(), b"1".to_vec())]);
+        assert_eq!(ab, ba);
+        let mut i = input(&step, &env);
+        i.secrets = &a;
+        let with_a = step_key(&parent, &i).unwrap();
+        i.secrets = &b;
+        assert_ne!(with_a, step_key(&parent, &i).unwrap());
+        assert_ne!(with_a, none);
+        assert!(secrets_digest(&k1, &[]).is_empty());
     }
 
     #[test]

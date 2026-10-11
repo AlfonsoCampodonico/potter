@@ -33,6 +33,10 @@ pub struct BuildCtx<'a> {
     pub platform: Platform,
     pub no_cache: bool,
     pub auth: DockerConfig,
+    /// Build secrets by id (spec §5.4).
+    pub secrets: &'a BTreeMap<String, Vec<u8>>,
+    /// The tenant's key: secrets enter cache keys as its HMAC.
+    pub tenant_key: [u8; 32],
     pub progress: &'a mut dyn FnMut(Progress),
 }
 
@@ -98,20 +102,11 @@ fn check_base(base: &Base, what: &str) -> Result<(), BuildError> {
 /// Refuses steps potter cannot run yet, naming them and the milestone that ships them.
 fn check_steps(what: &str, steps: &[Step]) -> Result<(), BuildError> {
     for step in steps {
-        match step {
-            Step::CopyFrom { name: s, .. } => {
-                return Err(unsupported(
-                    format!("the copy_from step {s} of {what}"),
-                    "P6 (the graph)",
-                ));
-            }
-            Step::Run { name: s, secrets, .. } if !secrets.is_empty() => {
-                return Err(unsupported(
-                    format!("the secrets of step {s} of {what}"),
-                    "P6 (secrets)",
-                ));
-            }
-            _ => {}
+        if let Step::CopyFrom { name: s, .. } = step {
+            return Err(unsupported(
+                format!("the copy_from step {s} of {what}"),
+                "P6 (the graph)",
+            ));
         }
     }
     Ok(())
@@ -249,7 +244,7 @@ pub fn run_steps(
             let sname = step.name().to_string();
             match step {
                 Step::Meta { env, workdir, user, .. } => {
-                    key = step_key(&key, &input(step, None, &state.env, &platform)).map_err(cache_err)?;
+                    key = step_key(&key, &input(step, None, &state.env, &platform, &[])).map_err(cache_err)?;
                     state.env.extend(env.clone());
                     if let Some(w) = workdir {
                         state.workdir = w.clone();
@@ -283,8 +278,8 @@ pub fn run_steps(
                         .store
                         .put_reader(&mut file)
                         .map_err(|e| BuildError::Infra(format!("storing the inputs of {sname}: {e}")))?;
-                    key =
-                        step_key(&key, &input(step, Some(&d.to_string()), &state.env, &platform)).map_err(cache_err)?;
+                    key = step_key(&key, &input(step, Some(&d.to_string()), &state.env, &platform, &[]))
+                        .map_err(cache_err)?;
                     state.layers.push(LayerRef {
                         descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
                         diff_id: d,
@@ -298,12 +293,24 @@ pub fn run_steps(
                     user,
                     network,
                     cache_mounts,
+                    secrets,
                     timeout_secs,
                     ..
                 } => {
                     let mut step_env = state.env.clone();
                     step_env.extend(env.clone());
-                    key = step_key(&key, &input(step, None, &step_env, &platform)).map_err(cache_err)?;
+                    let mut values: Vec<(String, Vec<u8>)> = Vec::new();
+                    for s in secrets {
+                        let value = ctx.secrets.get(&s.id).ok_or_else(|| {
+                            BuildError::Plan(format!(
+                                "step {sname} needs the secret {}: pass --secret id={},src=<file>",
+                                s.id, s.id
+                            ))
+                        })?;
+                        values.push((s.id.clone(), value.clone()));
+                    }
+                    let secrets_key = potter_cache::secrets_digest(&ctx.tenant_key, &values);
+                    key = step_key(&key, &input(step, None, &step_env, &platform, &secrets_key)).map_err(cache_err)?;
                     let hit = (!ctx.no_cache)
                         .then(|| ctx.index.get(&key).ok().flatten())
                         .flatten()
@@ -397,13 +404,33 @@ pub fn run_steps(
                         step: sname.clone(),
                         state: StepState::Running,
                     });
+                    // Each secret as a 0400 file in the step's run directory, bound read-only.
+                    let mut secret_mounts = Vec::new();
+                    for (n, (s, (_, value))) in secrets.iter().zip(&values).enumerate() {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        let file = run.join(format!("secret-{n}"));
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .mode(0o400)
+                            .open(&file)
+                            .and_then(|mut f| std::io::Write::write_all(&mut f, value))
+                            .map_err(io(format!("writing the secret {}", s.id)))?;
+                        secret_mounts.push((file, s.target.clone()));
+                    }
+                    let redact = |line: &str| -> String {
+                        values.iter().fold(line.to_string(), |l, (_, v)| {
+                            let v = String::from_utf8_lossy(v);
+                            if v.is_empty() { l } else { l.replace(v.as_ref(), "***") }
+                        })
+                    };
                     let started = Instant::now();
                     let progress = &mut *ctx.progress;
                     let mut log = |line: &str| {
                         progress(Progress::Log {
                             target: tname.clone(),
                             step: sname.clone(),
-                            line: line.to_string(),
+                            line: redact(line),
                         })
                     };
                     let timeout = timeout_secs.map_or(STEP_TIMEOUT, Duration::from_secs);
@@ -422,6 +449,7 @@ pub fn run_steps(
                         },
                         network: *network,
                         cache_mounts: mounts,
+                        secrets: secret_mounts,
                         timeout,
                         run_dir: run.join("run"),
                         log: &mut log,
@@ -443,7 +471,7 @@ pub fn run_steps(
                         return Err(BuildError::StepFailed {
                             step: sname.clone(),
                             status,
-                            tail: outcome.tail,
+                            tail: outcome.tail.iter().map(|l| redact(l)).collect(),
                         });
                     }
                     let (d, size) =
@@ -489,6 +517,7 @@ fn input<'a>(
     inputs_digest: Option<&'a str>,
     env: &'a BTreeMap<String, String>,
     platform: &'a str,
+    secrets: &'a [u8],
 ) -> StepInput<'a> {
     StepInput {
         step,
@@ -496,6 +525,7 @@ fn input<'a>(
         env,
         platform,
         class: ExecutorClass::Ns,
+        secrets,
     }
 }
 
@@ -575,6 +605,8 @@ mod tests {
             platform: kiln_oci::Platform::host(),
             no_cache: false,
             auth: kiln_registry::DockerConfig::anonymous(),
+            secrets: &BTreeMap::new(),
+            tenant_key: [0u8; 32],
             progress: &mut progress,
         };
         let copy = Step::CopyFrom {
@@ -640,7 +672,6 @@ mod tests {
         let cases = [
             (target(stage, vec![]), "stage"),
             (target(oci(), vec![copy]), "copy"),
-            (target(oci(), vec![secret]), "secret"),
             (services, "services"),
         ];
         for (t, named) in cases {

@@ -377,3 +377,37 @@ fn stale_run_directories_are_swept_when_no_build_runs() {
     let _lock = potter_exec::sandboxed::begin_build(&ctx.sandbox, &ctx.home).unwrap();
     assert!(!stale.exists(), "the stale run directory survived");
 }
+
+#[test]
+fn a_secret_reaches_its_step_only_and_never_a_layer_a_log_or_the_index() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[]);
+    let mut step = run("use", "cat /run/secrets/tok; echo; wc -c < /run/secrets/tok > /len");
+    if let potter_plan::Step::Run { secrets, .. } = &mut step {
+        secrets.push(potter_plan::SecretRef {
+            id: "tok".into(),
+            target: "/run/secrets/tok".into(),
+        });
+    }
+    let target = ctx.target(&base, vec![step]);
+    let (state, lines) = ctx.chain_with_secrets(&target, repo.path(), &[("tok", b"s3cr3t-value")]);
+    let state = state.unwrap();
+    assert!(lines.iter().any(|l| l.contains("***")), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("s3cr3t-value")), "{lines:?}");
+    let layer = state.layers.last().unwrap();
+    let paths = ctx.layer_paths(layer);
+    assert!(paths.iter().any(|p| p == "len"), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.starts_with("run/secrets")), "{paths:?}");
+    let blob = std::fs::read(ctx.store.blob_path(&layer.descriptor.digest)).unwrap();
+    assert!(!blob.windows(12).any(|w| w == b"s3cr3t-value"));
+    for e in std::fs::read_dir(ctx.home.root().join("cache/local/index")).unwrap() {
+        let bytes = std::fs::read(e.unwrap().path()).unwrap();
+        assert!(!bytes.windows(12).any(|w| w == b"s3cr3t-value"));
+    }
+    // A new value is a new key; a missing secret is a plan error.
+    let (again, _) = ctx.chain_with_secrets(&target, repo.path(), &[("tok", b"other-value!")]);
+    assert_eq!(again.unwrap().executed, 1);
+    let (missing, _) = ctx.chain_with_secrets(&target, repo.path(), &[]);
+    assert_eq!(missing.unwrap_err().exit_code(), 2);
+}

@@ -7,6 +7,7 @@ description = "potter's cache keys, local cache index and tenants (spec §8)"
 
 [dependencies]
 potter-plan = { path = "../potter-plan" }
+hmac = "0.12.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10.9"

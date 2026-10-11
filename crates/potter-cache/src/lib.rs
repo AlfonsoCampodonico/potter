@@ -9,7 +9,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 pub use index::{Entry, Index};
-pub use key::{CacheKey, ExecutorClass, POTTER_MAJOR, StepInput, base_key, step_key};
+pub use key::{CacheKey, ExecutorClass, POTTER_MAJOR, StepInput, base_key, secrets_digest, step_key};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
