@@ -35,6 +35,8 @@ pub struct BuildCtx<'a> {
     pub auth: DockerConfig,
     /// Who runs the steps: decides the keys looked up and the class of new entries (spec §8.4).
     pub executor: ExecutorClass,
+    /// The build VM, for `vm` builds (spec §9.3).
+    pub backend: Option<&'a dyn crate::vm::backend::BuildBackend>,
     /// Build secrets by id (spec §5.4).
     pub secrets: &'a BTreeMap<String, Vec<u8>>,
     /// The tenant's key: secrets enter cache keys as its HMAC.
@@ -231,6 +233,24 @@ pub fn run_steps(
 ) -> Result<ChainState, BuildError> {
     check_base(&chain.base, tname)?;
     check_steps(tname, &chain.steps)?;
+    if ctx.executor == ExecutorClass::Vm {
+        if ctx.backend.is_none() {
+            return Err(BuildError::Infra(
+                "VM builds need kiln build mode (kiln M3e), which this potter does not have yet; pass --executor ns"
+                    .into(),
+            ));
+        }
+        if let Some(Step::Run { name, .. }) = chain
+            .steps
+            .iter()
+            .find(|s| matches!(s, Step::Run { cache_mounts, .. } if !cache_mounts.is_empty()))
+        {
+            return Err(unsupported(
+                format!("the cache mounts of step {name} of {tname} in a VM build"),
+                "P4b (kiln build mode)",
+            ));
+        }
+    }
     let (reference, digest, prelude) = match &chain.base {
         Base::Oci { reference, digest } => (reference.clone(), digest.clone(), Vec::new()),
         Base::Catalog { layers } => {
@@ -279,8 +299,11 @@ pub fn run_steps(
     let warned_cgroups = &mut warned;
     let mut live = true;
     let remote_live = &mut live;
+    // The VM running the chain since its first miss (vm builds).
+    let mut vm_session: Option<crate::vm::Session> = None;
+    let session = &mut vm_session;
     let result = (|| -> Result<(), BuildError> {
-        for step in &steps {
+        for (i, step) in steps.iter().enumerate() {
             let sname = step.name().to_string();
             match step {
                 Step::Meta { env, workdir, user, .. } => {
@@ -336,6 +359,7 @@ pub fn run_steps(
                         diff_id: d,
                     });
                     lowers.push(None);
+                    attach_host_layer(session, ctx, state.layers.last().expect("just pushed"))?;
                 }
                 Step::Run {
                     command,
@@ -379,11 +403,14 @@ pub fn run_steps(
                             .and_then(|e| Digest::parse(&e.layer?).ok())
                             .filter(|d| ctx.store.has_blob(d))
                     };
+                    // After a miss the rest of the chain runs in its VM, unlooked-up (spec §9.1).
                     let mut hit = candidates
                         .iter()
+                        .filter(|_| session.is_none())
                         .find_map(|&(class, k)| local(ctx, class, &k).map(|d| (d, StepState::Cached, class, k)));
                     // The longest remote prefix: asked until its first miss (spec §8.3).
                     if hit.is_none()
+                        && session.is_none()
                         && !ctx.no_cache
                         && *remote_live
                         && let Some(remote) = ctx.cache_from
@@ -452,151 +479,245 @@ pub fn run_steps(
                         .find(|(c, _)| *c == ctx.executor)
                         .expect("a build looks up its own class")
                         .1;
-                    // Every layer so far, unpacked, top first.
-                    for (i, layer) in state.layers.iter().enumerate() {
-                        if lowers[i].is_none() {
-                            lowers[i] = Some(ensure_unpacked(ctx.sandbox, ctx.store, &layer.descriptor, ctx.home)?);
-                        }
-                    }
-                    let stack: Vec<PathBuf> = lowers
-                        .iter()
-                        .rev()
-                        .map(|l| l.clone().expect("unpacked above"))
-                        .collect();
-                    let (uid, gid, passwd) = ids(user, ctx.store, &state.layers, &format!("step {sname}"))?;
-                    if let Some(home) = home_of(passwd.as_deref(), uid) {
-                        step_env.entry("HOME".into()).or_insert(home);
-                    }
-                    std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
-                    let run = tempfile::Builder::new()
-                        .prefix("step-")
-                        .tempdir_in(ctx.home.runs())
-                        .map_err(io("creating a step directory"))?
-                        .keep();
-                    runs.push(run.clone());
-                    let mut mounts = Vec::new();
-                    // Held until the step ends: exclusive mounts (spec §8.5).
-                    let mut held = Vec::new();
-                    for m in cache_mounts {
-                        if !potter_plan::is_name(&m.id) {
-                            return Err(BuildError::Plan(format!(
-                                "step {sname}: the cache mount id {:?} is not a name",
-                                m.id
-                            )));
-                        }
-                        let root = ctx.home.mounts(ctx.tenant);
-                        std::fs::create_dir_all(&root).map_err(io(format!("creating {}", root.display())))?;
-                        let lock_path = root.join(format!("{}.lock", m.id));
-                        let lock = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&lock_path)
-                            .map_err(io(format!("opening {}", lock_path.display())))?;
-                        let free =
-                            rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok();
-                        let dir = if free {
-                            held.push(lock);
-                            root.join(&m.id)
-                        } else {
-                            // Another build holds it: an empty scratch mount, slower but correct.
-                            (ctx.progress)(Progress::Warning(format!(
-                                "step {sname}: the cache mount {} is in use by another build; using an empty one",
-                                m.id
-                            )));
-                            run.join(format!("scratch-{}", m.id))
-                        };
-                        std::fs::create_dir_all(&dir).map_err(io(format!("creating {}", dir.display())))?;
-                        mounts.push((dir, m.target.clone()));
-                    }
-                    if !*warned_cgroups && !vmkit::sandbox::cgroups_available() {
-                        *warned_cgroups = true;
-                        (ctx.progress)(Progress::Warning(
-                            "no cgroup delegation (systemd user scopes): steps run without memory, CPU and task \
-                             limits, bounded only by their timeout"
-                                .into(),
-                        ));
-                    }
-                    for d in ["upper", "work", "run"] {
-                        std::fs::create_dir(run.join(d)).map_err(io("creating a step directory"))?;
-                    }
-                    (ctx.progress)(Progress::Step {
-                        target: tname.clone(),
-                        step: sname.clone(),
-                        state: StepState::Running,
-                    });
-                    // Each secret as a 0400 file in the step's run directory, bound read-only.
-                    let mut secret_mounts = Vec::new();
-                    for (n, (s, (_, value))) in secrets.iter().zip(&values).enumerate() {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        let file = run.join(format!("secret-{n}"));
-                        std::fs::OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .mode(0o400)
-                            .open(&file)
-                            .and_then(|mut f| std::io::Write::write_all(&mut f, value))
-                            .map_err(io(format!("writing the secret {}", s.id)))?;
-                        secret_mounts.push((file, s.target.clone()));
-                    }
-                    let secret_files = secret_mounts.clone();
-                    let redact = redactor(&values);
                     let started = Instant::now();
-                    let progress = &mut *ctx.progress;
-                    let mut log = |line: &str| {
-                        progress(Progress::Log {
+                    let (d, size, upper) = if ctx.executor == ExecutorClass::Vm {
+                        let (uid, gid, passwd) = ids(user, ctx.store, &state.layers, &format!("step {sname}"))?;
+                        if let Some(home) = home_of(passwd.as_deref(), uid) {
+                            step_env.entry("HOME".into()).or_insert(home);
+                        }
+                        if session.is_none() {
+                            let rest = &steps[i + 1..];
+                            let reserve = rest
+                                .iter()
+                                .filter(|s| matches!(s, Step::Inputs { .. } | Step::CopyFrom { .. }))
+                                .count();
+                            let network = std::iter::once(step)
+                                .chain(rest)
+                                .any(|s| matches!(s, Step::Run { network: true, .. }));
+                            let backend = ctx.backend.expect("checked before the chain");
+                            *session = Some(crate::vm::Session::start(
+                                backend,
+                                ctx.store,
+                                ctx.home,
+                                &state.layers,
+                                reserve,
+                                network,
+                            )?);
+                        }
+                        (ctx.progress)(Progress::Step {
                             target: tname.clone(),
                             step: sname.clone(),
-                            line: redact(line),
-                        })
-                    };
-                    let timeout = timeout_secs.map_or(STEP_TIMEOUT, Duration::from_secs);
-                    let step_run = StepRun {
-                        lowers: stack,
-                        upper: run.join("upper"),
-                        work: run.join("work"),
-                        args: wrap(command, workdir),
-                        env: step_env,
-                        user: vmkit::sandbox::User {
+                            state: StepState::Running,
+                        });
+                        let redact = redactor(&values);
+                        let mut tail = std::collections::VecDeque::with_capacity(crate::ns::TAIL);
+                        let timeout = timeout_secs.map_or(STEP_TIMEOUT, Duration::from_secs);
+                        let run_step = crate::vm::backend::RunStep {
+                            id: 0,
+                            command: command.clone(),
+                            env: step_env,
+                            workdir: workdir.clone(),
                             uid: u32::try_from(uid)
                                 .map_err(|_| BuildError::Plan(format!("step {sname}: uid {uid}")))?,
                             gid: u32::try_from(gid)
                                 .map_err(|_| BuildError::Plan(format!("step {sname}: gid {gid}")))?,
-                            groups: vec![],
-                        },
-                        network: *network,
-                        cache_mounts: mounts,
-                        secrets: secret_mounts.clone(),
-                        timeout,
-                        run_dir: run.join("run"),
-                        log: &mut log,
-                    };
-                    let skip = mount_points(&step_run);
-                    let outcome = run_step(step_run);
-                    // A secret lives on the host only while its step runs.
-                    for (file, _) in &secret_files {
-                        let _ = std::fs::remove_file(file);
-                    }
-                    let outcome = outcome?;
-                    drop(held);
-                    if !outcome.status.success() {
+                            lowers_added: vec![],
+                            mounts: vec![],
+                            secrets: secrets
+                                .iter()
+                                .map(|s| s.target.clone())
+                                .zip(values.iter().map(|(_, v)| v.clone()))
+                                .collect(),
+                            network: *network,
+                            timeout,
+                        };
+                        let vm = session.as_mut().expect("started above");
+                        let outcome = {
+                            let progress = &mut *ctx.progress;
+                            let mut sink = |line: &str| {
+                                let line = redact(line);
+                                if tail.len() == crate::ns::TAIL {
+                                    tail.pop_front();
+                                }
+                                tail.push_back(line.clone());
+                                progress(Progress::Log {
+                                    target: tname.clone(),
+                                    step: sname.clone(),
+                                    line,
+                                })
+                            };
+                            vm.run(run_step, &mut sink)?
+                        };
+                        if !outcome.exit.success() {
+                            (ctx.progress)(Progress::Step {
+                                target: tname.clone(),
+                                step: sname.clone(),
+                                state: StepState::Failed,
+                            });
+                            let status = match outcome.exit {
+                                crate::vm::backend::Exit::TimedOut => format!("timed out after {}s", timeout.as_secs()),
+                                e => e.to_string(),
+                            };
+                            return Err(BuildError::StepFailed {
+                                step: sname.clone(),
+                                status,
+                                tail: tail.into(),
+                            });
+                        }
+                        let report = outcome.sealed.ok_or_else(|| {
+                            BuildError::Hostile(format!("the guest ran step {sname} but reported no sealed diff"))
+                        })?;
+                        let (d, size) = vm
+                            .disk
+                            .take(&report, ctx.store, &ctx.home.runs(), crate::remote::MAX_LAYER)?;
+                        (d, size, None)
+                    } else {
+                        // Every layer so far, unpacked, top first.
+                        for (i, layer) in state.layers.iter().enumerate() {
+                            if lowers[i].is_none() {
+                                lowers[i] = Some(ensure_unpacked(ctx.sandbox, ctx.store, &layer.descriptor, ctx.home)?);
+                            }
+                        }
+                        let stack: Vec<PathBuf> = lowers
+                            .iter()
+                            .rev()
+                            .map(|l| l.clone().expect("unpacked above"))
+                            .collect();
+                        let (uid, gid, passwd) = ids(user, ctx.store, &state.layers, &format!("step {sname}"))?;
+                        if let Some(home) = home_of(passwd.as_deref(), uid) {
+                            step_env.entry("HOME".into()).or_insert(home);
+                        }
+                        std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
+                        let run = tempfile::Builder::new()
+                            .prefix("step-")
+                            .tempdir_in(ctx.home.runs())
+                            .map_err(io("creating a step directory"))?
+                            .keep();
+                        runs.push(run.clone());
+                        let mut mounts = Vec::new();
+                        // Held until the step ends: exclusive mounts (spec §8.5).
+                        let mut held = Vec::new();
+                        for m in cache_mounts {
+                            if !potter_plan::is_name(&m.id) {
+                                return Err(BuildError::Plan(format!(
+                                    "step {sname}: the cache mount id {:?} is not a name",
+                                    m.id
+                                )));
+                            }
+                            let root = ctx.home.mounts(ctx.tenant);
+                            std::fs::create_dir_all(&root).map_err(io(format!("creating {}", root.display())))?;
+                            let lock_path = root.join(format!("{}.lock", m.id));
+                            let lock = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&lock_path)
+                                .map_err(io(format!("opening {}", lock_path.display())))?;
+                            let free =
+                                rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok();
+                            let dir = if free {
+                                held.push(lock);
+                                root.join(&m.id)
+                            } else {
+                                // Another build holds it: an empty scratch mount, slower but correct.
+                                (ctx.progress)(Progress::Warning(format!(
+                                    "step {sname}: the cache mount {} is in use by another build; using an empty one",
+                                    m.id
+                                )));
+                                run.join(format!("scratch-{}", m.id))
+                            };
+                            std::fs::create_dir_all(&dir).map_err(io(format!("creating {}", dir.display())))?;
+                            mounts.push((dir, m.target.clone()));
+                        }
+                        if !*warned_cgroups && !vmkit::sandbox::cgroups_available() {
+                            *warned_cgroups = true;
+                            (ctx.progress)(Progress::Warning(
+                                "no cgroup delegation (systemd user scopes): steps run without memory, CPU and task \
+                             limits, bounded only by their timeout"
+                                    .into(),
+                            ));
+                        }
+                        for d in ["upper", "work", "run"] {
+                            std::fs::create_dir(run.join(d)).map_err(io("creating a step directory"))?;
+                        }
                         (ctx.progress)(Progress::Step {
                             target: tname.clone(),
                             step: sname.clone(),
-                            state: StepState::Failed,
+                            state: StepState::Running,
                         });
-                        let status = if outcome.timed_out {
-                            format!("timed out after {}s", timeout.as_secs())
-                        } else {
-                            outcome.status.to_string()
+                        // Each secret as a 0400 file in the step's run directory, bound read-only.
+                        let mut secret_mounts = Vec::new();
+                        for (n, (s, (_, value))) in secrets.iter().zip(&values).enumerate() {
+                            use std::os::unix::fs::OpenOptionsExt;
+                            let file = run.join(format!("secret-{n}"));
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .mode(0o400)
+                                .open(&file)
+                                .and_then(|mut f| std::io::Write::write_all(&mut f, value))
+                                .map_err(io(format!("writing the secret {}", s.id)))?;
+                            secret_mounts.push((file, s.target.clone()));
+                        }
+                        let secret_files = secret_mounts.clone();
+                        let redact = redactor(&values);
+                        let progress = &mut *ctx.progress;
+                        let mut log = |line: &str| {
+                            progress(Progress::Log {
+                                target: tname.clone(),
+                                step: sname.clone(),
+                                line: redact(line),
+                            })
                         };
-                        return Err(BuildError::StepFailed {
-                            step: sname.clone(),
-                            status,
-                            tail: outcome.tail.iter().map(|l| redact(l)).collect(),
-                        });
-                    }
-                    let (d, size) =
-                        seal_in_sandbox(ctx.sandbox, &run.join("upper"), &run.join("run"), ctx.store, &skip)?;
+                        let timeout = timeout_secs.map_or(STEP_TIMEOUT, Duration::from_secs);
+                        let step_run = StepRun {
+                            lowers: stack,
+                            upper: run.join("upper"),
+                            work: run.join("work"),
+                            args: wrap(command, workdir),
+                            env: step_env,
+                            user: vmkit::sandbox::User {
+                                uid: u32::try_from(uid)
+                                    .map_err(|_| BuildError::Plan(format!("step {sname}: uid {uid}")))?,
+                                gid: u32::try_from(gid)
+                                    .map_err(|_| BuildError::Plan(format!("step {sname}: gid {gid}")))?,
+                                groups: vec![],
+                            },
+                            network: *network,
+                            cache_mounts: mounts,
+                            secrets: secret_mounts.clone(),
+                            timeout,
+                            run_dir: run.join("run"),
+                            log: &mut log,
+                        };
+                        let skip = mount_points(&step_run);
+                        let outcome = run_step(step_run);
+                        // A secret lives on the host only while its step runs.
+                        for (file, _) in &secret_files {
+                            let _ = std::fs::remove_file(file);
+                        }
+                        let outcome = outcome?;
+                        drop(held);
+                        if !outcome.status.success() {
+                            (ctx.progress)(Progress::Step {
+                                target: tname.clone(),
+                                step: sname.clone(),
+                                state: StepState::Failed,
+                            });
+                            let status = if outcome.timed_out {
+                                format!("timed out after {}s", timeout.as_secs())
+                            } else {
+                                outcome.status.to_string()
+                            };
+                            return Err(BuildError::StepFailed {
+                                step: sname.clone(),
+                                status,
+                                tail: outcome.tail.iter().map(|l| redact(l)).collect(),
+                            });
+                        }
+                        let (d, size) =
+                            seal_in_sandbox(ctx.sandbox, &run.join("upper"), &run.join("run"), ctx.store, &skip)?;
+                        (d, size, Some(run.join("upper")))
+                    };
                     let entry = Entry {
                         layer: Some(d.to_string()),
                         class: ctx.executor,
@@ -628,7 +749,7 @@ pub fn run_steps(
                         descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
                         diff_id: d,
                     });
-                    lowers.push(Some(run.join("upper")));
+                    lowers.push(upper);
                     state.executed += 1;
                     (ctx.progress)(Progress::Step {
                         target: tname.clone(),
@@ -689,16 +810,33 @@ pub fn run_steps(
                         diff_id: d,
                     });
                     lowers.push(None);
+                    attach_host_layer(session, ctx, state.layers.last().expect("just pushed"))?;
                 }
                 Step::Apt { .. } => unreachable!("lowered to a run step"),
             }
         }
         Ok(())
     })();
+    drop(vm_session);
     for run in runs {
         let _ = ctx.sandbox.remove(&run);
     }
     result.map(|()| state)
+}
+
+/// Hands a layer the host built mid-chain to the running VM, if any. With no device slot left,
+/// the VM ends here and the next `Run` step boots a new one from the extended prefix (§9.3).
+fn attach_host_layer(
+    session: &mut Option<crate::vm::Session>,
+    ctx: &BuildCtx,
+    layer: &LayerRef,
+) -> Result<(), BuildError> {
+    let Some(vm) = session.as_mut() else { return Ok(()) };
+    let disk = crate::vm::disks::erofs_of(ctx.store, ctx.home, layer)?;
+    if !vm.attach(disk) {
+        *session = None;
+    }
+    Ok(())
 }
 
 /// The class in the key of a step the host builds (`Meta`, `Inputs`, `CopyFrom`). It is the
@@ -822,6 +960,7 @@ mod tests {
             no_cache: false,
             auth: kiln_registry::DockerConfig::anonymous(),
             executor: ExecutorClass::Ns,
+            backend: None,
             secrets: &BTreeMap::new(),
             tenant_key: [0u8; 32],
             cache_from: None,
@@ -915,5 +1054,32 @@ mod tests {
             assert_eq!(err.exit_code(), 2, "{err}");
             assert!(err.to_string().contains(named), "{err}");
         }
+    }
+}
+
+/// Keys as the chain computes them, for tests that seed the index.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    /// The key of `t`'s first step, a `Run` straight on its OCI base, under `class`.
+    pub fn run_key(store: &Store, t: &Target, class: ExecutorClass) -> potter_cache::CacheKey {
+        let Base::Oci { reference, .. } = &t.build.base else {
+            panic!("an OCI base")
+        };
+        let base = resolve_base(store, reference, None, &Platform::host(), DockerConfig::anonymous()).unwrap();
+        let step = crate::stopgap::lower_step(&t.build.steps[0]);
+        let Step::Run { env, .. } = &step else {
+            panic!("a run step")
+        };
+        let mut e = base.env();
+        e.extend(env.clone());
+        let secrets = potter_cache::secrets_digest(&[7u8; 32], &[]);
+        let platform = Platform::host().to_string();
+        step_key(
+            &base_key(&base.key_digest()),
+            &input(&step, None, &e, &platform, &secrets, class),
+        )
+        .unwrap()
     }
 }

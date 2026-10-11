@@ -394,6 +394,7 @@ fn build(
         no_cache,
         auth: kiln_registry::DockerConfig::from_env(),
         executor: potter_cache::ExecutorClass::Ns,
+        backend: None,
         secrets: &secrets,
         tenant_key,
         cache_from: cache_from.as_ref(),
