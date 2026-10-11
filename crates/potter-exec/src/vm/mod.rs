@@ -10,6 +10,7 @@ pub mod disks;
 pub mod fake;
 pub mod ingest;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use kiln_store::Store;
@@ -17,7 +18,7 @@ use potter_cache::PotterHome;
 
 use crate::chain::LayerRef;
 use crate::error::{BuildError, io};
-use backend::{BuildBackend, BuildSpec, BuildVm, RunStep, StepOutcome};
+use backend::{BuildBackend, BuildSpec, BuildVm, RunStep, StepOutcome, Stream};
 use ingest::OutputDisk;
 
 /// The output disk's size: the cap on everything one VM's steps produce (spec §9.3).
@@ -26,31 +27,67 @@ pub const OUTPUT_SIZE: u64 = 8 << 30;
 pub const MEMORY_MIB: u32 = 4096;
 pub const CPUS: u32 = 2;
 
-/// One VM running the rest of a chain from its first miss. Dropping it tears the VM down and
+/// Joins a step's output chunks into lines, per stream; potter redacts and reports whole lines.
+#[derive(Default)]
+pub struct Lines {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl Lines {
+    /// Adds `bytes` from `stream`, passing each line it completes to `line`.
+    pub fn feed(&mut self, stream: Stream, bytes: &[u8], line: &mut dyn FnMut(&str)) {
+        let buf = match stream {
+            Stream::Stdout => &mut self.stdout,
+            Stream::Stderr => &mut self.stderr,
+        };
+        buf.extend_from_slice(bytes);
+        while let Some(n) = buf.iter().position(|&b| b == b'\n') {
+            let rest = buf.split_off(n + 1);
+            line(&String::from_utf8_lossy(&buf[..n]));
+            *buf = rest;
+        }
+    }
+
+    /// Passes on what is left without a newline.
+    pub fn flush(&mut self, line: &mut dyn FnMut(&str)) {
+        for buf in [&mut self.stdout, &mut self.stderr] {
+            if !buf.is_empty() {
+                line(&String::from_utf8_lossy(buf));
+                buf.clear();
+            }
+        }
+    }
+}
+
+/// One VM running a chain from a miss. Every disk is attached at boot: the prefix's layers
+/// (bottom ones squashed when they don't fit) and as many of the chain's later inputs and
+/// copies as fit, stacked when their step is reached. Dropping it tears the VM down and
 /// deletes its output disk.
 pub struct Session {
     vm: Option<Box<dyn BuildVm>>,
     pub disk: OutputDisk,
     dir: PathBuf,
-    /// Device slots left for layers built mid-chain.
-    spare: usize,
-    /// Layer disks attached since the last step, for the next one's `lowers_added`.
-    pending: Vec<PathBuf>,
+    network: bool,
+    /// Chain step index → index in `BuildSpec.layers` of the layer it built, attached at boot.
+    boot: BTreeMap<usize, usize>,
+    /// Disks reached since the last step, for the next one's `lowers_added`.
+    pending: Vec<usize>,
     next_id: u32,
 }
 
 impl Session {
-    /// Boots a VM over `prefix` (bottom first), keeping up to `reserve` device slots for layers
-    /// built later in the chain.
+    /// Boots a VM over `prefix` (bottom first) with `network`, attaching as many of `later`
+    /// (layers the host built for the chain's later steps, by step index, in order) as fit.
     pub fn start(
         backend: &dyn BuildBackend,
         store: &Store,
         home: &PotterHome,
         prefix: &[LayerRef],
-        reserve: usize,
+        later: &[(usize, LayerRef)],
         network: bool,
     ) -> Result<Self, BuildError> {
-        let plan = disks::plan_disks(prefix.len(), 0, backend.max_devices(), reserve)?;
+        let plan = disks::plan_disks(prefix.len(), 0, backend.max_devices(), later.len(), network)?;
         let mut layers = Vec::new();
         let rest = if plan.squash > 0 {
             layers.push(disks::squashed(store, home, &prefix[..plan.squash])?);
@@ -59,6 +96,12 @@ impl Session {
             prefix
         };
         for l in rest {
+            layers.push(disks::erofs_of(store, home, l)?);
+        }
+        let root = layers.len();
+        let mut boot = BTreeMap::new();
+        for (step, l) in later.iter().take(plan.spare) {
+            boot.insert(*step, layers.len());
             layers.push(disks::erofs_of(store, home, l)?);
         }
         std::fs::create_dir_all(home.runs()).map_err(io("creating the runs directory"))?;
@@ -75,6 +118,7 @@ impl Session {
         }
         let spec = BuildSpec {
             layers,
+            root,
             cache_disks: vec![],
             output: output.clone(),
             output_size: OUTPUT_SIZE,
@@ -93,29 +137,46 @@ impl Session {
             vm: Some(vm),
             disk: OutputDisk::new(&output, OUTPUT_SIZE),
             dir,
-            spare: plan.spare,
+            network,
+            boot,
             pending: Vec::new(),
             next_id: 1,
         })
     }
 
-    /// Attaches a layer built mid-chain for the next step; `false` when no slot is left and the
-    /// chain must continue in a new VM.
-    pub fn attach(&mut self, disk: PathBuf) -> bool {
-        if self.spare == 0 {
-            return false;
-        }
-        self.spare -= 1;
-        self.pending.push(disk);
-        true
+    pub fn network(&self) -> bool {
+        self.network
     }
 
-    /// Runs `step`, numbered and given the disks attached since the previous one.
-    pub fn run(&mut self, mut step: RunStep, sink: &mut dyn FnMut(&str)) -> Result<StepOutcome, BuildError> {
-        step.id = self.next_id;
+    /// The chain reached step `step`, which built a layer: it is stacked before the next step
+    /// when it was attached at boot. `false` when it wasn't, and the chain needs a new VM.
+    pub fn reached(&mut self, step: usize) -> bool {
+        match self.boot.get(&step) {
+            Some(&disk) => {
+                self.pending.push(disk);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Runs `step`, numbered and given the disks reached since the previous one. A report
+    /// naming another step is a protocol violation.
+    pub fn run(&mut self, mut step: RunStep, sink: &mut dyn FnMut(Stream, &[u8])) -> Result<StepOutcome, BuildError> {
+        let id = self.next_id;
         self.next_id += 1;
+        step.id = id;
         step.lowers_added = std::mem::take(&mut self.pending);
-        self.vm.as_mut().expect("a live VM").run_step(step, sink)
+        let outcome = self.vm.as_mut().expect("a live VM").run_step(step, sink)?;
+        if let Some(sealed) = &outcome.sealed
+            && sealed.id != id
+        {
+            return Err(BuildError::Hostile(format!(
+                "the guest reported step {} sealed while step {id} ran",
+                sealed.id
+            )));
+        }
+        Ok(outcome)
     }
 }
 

@@ -6,7 +6,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::backend::{BuildBackend, BuildSpec, BuildVm, Exit, RunStep, StepOutcome};
+use super::backend::{BuildBackend, BuildSpec, BuildVm, Exit, RunStep, StepOutcome, Stream};
 use super::ingest::{ALIGN, StepSealed};
 use crate::error::BuildError;
 
@@ -18,6 +18,8 @@ pub enum Lie {
     Entries,
     /// Reports the previous diff's offset.
     Overlap,
+    /// Reports another step's id.
+    Id,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +103,14 @@ struct FakeVm {
     last: u64,
 }
 
+/// Sends `line` and its newline in two chunks split mid-line, as a pipe may deliver them.
+fn send(sink: &mut dyn FnMut(Stream, &[u8]), stream: Stream, line: &str) {
+    let bytes = format!("{line}\n").into_bytes();
+    let (a, b) = bytes.split_at(bytes.len() / 2);
+    sink(stream, a);
+    sink(stream, b);
+}
+
 /// A diff tar of `files` with their parent directories, as kiln-init would seal it.
 pub fn diff_tar(files: &[(String, Vec<u8>)]) -> (Vec<u8>, u64) {
     let mut b = tar::Builder::new(Vec::new());
@@ -116,6 +126,8 @@ pub fn diff_tar(files: &[(String, Vec<u8>)]) -> (Vec<u8>, u64) {
                 h.set_mode(0o755);
                 h.set_size(0);
                 h.set_mtime(0);
+                h.set_uid(0);
+                h.set_gid(0);
                 b.append_data(&mut h, format!("{dir}/"), &[][..]).unwrap();
                 entries += 1;
             }
@@ -124,6 +136,8 @@ pub fn diff_tar(files: &[(String, Vec<u8>)]) -> (Vec<u8>, u64) {
         h.set_mode(0o644);
         h.set_size(data.len() as u64);
         h.set_mtime(0);
+        h.set_uid(0);
+        h.set_gid(0);
         b.append_data(&mut h, path, &data[..]).unwrap();
         entries += 1;
     }
@@ -131,7 +145,7 @@ pub fn diff_tar(files: &[(String, Vec<u8>)]) -> (Vec<u8>, u64) {
 }
 
 impl BuildVm for FakeVm {
-    fn run_step(&mut self, step: RunStep, sink: &mut dyn FnMut(&str)) -> Result<StepOutcome, BuildError> {
+    fn run_step(&mut self, step: RunStep, sink: &mut dyn FnMut(Stream, &[u8])) -> Result<StepOutcome, BuildError> {
         let id = step.id;
         let script = {
             let mut s = self.state.lock().unwrap();
@@ -140,7 +154,7 @@ impl BuildVm for FakeVm {
         };
         match script {
             Script::Fail { code, lines } => {
-                lines.iter().for_each(|l| sink(l));
+                lines.iter().for_each(|l| send(sink, Stream::Stderr, l));
                 Ok(StepOutcome {
                     exit: Exit::Code(code),
                     sealed: None,
@@ -151,7 +165,7 @@ impl BuildVm for FakeVm {
                 sealed: None,
             }),
             Script::Diff { files, lines, lie } => {
-                lines.iter().for_each(|l| sink(l));
+                lines.iter().for_each(|l| send(sink, Stream::Stdout, l));
                 let (tar, entries) = diff_tar(&files);
                 let offset = self.cursor;
                 let mut f = std::fs::OpenOptions::new().write(true).open(&self.output).unwrap();
@@ -170,6 +184,7 @@ impl BuildVm for FakeVm {
                     Lie::Sha => report.sha256 = kiln_store::Digest::of(b"lie").hex().to_string(),
                     Lie::Entries => report.entries += 1,
                     Lie::Overlap => report.offset = self.last,
+                    Lie::Id => report.id += 1,
                 }
                 self.last = offset;
                 self.cursor = (offset + len).div_ceil(ALIGN) * ALIGN;
@@ -236,6 +251,7 @@ mod tests {
         );
         let spec = BuildSpec {
             layers: vec![],
+            root: 0,
             cache_disks: vec![],
             output: out.clone(),
             output_size: 1 << 20,
@@ -245,19 +261,29 @@ mod tests {
         };
         let mut vm = fake.start(spec.clone()).unwrap();
         let mut disk = OutputDisk::new(&out, 1 << 20);
-        let mut lines = Vec::new();
-        let ok = vm.run_step(step(1), &mut |l| lines.push(l.to_string())).unwrap();
+        let mut out = Vec::new();
+        let mut sink = |s: Stream, b: &[u8]| out.push((s, b.to_vec()));
+        let ok = vm.run_step(step(1), &mut sink).unwrap();
         assert!(ok.exit.success());
         disk.take(ok.sealed.as_ref().unwrap(), &store, dir.path(), 1 << 20)
             .unwrap();
-        let lie = vm.run_step(step(2), &mut |l| lines.push(l.to_string())).unwrap();
+        let lie = vm.run_step(step(2), &mut sink).unwrap();
         let e = disk
             .take(lie.sealed.as_ref().unwrap(), &store, dir.path(), 1 << 20)
             .unwrap_err();
         assert_eq!(e.exit_code(), 3);
-        let fail = vm.run_step(step(3), &mut |l| lines.push(l.to_string())).unwrap();
+        let fail = vm.run_step(step(3), &mut sink).unwrap();
         assert_eq!((fail.exit, fail.sealed), (Exit::Code(2), None));
-        assert_eq!(lines, ["hello", "boom"]);
+        let joined = |stream| {
+            out.iter()
+                .filter(|(s, _)| *s == stream)
+                .flat_map(|(_, b)| b.clone())
+                .collect::<Vec<u8>>()
+        };
+        assert_eq!(
+            (joined(Stream::Stdout), joined(Stream::Stderr)),
+            (b"hello\n".to_vec(), b"boom\n".to_vec())
+        );
         vm.finish().unwrap();
         let s = fake.state();
         assert_eq!((s.specs.as_slice(), s.steps.len(), s.finished), (&[spec][..], 3, 1));

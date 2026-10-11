@@ -8,6 +8,7 @@ use potter_cache::{ExecutorClass, Index, PotterHome, Tenant};
 use potter_plan::*;
 
 use super::backend::BuildBackend;
+use super::backend::Secret;
 use super::fake::{FakeBackend, Lie, Script, diff_tar};
 use crate::chain::{BuildCtx, ChainState, Progress, run_chain};
 use crate::error::BuildError;
@@ -26,7 +27,13 @@ struct World {
 fn world() -> World {
     let (reg, layout) = registry_with_image(
         "v1",
-        &[("etc/passwd", b"root:x:0:0::/root:/bin/sh\n")],
+        &[
+            (
+                "etc/passwd",
+                b"root:x:0:0::/root:/bin/sh\napp:x:1000:1000::/home/app:/bin/sh\n",
+            ),
+            ("etc/group", b"root:x:0:\napp:x:1000:\n"),
+        ],
         &["PATH=/bin"],
         "/",
     );
@@ -227,7 +234,7 @@ fn an_ns_build_uses_vm_entries_and_a_vm_build_never_uses_ns_ones() {
 
 #[test]
 fn a_lying_guest_fails_the_build_with_3_and_leaves_nothing() {
-    for lie in [Lie::Sha, Lie::Entries, Lie::Overlap] {
+    for lie in [Lie::Sha, Lie::Entries, Lie::Overlap, Lie::Id] {
         let w = world();
         let t = target(&w, vec![run("a"), run("b")]);
         let fake = FakeBackend::new(
@@ -306,51 +313,8 @@ fn secrets_travel_inline_and_are_redacted() {
     assert_eq!(lines, ["token ***"]);
     assert_eq!(
         fake.state().steps[0].secrets,
-        [("/run/secrets/npm".to_string(), b"s3cret".to_vec())]
+        [("/run/secrets/npm".to_string(), Secret(b"s3cret".to_vec()))]
     );
-}
-
-#[test]
-fn inputs_built_mid_chain_are_attached_to_the_next_step() {
-    let w = world();
-    let t = target(&w, vec![run("a"), inputs("src", "src/a.txt"), run("b")]);
-    let fake = FakeBackend::new(
-        31,
-        vec![Script::files(&[("app/a", "1")]), Script::files(&[("app/b", "2")])],
-    );
-    let s = vm(&w, &t, &fake).unwrap();
-    let f = fake.state();
-    assert_eq!(f.specs.len(), 1);
-    assert!(f.steps[0].lowers_added.is_empty());
-    assert_eq!(f.steps[1].lowers_added.len(), 1);
-    let inputs_layer = &s.layers[s.layers.len() - 2];
-    assert!(f.steps[1].lowers_added[0].ends_with(inputs_layer.diff_id.hex()));
-}
-
-#[test]
-fn a_full_device_budget_restarts_the_vm_and_builds_the_same_layers() {
-    let steps = vec![
-        run("a"),
-        inputs("one", "src/a.txt"),
-        inputs("two", "src/b.txt"),
-        run("b"),
-    ];
-    let script = || vec![Script::files(&[("app/a", "1")]), Script::files(&[("app/b", "2")])];
-    let roomy = world();
-    let wide = FakeBackend::new(31, script());
-    let expected = vm(&roomy, &target(&roomy, steps.clone()), &wide).unwrap();
-    assert_eq!(wide.state().specs.len(), 1);
-    // 7 devices: 2 for layers. The base takes one, one is kept for the inputs to come; the
-    // second inputs layer finds no slot, so step b boots a new VM from the whole prefix.
-    let tight = world();
-    let narrow = FakeBackend::new(7, script());
-    let s = vm(&tight, &target(&tight, steps), &narrow).unwrap();
-    let f = narrow.state();
-    assert_eq!((f.specs.len(), f.finished), (2, 2));
-    assert_eq!(f.specs[1].layers.len(), 2, "four layers squashed into two disks");
-    assert!(f.steps[1].lowers_added.is_empty());
-    let ids = |s: &ChainState| s.layers.iter().map(|l| l.diff_id.clone()).collect::<Vec<_>>();
-    assert_eq!(ids(&s), ids(&expected));
 }
 
 #[test]
@@ -399,4 +363,133 @@ fn a_vm_step_gets_the_same_home_default_as_an_ns_step() {
         Some("/"),
         "no passwd entry: as ns.rs"
     );
+}
+
+#[test]
+fn a_full_device_budget_restarts_the_vm_and_builds_the_same_layers() {
+    let steps = vec![
+        run("a"),
+        inputs("one", "src/a.txt"),
+        inputs("two", "src/b.txt"),
+        run("b"),
+    ];
+    let script = || vec![Script::files(&[("app/a", "1")]), Script::files(&[("app/b", "2")])];
+    let roomy = world();
+    let wide = FakeBackend::new(31, script());
+    let expected = vm(&roomy, &target(&roomy, steps.clone()), &wide).unwrap();
+    {
+        let f = wide.state();
+        assert_eq!(f.specs.len(), 1);
+        assert_eq!(f.steps[1].lowers_added, [1, 2]);
+    }
+    // 6 devices, no NIC: 2 for layers. The base takes one and the first inputs layer the
+    // other; the second finds no slot, so step b boots a new VM from the whole prefix.
+    let tight = world();
+    let narrow = FakeBackend::new(6, script());
+    let s = vm(&tight, &target(&tight, steps), &narrow).unwrap();
+    let f = narrow.state();
+    assert_eq!((f.specs.len(), f.finished), (2, 2));
+    assert_eq!(f.specs[0].layers.len(), 2, "the base and the first inputs");
+    assert_eq!(f.specs[1].layers.len(), 2, "four layers squashed into two disks");
+    assert!(f.steps[1].lowers_added.is_empty());
+    let ids = |s: &ChainState| s.layers.iter().map(|l| l.diff_id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&s), ids(&expected));
+}
+
+#[test]
+fn inputs_ahead_are_attached_at_boot_and_stacked_before_their_step() {
+    let w = world();
+    let t = target(&w, vec![run("a"), inputs("src", "src/a.txt"), run("b")]);
+    let fake = FakeBackend::new(
+        31,
+        vec![Script::files(&[("app/a", "1")]), Script::files(&[("app/b", "2")])],
+    );
+    let s = vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    assert_eq!(f.specs.len(), 1);
+    assert_eq!(
+        (f.specs[0].root, f.specs[0].layers.len()),
+        (1, 2),
+        "the base, then the inputs"
+    );
+    assert!(f.steps[0].lowers_added.is_empty());
+    assert_eq!(f.steps[1].lowers_added, [1]);
+    let inputs_layer = &s.layers[s.layers.len() - 2];
+    let disk = f.specs[0].layers[1].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(disk.ends_with(inputs_layer.diff_id.hex()), "{disk}");
+}
+
+#[test]
+fn inputs_owned_by_a_name_wait_for_the_steps_before_them() {
+    // An earlier step could add the user to /etc/passwd: the layer is built when reached,
+    // and the chain continues in a new VM.
+    let w = world();
+    let mut named = inputs("src", "src/a.txt");
+    if let Step::Inputs { owner, .. } = &mut named {
+        *owner = "app".into();
+    }
+    let t = target(&w, vec![run("a"), named, run("b")]);
+    let fake = FakeBackend::new(
+        31,
+        vec![Script::files(&[("app/a", "1")]), Script::files(&[("app/b", "2")])],
+    );
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    assert_eq!(f.specs.len(), 2);
+    assert_eq!(f.specs[0].layers.len(), 1, "nothing built ahead");
+    assert_eq!((f.specs[1].root, f.specs[1].layers.len()), (3, 3));
+}
+
+#[test]
+fn steps_with_and_without_network_never_share_a_vm() {
+    let w = world();
+    let net = |name: &str, on: bool| {
+        let mut s = run(name);
+        if let Step::Run { network, .. } = &mut s {
+            *network = on;
+        }
+        s
+    };
+    let t = target(
+        &w,
+        vec![net("a", false), net("b", true), net("c", true), net("d", false)],
+    );
+    let fake = FakeBackend::new(
+        31,
+        ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| Script::files(&[(&format!("app/{n}"), "1")]))
+            .collect(),
+    );
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    let vms: Vec<bool> = f.specs.iter().map(|s| s.network).collect();
+    assert_eq!(vms, [false, true, false]);
+    let steps: Vec<bool> = f.steps.iter().map(|s| s.network).collect();
+    assert_eq!(steps, [false, true, true, false]);
+    assert_eq!(f.finished, 3);
+}
+
+#[test]
+fn output_chunks_are_joined_into_lines_per_stream() {
+    // The fake sends every line in two chunks; failures print on stderr.
+    let w = world();
+    let t = target(&w, vec![run("a"), run("b")]);
+    let fake = FakeBackend::new(
+        31,
+        vec![
+            Script::Diff {
+                files: vec![("app/a".into(), b"1".to_vec())],
+                lines: vec!["first line".into(), "second".into()],
+                lie: Lie::None,
+            },
+            Script::Fail {
+                code: 1,
+                lines: vec!["an error".into()],
+            },
+        ],
+    );
+    let (r, lines) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    assert_eq!(r.unwrap_err().exit_code(), 1);
+    assert_eq!(lines, ["first line", "second", "an error"]);
 }

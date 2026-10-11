@@ -113,8 +113,11 @@ impl OutputDisk {
         }
         tmp.rewind().map_err(io("reading a diff file"))?;
         let mut entries = 0u64;
+        // Where the last entry's data ends: after it, only the end-of-archive zeros.
+        let mut archive_end = 0u64;
         for e in tar::Archive::new(&mut tmp).entries().map_err(|e| violation(r.id, e))? {
             let e = e.map_err(|e| violation(r.id, format!("not a tar: {e}")))?;
+            archive_end = archive_end.max(e.raw_file_position() + e.size().div_ceil(512) * 512);
             // A diff names paths inside the root: kiln would normalise these, potter refuses them.
             let hardlink = e.header().entry_type() == tar::EntryType::Link;
             let link = if hardlink { e.link_name_bytes() } else { None };
@@ -133,6 +136,18 @@ impl OutputDisk {
                 r.id,
                 format!("{} entries where the diff holds {entries}", r.entries),
             ));
+        }
+        tmp.seek(SeekFrom::Start(archive_end))
+            .map_err(io("reading a diff file"))?;
+        let mut rest = (&mut tmp).take(r.len - archive_end.min(r.len));
+        loop {
+            let n = rest.read(&mut buf).map_err(io("reading a diff file"))?;
+            if n == 0 {
+                break;
+            }
+            if buf[..n].iter().any(|&b| b != 0) {
+                return Err(violation(r.id, "bytes after the end of the archive"));
+            }
         }
         tmp.rewind().map_err(io("reading a diff file"))?;
         crate::ingest::validate_layer(std::io::BufReader::new(&mut tmp), spill_dir)?;
@@ -278,6 +293,16 @@ mod tests {
             ("a .. path", tar(&[(b"../escape", b"x")])),
             ("an absolute path", tar(&[(b"/etc/passwd", b"x")])),
             ("garbage", vec![0x41; 4096]),
+            ("bytes after the end-of-archive marker", {
+                let mut t = tar(&[(b"a.txt", b"a")]);
+                t.extend_from_slice(b"smuggled");
+                t
+            }),
+            ("a second archive after the marker", {
+                let mut t = tar(&[(b"a.txt", b"a")]);
+                t.extend(tar(&[(b"b.txt", b"b")]));
+                t
+            }),
         ] {
             let s = setup();
             write_at(&s.disk, 0, &bytes);

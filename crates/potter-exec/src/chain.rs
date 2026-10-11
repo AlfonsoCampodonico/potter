@@ -191,7 +191,7 @@ fn accounts(store: &Store, layers: &[LayerRef]) -> Result<(Option<String>, Optio
 
 /// Numeric ids for `spec`, looking names up in the image only when needed.
 fn ids(spec: &str, store: &Store, layers: &[LayerRef], what: &str) -> Result<(u64, u64, Option<String>), BuildError> {
-    let numeric = spec.split(':').all(|p| p.parse::<u64>().is_ok() || p == "root");
+    let numeric = owner_is_numeric(spec);
     let (passwd, group) = if numeric {
         (None, None)
     } else {
@@ -301,6 +301,8 @@ pub fn run_steps(
     let remote_live = &mut live;
     // The VM running the chain since its first miss (vm builds).
     let mut vm_session: Option<crate::vm::Session> = None;
+    // Layers of inputs and copies built ahead of their step for a VM's boot, by step index.
+    let mut prebuilt: BTreeMap<usize, LayerRef> = BTreeMap::new();
     let session = &mut vm_session;
     let result = (|| -> Result<(), BuildError> {
         for (i, step) in steps.iter().enumerate() {
@@ -317,31 +319,14 @@ pub fn run_steps(
                         state.user = u.clone();
                     }
                 }
-                Step::Inputs {
-                    include,
-                    exclude,
-                    dest,
-                    owner: who,
-                    ..
-                } => {
-                    let (uid, gid, _) = ids(who, ctx.store, &state.layers, &format!("step {sname}"))?;
-                    std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
-                    let file = tempfile::tempfile_in(ctx.home.runs()).map_err(io("creating an inputs layer"))?;
-                    let spec = InputsSpec {
-                        root: source_root,
-                        include,
-                        exclude,
-                        dest,
-                        owner: (uid, gid),
-                        epoch: epoch(),
+                Step::Inputs { .. } | Step::CopyFrom { .. } => {
+                    // Built ahead when a VM booted for the chain, else now.
+                    let layer = match prebuilt.remove(&i) {
+                        Some(l) => l,
+                        None => host_layer(ctx, step, &state.layers, source_root)?,
                     };
-                    let (mut file, _) = build_inputs(&spec, file)?;
-                    use std::io::Seek;
-                    file.rewind().map_err(io("reading the inputs layer"))?;
-                    let (d, size) = ctx
-                        .store
-                        .put_reader(&mut file)
-                        .map_err(|e| BuildError::Infra(format!("storing the inputs of {sname}: {e}")))?;
+                    let d = layer.diff_id.clone();
+                    // The layer's digest is the step's input (spec §8.1).
                     key = step_key(
                         &key,
                         &input(step, Some(&d.to_string()), &state.env, &platform, &[], HOST_CLASS),
@@ -351,15 +336,17 @@ pub fn run_steps(
                         chain: tname.clone(),
                         step: sname.clone(),
                         key: Some(key.hex()),
-                        layer: d.clone(),
+                        layer: d,
                         class: None,
                     });
-                    state.layers.push(LayerRef {
-                        descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
-                        diff_id: d,
-                    });
+                    state.layers.push(layer);
                     lowers.push(None);
-                    attach_host_layer(session, ctx, state.layers.last().expect("just pushed"))?;
+                    // Stacked in the running VM before its next step, if it was attached at boot.
+                    if let Some(vm) = session.as_mut()
+                        && !vm.reached(i)
+                    {
+                        *session = None;
+                    }
                 }
                 Step::Run {
                     command,
@@ -489,23 +476,38 @@ pub fn run_steps(
                         step_env
                             .entry("HOME".into())
                             .or_insert_with(|| if uid == 0 { "/root".into() } else { "/".into() });
+                        // A VM has network for all its steps or none: a step that differs gets a new
+                        // VM, booted from the prefix so far.
+                        if session.as_ref().is_some_and(|vm| vm.network() != *network) {
+                            *session = None;
+                        }
                         if session.is_none() {
-                            let rest = &steps[i + 1..];
-                            let reserve = rest
-                                .iter()
-                                .filter(|s| matches!(s, Step::Inputs { .. } | Step::CopyFrom { .. }))
-                                .count();
-                            let network = std::iter::once(step)
-                                .chain(rest)
-                                .any(|s| matches!(s, Step::Run { network: true, .. }));
+                            // Every disk is attached at boot: the layers of the inputs and copies
+                            // ahead, up to the next step that needs another VM, are built now.
+                            let mut later = Vec::new();
+                            for (j, s) in steps.iter().enumerate().skip(i + 1) {
+                                match s {
+                                    Step::Run { network: n, .. } if n != network => break,
+                                    Step::Inputs { .. } | Step::CopyFrom { .. } if !buildable_ahead(s) => break,
+                                    Step::Inputs { .. } | Step::CopyFrom { .. } => {
+                                        let l = match prebuilt.get(&j) {
+                                            Some(l) => l.clone(),
+                                            None => host_layer(ctx, s, &state.layers, source_root)?,
+                                        };
+                                        prebuilt.insert(j, l.clone());
+                                        later.push((j, l));
+                                    }
+                                    _ => {}
+                                }
+                            }
                             let backend = ctx.backend.expect("checked before the chain");
                             *session = Some(crate::vm::Session::start(
                                 backend,
                                 ctx.store,
                                 ctx.home,
                                 &state.layers,
-                                reserve,
-                                network,
+                                &later,
+                                *network,
                             )?);
                         }
                         (ctx.progress)(Progress::Step {
@@ -530,7 +532,7 @@ pub fn run_steps(
                             secrets: secrets
                                 .iter()
                                 .map(|s| s.target.clone())
-                                .zip(values.iter().map(|(_, v)| v.clone()))
+                                .zip(values.iter().map(|(_, v)| crate::vm::backend::Secret(v.clone())))
                                 .collect(),
                             network: *network,
                             timeout,
@@ -538,7 +540,8 @@ pub fn run_steps(
                         let vm = session.as_mut().expect("started above");
                         let outcome = {
                             let progress = &mut *ctx.progress;
-                            let mut sink = |line: &str| {
+                            // Whole lines are redacted and reported, as for the namespace executor.
+                            let mut line = |line: &str| {
                                 let line = redact(line);
                                 if tail.len() == crate::ns::TAIL {
                                     tail.pop_front();
@@ -550,7 +553,10 @@ pub fn run_steps(
                                     line,
                                 })
                             };
-                            vm.run(run_step, &mut sink)?
+                            let mut lines = crate::vm::Lines::default();
+                            let outcome = vm.run(run_step, &mut |stream, bytes| lines.feed(stream, bytes, &mut line));
+                            lines.flush(&mut line);
+                            outcome?
                         };
                         if !outcome.exit.success() {
                             (ctx.progress)(Progress::Step {
@@ -763,59 +769,6 @@ pub fn run_steps(
                         },
                     });
                 }
-                Step::CopyFrom {
-                    from,
-                    paths,
-                    dest,
-                    owner: who,
-                    mode,
-                    ..
-                } => {
-                    let potter_plan::CopySource::Target(source) = from else {
-                        unreachable!("check_steps refuses stages")
-                    };
-                    let source_layers = ctx.deps.get(source).cloned().ok_or_else(|| {
-                        BuildError::Plan(format!("step {sname} copies from {source}, which was not built first"))
-                    })?;
-                    let (uid, gid, _) = ids(who, ctx.store, &state.layers, &format!("step {sname}"))?;
-                    std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
-                    let file = tempfile::tempfile_in(ctx.home.runs()).map_err(io("creating a copy layer"))?;
-                    let spill = ctx.home.runs();
-                    let spec = crate::merge::CopySpec {
-                        paths,
-                        dest,
-                        owner: Some((uid, gid)),
-                        mode: *mode,
-                        epoch: epoch(),
-                        spill_dir: &spill,
-                    };
-                    let (mut file, _) = crate::merge::copy_layer(&openers(ctx.store, &source_layers), &spec, file)?;
-                    use std::io::Seek;
-                    file.rewind().map_err(io("reading the copy layer"))?;
-                    let (d, size) = ctx
-                        .store
-                        .put_reader(&mut file)
-                        .map_err(|e| BuildError::Infra(format!("storing the copy of {sname}: {e}")))?;
-                    // Like inputs, the layer's digest is the step's input (spec §8.1).
-                    key = step_key(
-                        &key,
-                        &input(step, Some(&d.to_string()), &state.env, &platform, &[], HOST_CLASS),
-                    )
-                    .map_err(cache_err)?;
-                    state.records.push(StepRecord {
-                        chain: tname.clone(),
-                        step: sname.clone(),
-                        key: Some(key.hex()),
-                        layer: d.clone(),
-                        class: None,
-                    });
-                    state.layers.push(LayerRef {
-                        descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
-                        diff_id: d,
-                    });
-                    lowers.push(None);
-                    attach_host_layer(session, ctx, state.layers.last().expect("just pushed"))?;
-                }
                 Step::Apt { .. } => unreachable!("lowered to a run step"),
             }
         }
@@ -828,19 +781,81 @@ pub fn run_steps(
     result.map(|()| state)
 }
 
-/// Hands a layer the host built mid-chain to the running VM, if any. With no device slot left,
-/// the VM ends here and the next `Run` step boots a new one from the extended prefix (§9.3).
-fn attach_host_layer(
-    session: &mut Option<crate::vm::Session>,
-    ctx: &BuildCtx,
-    layer: &LayerRef,
-) -> Result<(), BuildError> {
-    let Some(vm) = session.as_mut() else { return Ok(()) };
-    let disk = crate::vm::disks::erofs_of(ctx.store, ctx.home, layer)?;
-    if !vm.attach(disk) {
-        *session = None;
+/// The layer of an `Inputs` or `CopyFrom` step, built on the host over `layers`, stored.
+fn host_layer(ctx: &BuildCtx, step: &Step, layers: &[LayerRef], source_root: &Path) -> Result<LayerRef, BuildError> {
+    use std::io::Seek;
+    let sname = step.name();
+    std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
+    let file = tempfile::tempfile_in(ctx.home.runs()).map_err(io("creating a layer file"))?;
+    let mut file = match step {
+        Step::Inputs {
+            include,
+            exclude,
+            dest,
+            owner: who,
+            ..
+        } => {
+            let (uid, gid, _) = ids(who, ctx.store, layers, &format!("step {sname}"))?;
+            let spec = InputsSpec {
+                root: source_root,
+                include,
+                exclude,
+                dest,
+                owner: (uid, gid),
+                epoch: epoch(),
+            };
+            build_inputs(&spec, file)?.0
+        }
+        Step::CopyFrom {
+            from,
+            paths,
+            dest,
+            owner: who,
+            mode,
+            ..
+        } => {
+            let potter_plan::CopySource::Target(source) = from else {
+                unreachable!("check_steps refuses stages")
+            };
+            let source_layers = ctx.deps.get(source).ok_or_else(|| {
+                BuildError::Plan(format!("step {sname} copies from {source}, which was not built first"))
+            })?;
+            let (uid, gid, _) = ids(who, ctx.store, layers, &format!("step {sname}"))?;
+            let spill = ctx.home.runs();
+            let spec = crate::merge::CopySpec {
+                paths,
+                dest,
+                owner: Some((uid, gid)),
+                mode: *mode,
+                epoch: epoch(),
+                spill_dir: &spill,
+            };
+            crate::merge::copy_layer(&openers(ctx.store, source_layers), &spec, file)?.0
+        }
+        _ => unreachable!("only inputs and copies are built on the host"),
+    };
+    file.rewind().map_err(io(format!("reading the layer of {sname}")))?;
+    let (d, size) = ctx
+        .store
+        .put_reader(&mut file)
+        .map_err(|e| BuildError::Infra(format!("storing the layer of {sname}: {e}")))?;
+    Ok(LayerRef {
+        descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
+        diff_id: d,
+    })
+}
+
+/// Whether the host can build `step`'s layer before the steps ahead of it run: its owner is
+/// numeric, so no earlier step's `/etc/passwd` can change it.
+fn buildable_ahead(step: &Step) -> bool {
+    match step {
+        Step::Inputs { owner, .. } | Step::CopyFrom { owner, .. } => owner_is_numeric(owner),
+        _ => false,
     }
-    Ok(())
+}
+
+fn owner_is_numeric(spec: &str) -> bool {
+    spec.split(':').all(|p| p.parse::<u64>().is_ok() || p == "root")
 }
 
 /// The class in the key of a step the host builds (`Meta`, `Inputs`, `CopyFrom`). It is the
