@@ -93,6 +93,12 @@ enum Cmd {
         /// The PEM public key the attestations must be signed with
         #[arg(long)]
         key: PathBuf,
+        /// The tenant the provenance must name
+        #[arg(long)]
+        expect_tenant: Option<String>,
+        /// The builder id the provenance must name
+        #[arg(long)]
+        expect_builder: Option<String>,
     },
     /// Manage signing keys
     Key {
@@ -162,7 +168,12 @@ fn main() -> ExitCode {
             explain,
         } => plan(&path, target.as_deref(), json, explain),
         Cmd::Detect { path } => detect(&path),
-        Cmd::Verify { image, key } => verify(&image, &key),
+        Cmd::Verify {
+            image,
+            key,
+            expect_tenant,
+            expect_builder,
+        } => verify(&image, &key, expect_tenant.as_deref(), expect_builder.as_deref()),
         Cmd::Key {
             command: KeyCmd::Generate { dir },
         } => key_generate(&dir),
@@ -382,7 +393,8 @@ fn key_generate(dir: &Path) -> ExitCode {
 }
 
 /// `potter verify`: 0 when every attestation verifies, 3 when any fails, 4 on registry errors.
-fn verify(image: &str, key: &Path) -> ExitCode {
+/// The statements must name the repository being verified, so an image copied elsewhere fails.
+fn verify(image: &str, key: &Path, tenant: Option<&str>, builder: Option<&str>) -> ExitCode {
     let reference = match kiln_registry::Reference::parse(image) {
         Ok(r) => r,
         Err(e) => return fail(&format!("{image}: {e}"), 2),
@@ -394,28 +406,41 @@ fn verify(image: &str, key: &Path) -> ExitCode {
         },
         Err(e) => return fail(&format!("--key {}: {e}", key.display()), 4),
     };
-    let run = || -> Result<Vec<potter_exec::attest::Verdict>, potter_exec::BuildError> {
+    let repository = format!("{}/{}", reference.registry(), reference.repository());
+    let expect = potter_exec::attest::Expect {
+        repository: Some(&repository),
+        tenant,
+        builder,
+    };
+    let run = || -> Result<(kiln_store::Digest, potter_exec::attest::Report), potter_exec::BuildError> {
         let publisher = potter_exec::publish::Publisher::new(&reference, kiln_registry::DockerConfig::from_env())?;
         let subject = publisher.resolve(&reference.target())?;
         let dir = tempfile::tempdir().map_err(|e| potter_exec::BuildError::Infra(e.to_string()))?;
         let store = kiln_store::Store::open(dir.path()).map_err(|e| potter_exec::BuildError::Infra(e.to_string()))?;
-        println!("{}@{}", sanitize(&reference.to_string()), subject.digest);
-        potter_exec::attest::verify(&publisher, &store, &subject.digest, &key)
+        let report = potter_exec::attest::verify(&publisher, &store, &subject.digest, &key, &expect)?;
+        Ok((subject.digest, report))
     };
     match run() {
         Err(e) => fail(&e.to_string(), e.exit_code()),
-        Ok(verdicts) => {
+        Ok((digest, report)) => {
             let mut ok = true;
-            for v in verdicts {
-                match v.result {
+            for v in &report.verdicts {
+                match &v.result {
                     Ok(()) => println!("{}: verified", v.kind.as_str()),
                     Err(why) => {
                         ok = false;
-                        println!("{}: FAILED: {}", v.kind.as_str(), sanitize(&why));
+                        println!("{}: FAILED: {}", v.kind.as_str(), sanitize(why));
                     }
                 }
             }
-            if ok { ExitCode::SUCCESS } else { ExitCode::from(3) }
+            if !ok {
+                return ExitCode::from(3);
+            }
+            let show = |v: &Option<String>| sanitize(v.as_deref().unwrap_or("-"));
+            println!("tenant {}, builder {}", show(&report.tenant), show(&report.builder));
+            // Deploy this digest: a tag can move after it was verified.
+            println!("{}@{digest}", sanitize(&repository));
+            ExitCode::SUCCESS
         }
     }
 }

@@ -269,6 +269,24 @@ fn a_target_assembles_into_a_kiln_image() {
     assert_eq!(p.working_dir.as_deref(), Some("/app"));
     assert_eq!(p.user.as_deref(), Some("1000:1000"));
     assert_eq!(m.manifest.layers.len(), 3, "the base, the export and the files");
+    // Provenance covers every image layer above the base (P12).
+    let oci: kiln_oci::ImageManifest =
+        serde_json::from_slice(&ctx.store.read_metadata(&built.manifest_digest).unwrap()).unwrap();
+    let recorded: Vec<(&str, &kiln_store::Digest)> = built.steps.iter().map(|r| (r.step.as_str(), &r.layer)).collect();
+    for (layer, name) in oci.layers[1..].iter().zip(["potter:export", "potter:files"]) {
+        assert!(
+            recorded.contains(&(name, &layer.digest)),
+            "{name} {} not in {recorded:?}",
+            layer.digest
+        );
+    }
+    assert!(
+        built
+            .steps
+            .iter()
+            .filter(|r| r.step.starts_with("potter:"))
+            .all(|r| r.class.is_none())
+    );
 }
 
 #[test]

@@ -72,7 +72,7 @@ Layer blobs live in `$KILN_HOME`.
   - Referrers are listed under the tag `sha256-<image digest hex>` (the OCI referrers tag schema), so any registry serves them.
 - **`--sign-key <pem>`** signs all three as sigstore bundles (v0.3, P-256). Without it the statements are attached unsigned and `potter verify` fails.
 - **`potter key generate <dir>`** writes `potter.key` (0600) and `potter.pub`.
-- **`potter verify <ref> --key <pub>`** checks every attestation against the key and the image digest; exit 3 when any fails.
+- **`potter verify <ref> --key <pub>`** checks every attestation against the key, the image digest and the repository being verified (`--expect-tenant`, `--expect-builder` add those); exit 3 when any fails. Its last line is `<repository>@<digest>`: deploy that, not the tag.
 
 ## Exit codes
 

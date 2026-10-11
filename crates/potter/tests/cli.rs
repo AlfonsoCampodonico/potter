@@ -229,7 +229,8 @@ fn key_generate_then_verify_a_published_image() {
     .unwrap();
     let subject = publisher.push_image(&store, "v1", &digest).unwrap();
     let d = digest.to_string();
-    let statement = |p: &str| potter_supply::provenance::in_toto("x", &d, p, serde_json::json!({}));
+    let repository = format!("{}/acme/app", reg.host());
+    let statement = |p: &str| potter_supply::provenance::in_toto(&repository, &d, p, serde_json::json!({}));
     let sign = potter_supply::sign::sign_statement;
     let atts = [
         (
@@ -255,7 +256,14 @@ fn key_generate_then_verify_a_published_image() {
         .assert()
         .success()
         .stdout(predicate::str::contains("sbom: verified"))
-        .stdout(predicate::str::contains("signature: verified"));
+        .stdout(predicate::str::contains("signature: verified"))
+        .stdout(predicate::str::contains(format!("{repository}@{digest}")));
+    potter()
+        .args(["verify", &image, "--expect-tenant", "acme", "--key"])
+        .arg(dir.path().join("potter.pub"))
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("provenance: FAILED: the tenant"));
     let other = tempfile::tempdir().unwrap();
     potter().args(["key", "generate"]).arg(other.path()).assert().success();
     potter()

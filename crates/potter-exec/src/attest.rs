@@ -8,14 +8,14 @@ use std::io::Read;
 use kiln_store::{Digest, Store};
 use potter_cache::ExecutorClass;
 use potter_plan::{Base, Step, Target};
-use potter_supply::lockfiles::{self, Component, LOCKFILES, MAX_LOCKFILE};
+use potter_supply::lockfiles::{self, Component, LOCKFILES, MAX_COMPONENTS, MAX_LOCKFILE};
 use potter_supply::provenance::{self, ProvStep, ProvenanceInput};
 use potter_supply::sbom::{self, SbomInput};
 use potter_supply::sign::{self, SigningKey, VerifyingKey};
 
 use crate::assemble::Built;
 use crate::error::{BuildError, io};
-use crate::publish::{Attachment, BUNDLE_TYPE, Kind, Publisher, STATEMENT_TYPE};
+use crate::publish::{Attachment, BUNDLE_TYPE, Kind, MAX_ATTESTATION, Publisher, STATEMENT_TYPE};
 
 /// What the attestations describe beyond the build itself.
 pub struct AttestInput<'a> {
@@ -32,11 +32,33 @@ pub struct AttestInput<'a> {
     pub finished: &'a str,
 }
 
+/// The most lockfile bytes one SBOM reads, over all files (P9).
+pub const MAX_EVIDENCE: u64 = 64 << 20;
+/// The most lockfiles one SBOM reads.
+pub const MAX_EVIDENCE_FILES: usize = 1000;
+/// The most components one SBOM lists.
+pub const MAX_SBOM_COMPONENTS: usize = MAX_COMPONENTS;
+
 /// The lockfiles in `layers` (uncompressed tar blobs): their paths in the layer and contents.
 /// `go.mod` comes along for `go.sum`. A file over [`MAX_LOCKFILE`] is read one byte past the cap,
-/// so parsing it reports it as too large rather than reading a truncated file.
-pub fn lockfiles(store: &Store, layers: &[Digest]) -> Result<Vec<(String, Vec<u8>)>, BuildError> {
+/// so parsing it reports it as too large rather than reading a truncated file. Reading stops,
+/// with a warning, at [`MAX_EVIDENCE`] bytes or [`MAX_EVIDENCE_FILES`] files in all.
+pub fn lockfiles(
+    store: &Store,
+    layers: &[Digest],
+    warn: &mut dyn FnMut(String),
+) -> Result<Vec<(String, Vec<u8>)>, BuildError> {
+    lockfiles_capped(store, layers, MAX_EVIDENCE, warn)
+}
+
+fn lockfiles_capped(
+    store: &Store,
+    layers: &[Digest],
+    cap: u64,
+    warn: &mut dyn FnMut(String),
+) -> Result<Vec<(String, Vec<u8>)>, BuildError> {
     let mut out = Vec::new();
+    let mut total = 0u64;
     for d in layers {
         let blob = store
             .open_blob(d)
@@ -53,6 +75,14 @@ pub fn lockfiles(store: &Store, layers: &[Digest]) -> Result<Vec<(String, Vec<u8
             if !LOCKFILES.contains(&name) && name != "go.mod" {
                 continue;
             }
+            let size = entry.size().min(MAX_LOCKFILE as u64 + 1);
+            if out.len() == MAX_EVIDENCE_FILES || total + size > cap {
+                warn(format!(
+                    "the SBOM reads at most {MAX_EVIDENCE_FILES} lockfiles and {cap} bytes: {path} and later lockfiles are left out"
+                ));
+                return Ok(out);
+            }
+            total += size;
             let mut bytes = Vec::new();
             entry
                 .take(MAX_LOCKFILE as u64 + 1)
@@ -65,31 +95,45 @@ pub fn lockfiles(store: &Store, layers: &[Digest]) -> Result<Vec<(String, Vec<u8
 }
 
 /// The components `files` give evidence of, in file order without repeats; a lockfile that
-/// cannot be read is skipped with a warning and gives no component (never a guess).
+/// cannot be read is skipped with a warning and gives no component (never a guess). Past
+/// [`MAX_SBOM_COMPONENTS`] in all, none are listed, with a warning: a partial list would read as
+/// a complete one.
 pub fn components(files: &[(String, Vec<u8>)], warn: &mut dyn FnMut(String)) -> Vec<Component> {
+    components_capped(files, MAX_SBOM_COMPONENTS, warn)
+}
+
+fn components_capped(files: &[(String, Vec<u8>)], cap: usize, warn: &mut dyn FnMut(String)) -> Vec<Component> {
     let mut out: Vec<Component> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let go_mods: std::collections::BTreeMap<&str, &[u8]> = files
+        .iter()
+        .filter_map(|(p, b)| match p.rsplit_once('/') {
+            Some((d, "go.mod")) => Some((d, b.as_slice())),
+            None if p == "go.mod" => Some(("", b.as_slice())),
+            _ => None,
+        })
+        .collect();
     for (path, bytes) in files {
         let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
         let parsed = match name {
             "go.mod" => continue,
-            "go.sum" => {
-                let go_mod = files
-                    .iter()
-                    .find(|(p, _)| p.rsplit_once('/').map_or(("", p.as_str()), |(d, n)| (d, n)) == (dir, "go.mod"));
-                match go_mod {
-                    Some((_, m)) => lockfiles::parse_go(path, m, bytes),
-                    None => {
-                        warn(format!("skipping {path}: no go.mod beside it"));
-                        continue;
-                    }
+            "go.sum" => match go_mods.get(dir) {
+                Some(m) => lockfiles::parse_go(path, m, bytes),
+                None => {
+                    warn(format!("skipping {path}: no go.mod beside it"));
+                    continue;
                 }
-            }
+            },
             _ => lockfiles::parse(path, bytes),
         };
         match parsed {
             Ok(found) => {
                 for c in found {
-                    if !out.contains(&c) {
+                    if seen.insert(c.clone()) {
+                        if out.len() == cap {
+                            warn(format!("the lockfiles list over {cap} components: the SBOM lists none"));
+                            return Vec::new();
+                        }
                         out.push(c);
                     }
                 }
@@ -128,7 +172,7 @@ pub fn attestations(
 ) -> Result<Vec<Attachment>, BuildError> {
     let built = input.built;
     let digest = built.manifest_digest.to_string();
-    let files = lockfiles(store, &inputs_layers(input.target, built))?;
+    let files = lockfiles(store, &inputs_layers(input.target, built), warn)?;
     let components = components(&files, warn);
     let catalog: Vec<(String, Option<String>)> = [&input.target.build.base, &input.target.image.base]
         .into_iter()
@@ -194,7 +238,7 @@ pub fn attestations(
         finished: input.finished,
     });
     let json = |v: &serde_json::Value| serde_json::to_vec(v).expect("JSON values serialise");
-    Ok(match key {
+    let attachments: Vec<Attachment> = match key {
         Some(key) => {
             let manifest = store
                 .read_metadata(&built.manifest_digest)
@@ -220,7 +264,16 @@ pub fn attestations(
                 bytes: json(&statement),
             })
             .collect(),
-    })
+    };
+    // Never publish what `potter verify` would refuse to read back.
+    if let Some(a) = attachments.iter().find(|a| a.bytes.len() as u64 > MAX_ATTESTATION) {
+        return Err(BuildError::Plan(format!(
+            "the {} is {} bytes, over the {MAX_ATTESTATION} that potter verify reads",
+            a.kind.as_str(),
+            a.bytes.len()
+        )));
+    }
+    Ok(attachments)
 }
 
 /// What `potter verify` found for each kind of attestation.
@@ -231,41 +284,96 @@ pub struct Verdict {
     pub result: Result<(), String>,
 }
 
+/// What the verified attestations must say beyond the image digest (spec §17): the repository
+/// they were made for, the tenant and the builder. `None` checks nothing.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Expect<'a> {
+    /// `registry/repository`, as the statements' subject name.
+    pub repository: Option<&'a str>,
+    pub tenant: Option<&'a str>,
+    pub builder: Option<&'a str>,
+}
+
+/// What `potter verify` found.
+#[derive(Debug)]
+pub struct Report {
+    pub verdicts: Vec<Verdict>,
+    /// From the verified provenance.
+    pub repository: Option<String>,
+    pub tenant: Option<String>,
+    pub builder: Option<String>,
+}
+
 /// Verifies the attestations of `subject` with `key`: each kind must be attached, signed by the
-/// key, and about `subject` (spec §17).
+/// key, about `subject`, and say what `expect` asks (spec §17).
 pub fn verify(
     publisher: &Publisher,
     store: &Store,
     subject: &Digest,
     key: &VerifyingKey,
-) -> Result<Vec<Verdict>, BuildError> {
+    expect: &Expect,
+) -> Result<Report, BuildError> {
     let referrers = publisher.referrers(subject)?;
     let digest = subject.to_string();
-    let mut out = Vec::new();
+    let mut report = Report {
+        verdicts: Vec::new(),
+        repository: None,
+        tenant: None,
+        builder: None,
+    };
+    let field = |v: &serde_json::Value, path: &[&str]| -> Option<String> {
+        path.iter()
+            .try_fold(v, |v, k| v.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let check = |what: &str, found: Option<&str>, want: Option<&str>| match want {
+        Some(want) if found != Some(want) => Err(format!("{what} is {found:?}, not {want:?}")),
+        _ => Ok(()),
+    };
     for kind in Kind::ALL {
         let Some(r) = referrers.iter().find(|r| r.kind == Some(kind)) else {
-            out.push(Verdict {
+            report.verdicts.push(Verdict {
                 kind,
                 result: Err("not attached".into()),
             });
             continue;
         };
-        let result = match publisher.fetch(store, &r.descriptor) {
+        let bundle = match publisher.fetch(store, &r.descriptor) {
             Err(BuildError::Infra(e)) => return Err(BuildError::Infra(e)),
             Err(e) => Err(e.to_string()),
             Ok((media_type, _)) if media_type != BUNDLE_TYPE => Err(format!("unsigned ({media_type})")),
-            Ok((_, bundle)) => match kind {
-                Kind::Sbom => sign::verify_statement(key, &bundle, &digest, provenance::SPDX_PREDICATE).map(|_| ()),
-                Kind::Provenance => {
-                    sign::verify_statement(key, &bundle, &digest, provenance::SLSA_PREDICATE).map(|_| ())
-                }
-                Kind::Signature => sign::verify_manifest(key, &bundle, &digest),
-            }
-            .map_err(|e| e.to_string()),
+            Ok((_, bundle)) => Ok(bundle),
         };
-        out.push(Verdict { kind, result });
+        let result = bundle.and_then(|bundle| match kind {
+            Kind::Sbom | Kind::Provenance => {
+                let predicate = if kind == Kind::Sbom {
+                    provenance::SPDX_PREDICATE
+                } else {
+                    provenance::SLSA_PREDICATE
+                };
+                let statement = sign::verify_statement(key, &bundle, &digest, predicate).map_err(|e| e.to_string())?;
+                let name = statement["subject"][0]["name"].as_str();
+                check("the subject", name, expect.repository)?;
+                if kind == Kind::Provenance {
+                    let tenant = field(
+                        &statement,
+                        &["predicate", "buildDefinition", "internalParameters", "tenant"],
+                    );
+                    let builder = field(&statement, &["predicate", "runDetails", "builder", "id"]);
+                    check("the tenant", tenant.as_deref(), expect.tenant)?;
+                    check("the builder", builder.as_deref(), expect.builder)?;
+                    report.repository = name.map(str::to_string);
+                    report.tenant = tenant;
+                    report.builder = builder;
+                }
+                Ok(())
+            }
+            Kind::Signature => sign::verify_manifest(key, &bundle, &digest).map_err(|e| e.to_string()),
+        });
+        report.verdicts.push(Verdict { kind, result });
     }
-    Ok(out)
+    Ok(report)
 }
 
 /// The commit `path` is checked out at, when it is in git. Only `git rev-parse` runs: it reads
@@ -338,7 +446,7 @@ mod tests {
             .put_bytes(&tar(&[("app/composer.lock", COMPOSER), ("app/readme.md", "x")]))
             .unwrap();
         let b = store.put_bytes(&tar(&[("app/web/package-lock.json", "{}")])).unwrap();
-        let found: Vec<String> = lockfiles(&store, &[a, b])
+        let found: Vec<String> = lockfiles(&store, &[a, b], &mut |w| panic!("{w}"))
             .unwrap()
             .into_iter()
             .map(|(p, _)| p)
@@ -403,6 +511,42 @@ mod tests {
         assert_eq!(rev.len(), 40, "{rev}");
         assert!(!marker.exists(), "repository config ran a command");
         assert_eq!(source_revision(&repo.path().join("missing")), None);
+    }
+
+    #[test]
+    fn lockfile_reading_stops_at_its_total_byte_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let body = "x".repeat(80);
+        let layer = store
+            .put_bytes(&tar(&[("a/composer.lock", &body), ("b/composer.lock", &body)]))
+            .unwrap();
+        let mut warnings = Vec::new();
+        let found = lockfiles_capped(&store, &[layer], 100, &mut |w| warnings.push(w)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn components_past_the_total_cap_give_none_rather_than_a_partial_list() {
+        let lock = |a: &str, b: &str| {
+            format!(r#"{{"packages":[{{"name":"v/{a}","version":"1"}},{{"name":"v/{b}","version":"1"}}]}}"#)
+                .into_bytes()
+        };
+        let files = vec![
+            ("a/composer.lock".to_string(), lock("a", "b")),
+            ("b/composer.lock".to_string(), lock("b", "c")),
+        ];
+        let mut warnings = Vec::new();
+        // A package is listed once per lockfile that names it: v/b twice.
+        assert_eq!(
+            components_capped(&files, 4, &mut |w| warnings.push(w)).len(),
+            4,
+            "{warnings:?}"
+        );
+        assert!(warnings.is_empty());
+        assert!(components_capped(&files, 3, &mut |w| warnings.push(w)).is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     #[test]
@@ -520,6 +664,34 @@ mod tests {
     }
 
     #[test]
+    fn an_sbom_too_large_to_verify_fails_the_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut built = built(&store);
+        let packages: Vec<String> = (0..45_000)
+            .map(|i| format!(r#"{{"name":"vendor-{i:0>60}/package-{i:0>60}","version":"1.0.{i}"}}"#))
+            .collect();
+        let lock = format!(r#"{{"packages":[{}]}}"#, packages.join(","));
+        built.steps[0].layer = store.put_bytes(&tar(&[("app/composer.lock", &lock)])).unwrap();
+        let target = target();
+        let input = AttestInput {
+            target: &target,
+            built: &built,
+            subject_name: "r/acme/app",
+            builder_id: "b",
+            tenant: "acme",
+            source: None,
+            started: "2026-10-11T10:00:00Z",
+            finished: "2026-10-11T10:01:00Z",
+        };
+        let Err(e) = attestations(&store, &input, Some(&SigningKey::generate()), &mut |_| {}) else {
+            panic!("an SBOM potter verify cannot read was published");
+        };
+        assert_eq!(e.exit_code(), 2, "{e}");
+        assert!(e.to_string().contains("sbom"), "{e}");
+    }
+
+    #[test]
     fn without_a_key_the_statements_go_unsigned_and_there_is_no_signature() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -604,8 +776,9 @@ mod tests {
         }
 
         fn failures(w: &World, key: &VerifyingKey) -> Vec<Kind> {
-            verify(&w.publisher, &w.store, &w.subject.digest, key)
+            verify(&w.publisher, &w.store, &w.subject.digest, key, &Expect::default())
                 .unwrap()
+                .verdicts
                 .into_iter()
                 .filter(|v| v.result.is_err())
                 .map(|v| v.kind)
@@ -617,6 +790,52 @@ mod tests {
             let w = world();
             attach(&w, Some(&w.key), &w.built);
             assert_eq!(failures(&w, &w.key.verifying_key()), []);
+        }
+
+        #[test]
+        fn the_repository_tenant_and_builder_must_be_the_expected_ones() {
+            let w = world();
+            attach(&w, Some(&w.key), &w.built);
+            let vk = w.key.verifying_key();
+            let run = |expect: Expect| -> Vec<Kind> {
+                verify(&w.publisher, &w.store, &w.subject.digest, &vk, &expect)
+                    .unwrap()
+                    .verdicts
+                    .into_iter()
+                    .filter(|v| v.result.is_err())
+                    .map(|v| v.kind)
+                    .collect()
+            };
+            let good = Expect {
+                repository: Some("r/acme/app"),
+                tenant: Some("acme"),
+                builder: Some("b"),
+            };
+            assert_eq!(run(good), []);
+            let wrong_repo = Expect {
+                repository: Some("r/other/app"),
+                ..Expect::default()
+            };
+            assert_eq!(run(wrong_repo), [Kind::Sbom, Kind::Provenance]);
+            let wrong_tenant = Expect {
+                tenant: Some("other"),
+                ..Expect::default()
+            };
+            assert_eq!(run(wrong_tenant), [Kind::Provenance]);
+            let wrong_builder = Expect {
+                builder: Some("evil"),
+                ..Expect::default()
+            };
+            assert_eq!(run(wrong_builder), [Kind::Provenance]);
+            let report = verify(&w.publisher, &w.store, &w.subject.digest, &vk, &Expect::default()).unwrap();
+            assert_eq!(
+                (
+                    report.repository.as_deref(),
+                    report.tenant.as_deref(),
+                    report.builder.as_deref()
+                ),
+                (Some("r/acme/app"), Some("acme"), Some("b"))
+            );
         }
 
         #[test]
