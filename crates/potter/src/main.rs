@@ -78,6 +78,10 @@ enum Cmd {
         /// The builder id recorded in provenance
         #[arg(long, default_value = "https://potter.dev/builder/local")]
         builder_id: String,
+        /// The source revision recorded in provenance (default: the checkout's HEAD, read with
+        /// `git rev-parse` only)
+        #[arg(long)]
+        source_revision: Option<String>,
         /// The tenant's cache key: 32 bytes, raw or as 64 hex characters (default: kept in $POTTER_HOME)
         #[arg(long)]
         tenant_key_file: Option<PathBuf>,
@@ -177,9 +181,10 @@ fn main() -> ExitCode {
             output,
             sign_key,
             builder_id,
+            source_revision,
             tenant_key_file,
         } => {
-            let publish = match Publish::check(output.as_deref(), sign_key, builder_id, &target) {
+            let publish = match Publish::check(output.as_deref(), sign_key, builder_id, source_revision, &target) {
                 Ok(p) => p,
                 Err((e, code)) => return fail(&e, code),
             };
@@ -231,10 +236,15 @@ fn changed_since(
         return Err((format!("--affected {git_ref:?}: a ref cannot start with `-`"), 2));
     }
     let git = |args: &[&str]| {
+        // The tree is the tenant's: no system or global config, no fsmonitor or hooks (P9).
         std::process::Command::new("git")
-            .arg("-C")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C"])
             .arg(path)
             .args(args)
+            .stdin(std::process::Stdio::null())
             .output()
             .map_err(|e| (format!("--affected needs git: {e}"), 4u8))
     };
@@ -271,6 +281,7 @@ struct Publish {
     reference: kiln_registry::Reference,
     sign_key: Option<PathBuf>,
     builder_id: String,
+    source_revision: Option<String>,
 }
 
 impl Publish {
@@ -279,6 +290,7 @@ impl Publish {
         output: Option<&str>,
         sign_key: Option<PathBuf>,
         builder_id: String,
+        source_revision: Option<String>,
         targets: &[String],
     ) -> Result<Option<Publish>, (String, u8)> {
         let Some(output) = output else {
@@ -309,6 +321,7 @@ impl Publish {
             reference,
             sign_key,
             builder_id,
+            source_revision,
         }))
     }
 }
@@ -414,25 +427,6 @@ fn now_rfc3339() -> String {
     potter_exec::attest::rfc3339(secs)
 }
 
-/// The source revision of `path` and whether its tree has changes, when it is in git.
-fn source_revision(path: &Path) -> Option<(String, bool)> {
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-    };
-    let rev = String::from_utf8(git(&["rev-parse", "HEAD"])?.stdout)
-        .ok()?
-        .trim()
-        .to_string();
-    let dirty = !git(&["status", "--porcelain"])?.stdout.is_empty();
-    Some((rev, dirty))
-}
-
 /// Pushes a built target and attaches its attestations (spec §17); returns their digests.
 #[allow(clippy::too_many_arguments)]
 fn publish_target(
@@ -457,7 +451,10 @@ fn publish_target(
         subject_name: &subject_name,
         builder_id: &p.builder_id,
         tenant,
-        source: source_revision(path),
+        source: p
+            .source_revision
+            .clone()
+            .or_else(|| potter_exec::attest::source_revision(path)),
         started,
         finished: &now_rfc3339(),
     };

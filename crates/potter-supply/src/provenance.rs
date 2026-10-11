@@ -32,7 +32,8 @@ pub struct ProvenanceInput<'a> {
     /// The canonical hash of what was built (hex).
     pub plan_hash: &'a str,
     pub source_revision: Option<&'a str>,
-    pub source_dirty: bool,
+    /// Whether the tree had uncommitted changes; `None` when nobody checked (rendered `null`).
+    pub source_dirty: Option<bool>,
     pub tenant: &'a str,
     pub catalog_index: Option<&'a str>,
     /// (reference, `sha256:<hex>`) of each base image.
@@ -124,7 +125,7 @@ mod tests {
             target: "web",
             plan_hash: "cccc",
             source_revision: Some("0123abcd"),
-            source_dirty: false,
+            source_dirty: None,
             tenant: "acme",
             catalog_index: None,
             bases,
@@ -153,7 +154,7 @@ mod tests {
         assert_eq!(def["buildType"], BUILD_TYPE);
         assert_eq!(
             def["externalParameters"],
-            json!({"target": "web", "plan": "cccc", "source": {"revision": "0123abcd", "dirty": false}})
+            json!({"target": "web", "plan": "cccc", "source": {"revision": "0123abcd", "dirty": null}})
         );
         assert_eq!(
             def["internalParameters"],
@@ -197,7 +198,7 @@ mod tests {
         let s = statement(&i);
         assert_eq!(
             s["predicate"]["buildDefinition"]["externalParameters"]["source"],
-            json!({"revision": null, "dirty": false})
+            json!({"revision": null, "dirty": null})
         );
     }
 }

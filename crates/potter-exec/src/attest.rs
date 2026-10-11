@@ -25,8 +25,8 @@ pub struct AttestInput<'a> {
     pub subject_name: &'a str,
     pub builder_id: &'a str,
     pub tenant: &'a str,
-    /// The source revision and whether the tree had changes.
-    pub source: Option<(String, bool)>,
+    /// The source revision, when known.
+    pub source: Option<String>,
     /// RFC 3339.
     pub started: &'a str,
     pub finished: &'a str,
@@ -184,8 +184,8 @@ pub fn attestations(
         potter_version,
         target: &input.target.name,
         plan_hash: &plan_hash,
-        source_revision: input.source.as_ref().map(|(r, _)| r.as_str()),
-        source_dirty: input.source.as_ref().is_some_and(|(_, d)| *d),
+        source_revision: input.source.as_deref(),
+        source_dirty: None,
         tenant: input.tenant,
         catalog_index: None,
         bases: &bases,
@@ -268,6 +268,24 @@ pub fn verify(
     Ok(out)
 }
 
+/// The commit `path` is checked out at, when it is in git. Only `git rev-parse` runs: it reads
+/// refs and never runs the repository's hooks, filters or fsmonitor, which a tenant controls (P9).
+pub fn source_revision(path: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C"])
+        .arg(path)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let rev = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (rev.len() >= 40 && rev.bytes().all(|b| b.is_ascii_hexdigit())).then_some(rev)
+}
+
 /// `secs` since the Unix epoch as RFC 3339 UTC.
 pub fn rfc3339(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
@@ -348,6 +366,43 @@ mod tests {
         assert_eq!(names, ["laravel/framework", "golang.org/x/text"]);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("package-lock.json"));
+    }
+
+    #[test]
+    fn the_source_revision_runs_none_of_the_repository_s_commands() {
+        let repo = tempfile::tempdir().unwrap();
+        let marker = repo.path().join("pwned");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        let hook = format!("touch {}", marker.display());
+        git(&["config", "core.fsmonitor", &hook]);
+        git(&["config", "filter.evil.clean", &hook]);
+        std::fs::write(repo.path().join(".gitattributes"), "* filter=evil\n").unwrap();
+        let rev = source_revision(repo.path()).unwrap();
+        assert_eq!(rev.len(), 40, "{rev}");
+        assert!(!marker.exists(), "repository config ran a command");
+        assert_eq!(source_revision(&repo.path().join("missing")), None);
     }
 
     #[test]
@@ -445,7 +500,7 @@ mod tests {
             subject_name: "r.example/acme/app",
             builder_id: "https://potter.dev/builder/test",
             tenant: "acme",
-            source: Some(("c0ffee".into(), false)),
+            source: Some("c0ffee".into()),
             started: "2026-10-11T10:00:00Z",
             finished: "2026-10-11T10:01:00Z",
         };
