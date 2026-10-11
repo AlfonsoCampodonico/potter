@@ -35,13 +35,13 @@
 **Files:** `crates/potter-exec/src/assemble.rs`, `crates/potter-exec/src/chain.rs`, `crates/potter-exec/src/base.rs`.
 
 **Produces:**
-- Image manifest annotations: `dev.potter.port` (when the plan has a port), `dev.potter.process.<name>` (JSON argv of every process), `dev.potter.plan` (canonical plan hash hex), `org.opencontainers.image.created` is NOT written (reproducibility).
+- Image manifest annotations: `dev.potter.port` (when the plan has a port), `dev.potter.process.<name>` (JSON argv of every process), `dev.potter.target` (canonical hash of the target, hex), `org.opencontainers.image.created` is NOT written (reproducibility).
 - `Built` gains `steps: Vec<StepRecord>` and `bases: Vec<BaseRecord>`:
   - `pub struct StepRecord { pub chain: String, pub step: String, pub key: Option<String> /*hex; None for host-built layers*/, pub layer: Digest, pub class: Option<ExecutorClass> }`
   - `pub struct BaseRecord { pub reference: String, pub digest: Digest }` (resolved manifest digest of each OCI base, build and run).
 - `Built.manifest_digest` is the existing `digest`.
 
-Tests (unit, assemble.rs): annotations for a plan with `port` and two processes; `dev.potter.plan` equals `plan_hash` hex. Integration (build.rs, Linux): a built image's records list each Run step with `class == Ns` and a 64-hex key.
+Tests (unit, assemble.rs): annotations for a plan with `port` and two processes; `dev.potter.target` equals the target hash hex. Integration (build.rs, Linux): a built image's records list each Run step with `class == Ns` and a 64-hex key.
 
 ### Task 2: `potter-supply` lockfile parsers
 

@@ -432,3 +432,32 @@ fn a_secret_file_ending_in_a_newline_is_redacted() {
         "{lines:?}"
     );
 }
+
+#[test]
+fn a_build_records_each_layer_with_its_key_and_executor_and_the_bases_it_used() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[("src/a.txt", "a")]);
+    let target = ctx.target(
+        &base,
+        vec![
+            inputs("src", &["src/**"], "/app"),
+            run("build", "echo built > /app/out"),
+        ],
+    );
+    let first = ctx.build(&target, repo.path(), &[]).unwrap();
+    let steps: Vec<(&str, Option<potter_cache::ExecutorClass>)> =
+        first.steps.iter().map(|s| (s.step.as_str(), s.class)).collect();
+    assert_eq!(steps, [("src", None), ("build", Some(potter_cache::ExecutorClass::Ns))]);
+    assert!(
+        first
+            .steps
+            .iter()
+            .all(|s| s.chain == "app" && s.key.as_ref().is_some_and(|k| k.len() == 64))
+    );
+    assert_eq!(first.bases.len(), 1);
+    assert_eq!(first.bases[0].reference, base);
+    // A cache hit keeps the class of the entry it came from.
+    let again = ctx.build(&target, repo.path(), &[]).unwrap();
+    assert_eq!(again.steps, first.steps);
+}

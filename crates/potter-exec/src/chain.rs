@@ -83,10 +83,25 @@ pub struct LayerRef {
     pub diff_id: Digest,
 }
 
+/// A layer the chain added, for provenance (spec §17, P12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepRecord {
+    /// The chain's name: the target, or `<target>:run` for its run base.
+    pub chain: String,
+    pub step: String,
+    /// The step's cache key (hex).
+    pub key: Option<String>,
+    pub layer: Digest,
+    /// Who produced the layer: `None` for layers potter builds on the host (inputs, copies).
+    pub class: Option<ExecutorClass>,
+}
+
 /// Where a chain ended.
 #[derive(Debug, Clone)]
 pub struct ChainState {
     pub base: BaseImage,
+    /// The reference the base was resolved from (after catalog lowering).
+    pub base_ref: String,
     /// Bottom first: the base's layers, then each step's.
     pub layers: Vec<LayerRef>,
     pub env: BTreeMap<String, String>,
@@ -94,6 +109,8 @@ pub struct ChainState {
     pub user: String,
     pub executed: usize,
     pub cached: usize,
+    /// Each layer added on top of the base, in order.
+    pub records: Vec<StepRecord>,
 }
 
 fn unsupported(what: String, milestone: &'static str) -> BuildError {
@@ -246,6 +263,8 @@ pub fn run_steps(
         user: base.user().unwrap_or_else(|| "0:0".into()),
         executed: 0,
         cached: 0,
+        records: Vec::new(),
+        base_ref: reference.clone(),
         base,
     };
     // Unpacked directories of the layers, filled in as misses need them.
@@ -299,6 +318,13 @@ pub fn run_steps(
                         .map_err(|e| BuildError::Infra(format!("storing the inputs of {sname}: {e}")))?;
                     key = step_key(&key, &input(step, Some(&d.to_string()), &state.env, &platform, &[]))
                         .map_err(cache_err)?;
+                    state.records.push(StepRecord {
+                        chain: tname.clone(),
+                        step: sname.clone(),
+                        key: Some(key.hex()),
+                        layer: d.clone(),
+                        class: None,
+                    });
                     state.layers.push(LayerRef {
                         descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
                         diff_id: d,
@@ -335,11 +361,10 @@ pub fn run_steps(
                         (!ctx.no_cache)
                             .then(|| ctx.index.get(&key).ok().flatten())
                             .flatten()
-                            .and_then(|e| e.layer)
-                            .and_then(|l| Digest::parse(&l).ok())
-                            .filter(|d| ctx.store.has_blob(d))
+                            .and_then(|e| Some((Digest::parse(&e.layer?).ok()?, e.class)))
+                            .filter(|(d, _)| ctx.store.has_blob(d))
                     };
-                    let mut hit = local(ctx).map(|d| (d, StepState::Cached));
+                    let mut hit = local(ctx).map(|(d, class)| (d, StepState::Cached, class));
                     // The longest remote prefix: asked until its first miss (spec §8.3).
                     if hit.is_none()
                         && !ctx.no_cache
@@ -350,7 +375,7 @@ pub fn run_steps(
                         match remote.get(ctx.store, &key, &parent, &accept, &ctx.home.runs()) {
                             Ok(Some(entry)) if entry.layer.is_some() => {
                                 ctx.index.put(&key, &entry).map_err(cache_err)?;
-                                hit = local(ctx).map(|d| (d, StepState::Pulled));
+                                hit = local(ctx).map(|(d, class)| (d, StepState::Pulled, class));
                             }
                             Ok(_) => *remote_live = false,
                             Err(e) => {
@@ -362,10 +387,10 @@ pub fn run_steps(
                         }
                     }
                     // A local hit is published too, so a remote holds every step of a chain.
-                    if let (Some((d, StepState::Cached)), Some(remote)) = (&hit, ctx.cache_to) {
+                    if let (Some((d, StepState::Cached, class)), Some(remote)) = (&hit, ctx.cache_to) {
                         let entry = Entry {
                             layer: Some(d.to_string()),
-                            class: ExecutorClass::Ns,
+                            class: *class,
                             created: now(),
                             potter: env!("CARGO_PKG_VERSION").into(),
                         };
@@ -375,8 +400,15 @@ pub fn run_steps(
                             )));
                         }
                     }
-                    if let Some((d, how)) = hit {
+                    if let Some((d, how, class)) = hit {
                         let size = ctx.store.blob_size(&d).map_err(|e| BuildError::Infra(e.to_string()))?;
+                        state.records.push(StepRecord {
+                            chain: tname.clone(),
+                            step: sname.clone(),
+                            key: Some(key.hex()),
+                            layer: d.clone(),
+                            class: Some(class),
+                        });
                         state.layers.push(LayerRef {
                             descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
                             diff_id: d,
@@ -555,6 +587,13 @@ pub fn run_steps(
                             ))),
                         }
                     }
+                    state.records.push(StepRecord {
+                        chain: tname.clone(),
+                        step: sname.clone(),
+                        key: Some(key.hex()),
+                        layer: d.clone(),
+                        class: Some(ExecutorClass::Ns),
+                    });
                     state.layers.push(LayerRef {
                         descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
                         diff_id: d,
@@ -605,6 +644,13 @@ pub fn run_steps(
                     // Like inputs, the layer's digest is the step's input (spec §8.1).
                     key = step_key(&key, &input(step, Some(&d.to_string()), &state.env, &platform, &[]))
                         .map_err(cache_err)?;
+                    state.records.push(StepRecord {
+                        chain: tname.clone(),
+                        step: sname.clone(),
+                        key: Some(key.hex()),
+                        layer: d.clone(),
+                        class: None,
+                    });
                     state.layers.push(LayerRef {
                         descriptor: Descriptor::new(media::OCI_LAYER_TAR, d.clone(), size),
                         diff_id: d,

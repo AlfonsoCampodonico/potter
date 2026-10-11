@@ -13,7 +13,7 @@ use kiln_oci::{
 use kiln_store::{Digest, Store};
 use potter_plan::{Chain, GeneratedFile, Image, Process, Target};
 
-use crate::chain::{BuildCtx, LayerRef, run_chain, run_steps};
+use crate::chain::{BuildCtx, LayerRef, StepRecord, run_chain, run_steps};
 use crate::error::{BuildError, io};
 use crate::merge::{ExportSpec, export_layer};
 use crate::tarball::{Meta, TarWriter, epoch};
@@ -27,6 +27,19 @@ pub struct Built {
     pub digest: Digest,
     pub executed: usize,
     pub cached: usize,
+    /// The layers the build added: the run base's chain, then the build chain.
+    pub steps: Vec<StepRecord>,
+    /// The OCI bases it resolved: the build base first.
+    pub bases: Vec<BaseRecord>,
+    /// The OCI image manifest's digest (`digest` is the kiln image's).
+    pub manifest_digest: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseRecord {
+    pub reference: String,
+    /// The manifest digest it resolved to.
+    pub digest: Digest,
 }
 
 /// The process the image runs by default: `web`, else the only one; none when several
@@ -71,6 +84,23 @@ pub fn image_config(
             diff_ids,
         },
     }
+}
+
+/// The image manifest's annotations (spec §5.1, §18): the plan's labels, the listen port, every
+/// process as a JSON argv, and the canonical hash of the target that produced it.
+pub fn manifest_annotations(image: &Image, target_hash: &str) -> BTreeMap<String, String> {
+    let mut a = image.config.labels.clone();
+    if let Some(port) = image.config.port {
+        a.insert("dev.potter.port".into(), port.to_string());
+    }
+    for (name, p) in &image.processes {
+        a.insert(
+            format!("dev.potter.process.{name}"),
+            serde_json::to_string(&p.command).expect("a string list serialises"),
+        );
+    }
+    a.insert("dev.potter.target".into(), target_hash.to_string());
+    a
 }
 
 /// Stores `file` (a tar written from its start) as an uncompressed layer.
@@ -133,6 +163,8 @@ pub fn build_target(
     let image = &target.image;
     // The image's base: its own chain (the run base and its runtime steps), or with no exports
     // the build chain itself.
+    let mut steps = Vec::new();
+    let mut bases = Vec::new();
     let (base_env, mut layers): (BTreeMap<String, String>, Vec<LayerRef>) = if image.export.is_empty() {
         if image.base != target.build.base || !image.runtime_steps.is_empty() {
             return Err(BuildError::Plan(format!(
@@ -154,6 +186,11 @@ pub fn build_target(
             crate::stopgap::Role::Run,
         )?;
         let mut layers = run.layers.clone();
+        steps.extend(run.records.iter().cloned());
+        bases.push(BaseRecord {
+            reference: run.base_ref.clone(),
+            digest: run.base.resolved.manifest_digest.clone(),
+        });
         let store = ctx.store;
         let open: Vec<crate::merge::LayerOpen> = chain
             .layers
@@ -182,6 +219,16 @@ pub fn build_target(
         layers.iter().map(|l| l.diff_id.clone()).collect(),
     );
     let infra = |e: &dyn std::fmt::Display| BuildError::Infra(format!("target {}: {e}", target.name));
+    steps.extend(chain.records.iter().cloned());
+    if !bases.iter().any(|b| b.digest == chain.base.resolved.manifest_digest) {
+        bases.insert(
+            0,
+            BaseRecord {
+                reference: chain.base_ref.clone(),
+                digest: chain.base.resolved.manifest_digest.clone(),
+            },
+        );
+    }
     let config_bytes = canonical_json(&config);
     let config_digest = ctx.store.put_bytes(&config_bytes).map_err(|e| infra(&e))?;
     let manifest = ImageManifest {
@@ -190,7 +237,10 @@ pub fn build_target(
         artifact_type: None,
         config: Descriptor::new(OCI_CONFIG, config_digest.clone(), config_bytes.len() as u64),
         layers: layers.iter().map(|l| l.descriptor.clone()).collect(),
-        annotations: None,
+        annotations: Some(manifest_annotations(
+            image,
+            &potter_plan::hash_of(target).map_err(|e| infra(&e))?.hex(),
+        )),
     };
     let manifest_digest = ctx.store.put_bytes(&canonical_json(&manifest)).map_err(|e| infra(&e))?;
     let tags: Vec<String> = if tags.is_empty() {
@@ -203,7 +253,7 @@ pub fn build_target(
     }
     let resolved = ResolvedImage {
         platform: ctx.platform.clone(),
-        manifest_digest,
+        manifest_digest: manifest_digest.clone(),
         manifest,
         config_digest,
         config,
@@ -227,6 +277,9 @@ pub fn build_target(
         digest: output.digest,
         executed: chain.executed,
         cached: chain.cached,
+        steps,
+        bases,
+        manifest_digest,
     })
 }
 
@@ -308,6 +361,21 @@ mod tests {
             two.entrypoint, None,
             "no web and several processes: the platform chooses"
         );
+    }
+
+    #[test]
+    fn the_manifest_records_port_processes_labels_and_the_target_hash() {
+        let mut img = image(&[("web", &["/app/run", "--port", "8080"]), ("worker", &["w"])]);
+        img.config.port = Some(8080);
+        img.config.labels.insert("team".into(), "a".into());
+        let a = manifest_annotations(&img, "ab12");
+        assert_eq!(a["dev.potter.port"], "8080");
+        assert_eq!(a["dev.potter.process.web"], r#"["/app/run","--port","8080"]"#);
+        assert_eq!(a["dev.potter.process.worker"], r#"["w"]"#);
+        assert_eq!(a["dev.potter.target"], "ab12");
+        assert_eq!(a["team"], "a");
+        let none = manifest_annotations(&image(&[]), "ab12");
+        assert!(!none.contains_key("dev.potter.port"));
     }
 
     #[test]
