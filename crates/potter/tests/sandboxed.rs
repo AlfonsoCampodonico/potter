@@ -411,3 +411,24 @@ fn a_secret_reaches_its_step_only_and_never_a_layer_a_log_or_the_index() {
     let (missing, _) = ctx.chain_with_secrets(&target, repo.path(), &[]);
     assert_eq!(missing.unwrap_err().exit_code(), 2);
 }
+
+#[test]
+fn a_secret_file_ending_in_a_newline_is_redacted() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let repo = repo(&[]);
+    let mut step = run("use", "cat /run/secrets/tok");
+    if let potter_plan::Step::Run { secrets, .. } = &mut step {
+        secrets.push(potter_plan::SecretRef {
+            id: "tok".into(),
+            target: "/run/secrets/tok".into(),
+        });
+    }
+    let target = ctx.target(&base, vec![step]);
+    let (state, lines) = ctx.chain_with_secrets(&target, repo.path(), &[("tok", b"line-one\nline-two\n")]);
+    state.unwrap();
+    assert!(
+        !lines.iter().any(|l| l.contains("line-one") || l.contains("line-two")),
+        "{lines:?}"
+    );
+}

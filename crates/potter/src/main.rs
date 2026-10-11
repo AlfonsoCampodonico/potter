@@ -176,6 +176,9 @@ fn changed_since(
     git_ref: &str,
     plan: &potter_plan::Plan,
 ) -> Result<std::collections::BTreeSet<String>, (String, u8)> {
+    if git_ref.starts_with('-') {
+        return Err((format!("--affected {git_ref:?}: a ref cannot start with `-`"), 2));
+    }
     let git = |args: &[&str]| {
         std::process::Command::new("git")
             .arg("-C")

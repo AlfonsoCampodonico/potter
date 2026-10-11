@@ -17,6 +17,10 @@ use crate::error::BuildError;
 
 pub const ARTIFACT_TYPE: &str = "application/vnd.potter.cache.v1+json";
 pub const CONFIG_TYPE: &str = "application/vnd.potter.cache.config.v1+json";
+/// The largest layer pulled (the seal's own output limit): a hostile registry cannot fill the store.
+pub const MAX_LAYER: u64 = 8 << 30;
+/// The largest entry config pulled.
+pub const MAX_CONFIG: u64 = 64 << 10;
 
 /// What an entry's config blob records (spec §8.3).
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,7 +78,15 @@ impl RemoteCache {
 
     /// The entry for `key`, its blobs fetched into `store` and checked; `None` when the registry
     /// has none.
-    pub fn get(&self, store: &Store, key: &CacheKey, spill_dir: &Path) -> Result<Option<Entry>, BuildError> {
+    /// The entry must record `parent` and one of the `accept`ed executor classes (spec §8.4).
+    pub fn get(
+        &self,
+        store: &Store,
+        key: &CacheKey,
+        parent: &CacheKey,
+        accept: &[ExecutorClass],
+        spill_dir: &Path,
+    ) -> Result<Option<Entry>, BuildError> {
         let manifest = match self.client.get_manifest(&self.repository, &key.hex()) {
             Ok(m) => m,
             Err(RegistryError::NotFound { .. }) => return Ok(None),
@@ -87,11 +99,23 @@ impl RemoteCache {
         if m.layers.len() > 1 {
             return Err(hostile("more than one layer"));
         }
+        if m.config.size > MAX_CONFIG || m.layers.iter().any(|l| l.size > MAX_LAYER) {
+            return Err(hostile("a blob over its size limit"));
+        }
         self.client
             .fetch_blob(&self.repository, &m.config.digest, m.config.size, store)
             .map_err(infra)?;
         let config: CacheConfig =
             serde_json::from_slice(&store.read_metadata(&m.config.digest).map_err(hostile)?).map_err(hostile)?;
+        if !accept.contains(&config.class) {
+            return Err(hostile(format!(
+                "an entry of class {:?} where {accept:?} was asked for",
+                config.class
+            )));
+        }
+        if config.parent != parent.hex() {
+            return Err(hostile("an entry recorded under another parent"));
+        }
         let layer = match m.layers.first() {
             None => None,
             Some(l) => {
@@ -212,7 +236,10 @@ mod tests {
             potter: "0.1.0".into(),
         };
         remote.put(&a, &key, &parent, &entry).unwrap();
-        let got = remote.get(&b, &key, b_dir.path()).unwrap().unwrap();
+        let got = remote
+            .get(&b, &key, &parent, &[ExecutorClass::Ns, ExecutorClass::Vm], b_dir.path())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (got.layer.as_deref(), got.class),
             (entry.layer.as_deref(), ExecutorClass::Ns)
@@ -221,7 +248,13 @@ mod tests {
         assert!(b.has_blob(&d));
         assert!(
             remote
-                .get(&b, &base_key("sha256:other"), b_dir.path())
+                .get(
+                    &b,
+                    &base_key("sha256:other"),
+                    &parent,
+                    &[ExecutorClass::Ns],
+                    b_dir.path()
+                )
                 .unwrap()
                 .is_none()
         );
@@ -232,8 +265,74 @@ mod tests {
         )
         .unwrap();
         assert!(
-            other.get(&b, &key, b_dir.path()).unwrap().is_none(),
+            other
+                .get(&b, &key, &parent, &[ExecutorClass::Ns], b_dir.path())
+                .unwrap()
+                .is_none(),
             "another tenant's entry"
+        );
+    }
+
+    #[test]
+    fn an_entry_must_match_the_asked_parent_and_class_and_size() {
+        let reg = TestRegistry::start(Config::default());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let remote = RemoteCache::parse(
+            &format!("{}/c", reg.host()),
+            &Tenant::local(),
+            kiln_registry::DockerConfig::anonymous(),
+        )
+        .unwrap();
+        let key = base_key("sha256:k");
+        let parent = base_key("sha256:p");
+        let vm = Entry {
+            layer: Some(layer(&store)),
+            class: ExecutorClass::Vm,
+            created: 1,
+            potter: "0.1.0".into(),
+        };
+        remote.put(&store, &key, &parent, &vm).unwrap();
+        let fresh = || {
+            let d = tempfile::tempdir().unwrap();
+            let s = Store::open(d.path()).unwrap();
+            (d, s)
+        };
+        // An ns build may use a vm entry (spec §8.4), a vm build only vm ones.
+        let (d, s) = fresh();
+        assert!(
+            remote
+                .get(&s, &key, &parent, &[ExecutorClass::Ns, ExecutorClass::Vm], d.path())
+                .unwrap()
+                .is_some()
+        );
+        let ns = Entry {
+            class: ExecutorClass::Ns,
+            ..vm.clone()
+        };
+        let key2 = base_key("sha256:k2");
+        remote.put(&store, &key2, &parent, &ns).unwrap();
+        let (d, s) = fresh();
+        assert_eq!(
+            remote
+                .get(&s, &key2, &parent, &[ExecutorClass::Vm], d.path())
+                .unwrap_err()
+                .exit_code(),
+            3
+        );
+        let (d, s) = fresh();
+        assert_eq!(
+            remote
+                .get(
+                    &s,
+                    &key,
+                    &base_key("sha256:other"),
+                    &[ExecutorClass::Ns, ExecutorClass::Vm],
+                    d.path()
+                )
+                .unwrap_err()
+                .exit_code(),
+            3
         );
     }
 
@@ -261,7 +360,9 @@ mod tests {
         remote.put(&store, &key, &base_key("p"), &entry).unwrap();
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh = Store::open(fresh_dir.path()).unwrap();
-        let err = remote.get(&fresh, &key, fresh_dir.path()).unwrap_err();
+        let err = remote
+            .get(&fresh, &key, &base_key("p"), &[ExecutorClass::Ns], fresh_dir.path())
+            .unwrap_err();
         assert_eq!(err.exit_code(), 3, "{err}");
     }
 }

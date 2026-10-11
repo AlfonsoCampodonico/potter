@@ -333,3 +333,20 @@ fn affected_builds_only_targets_that_changed_since_a_ref() {
     let (code, _, stderr) = build(&ctx, repo.path(), &["--affected", "no-such-ref"]);
     assert_eq!(code, 2, "{stderr}");
 }
+
+#[test]
+fn local_hits_are_published_too() {
+    let Some(a) = Ctx::new() else { return };
+    let (_reg, _dir, base) = support::serve_busybox();
+    let cache = kiln_registry::testregistry::TestRegistry::start(Default::default());
+    let remote = format!("{}/potter", cache.host());
+    let repo = project(&base);
+    assert_eq!(build(&a, repo.path(), &[]).0, 0);
+    let (code, stdout, stderr) = build(&a, repo.path(), &["--cache-to", &remote]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("(executed 0, cached 1)"), "{stdout}");
+    let b = Ctx::new().unwrap();
+    let (code, stdout, stderr) = build(&b, repo.path(), &["--cache-from", &remote]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("(executed 0, cached 1)"), "{stdout}\n{stderr}");
+}

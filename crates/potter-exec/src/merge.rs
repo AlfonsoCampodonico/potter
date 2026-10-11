@@ -247,18 +247,19 @@ pub fn copy_layer<W: Write>(layers: &[LayerOpen], spec: &CopySpec, out: W) -> Re
     let dest = spec.dest.trim_end_matches('/');
     let mut exports = Vec::new();
     for p in spec.paths {
-        let rel = p.trim_matches('/');
-        let node = map
-            .get(rel)
-            .ok_or_else(|| BuildError::Plan(format!("copy_from: {p} does not exist in the source")))?;
-        let to = if node.kind == Kind::Dir || !into {
+        let missing = || BuildError::Plan(format!("copy_from: {p} does not exist in the source"));
+        // Symlinks on the way, the last one too, resolve in the source (as COPY --from does).
+        let rel = resolve(&map, p).ok_or_else(missing)?;
+        let dir = rel.is_empty() || map.get(&rel).ok_or_else(missing)?.kind == Kind::Dir;
+        let to = if dir || !into {
             dest.to_string()
         } else {
-            let base = rel.rsplit('/').next().unwrap_or(rel);
+            let asked = p.trim_matches('/');
+            let base = asked.rsplit('/').next().unwrap_or(asked);
             format!("{dest}/{base}")
         };
         exports.push(Export {
-            path: p.clone(),
+            path: format!("/{rel}"),
             dest: if to.is_empty() { "/".into() } else { to },
             exclude: vec![],
         });
@@ -269,6 +270,44 @@ pub fn copy_layer<W: Write>(layers: &[LayerOpen], spec: &CopySpec, out: W) -> Re
         spill_dir: spec.spill_dir,
     };
     export_from(layers, &map, &export, spec.owner, spec.mode, out)
+}
+
+/// `path` in the merged view with every symlink on the way resolved (40 at most); `None` for
+/// a loop. `..` stops at the root.
+fn resolve(map: &BTreeMap<String, Node>, path: &str) -> Option<String> {
+    use std::collections::VecDeque;
+    let split = |s: &str| -> VecDeque<String> { s.split('/').filter(|c| !c.is_empty()).map(String::from).collect() };
+    let mut todo = split(path);
+    let mut done: Vec<String> = Vec::new();
+    let mut hops = 0;
+    while let Some(c) = todo.pop_front() {
+        match c.as_str() {
+            "." => continue,
+            ".." => {
+                done.pop();
+                continue;
+            }
+            _ => done.push(c),
+        }
+        if let Some(Node {
+            kind: Kind::Symlink(target),
+            ..
+        }) = map.get(&done.join("/"))
+        {
+            hops += 1;
+            if hops > 40 {
+                return None;
+            }
+            done.pop();
+            if target.starts_with('/') {
+                done.clear();
+            }
+            let mut next = split(target);
+            next.extend(todo.drain(..));
+            todo = next;
+        }
+    }
+    Some(done.join("/"))
 }
 
 /// The selection of `spec` from `map` (the merged view of `layers`), with optional owner and
@@ -383,11 +422,13 @@ fn export_from<W: Write>(
 
     let mut tar = TarWriter::new(out);
     let mut summary = ExportSummary { entries: 0, bytes: 0 };
-    for (path, (_, n)) in &chosen {
+    for (path, (src, n)) in &chosen {
+        // Overrides apply to what was copied, never to the parents the layer creates for it.
+        let copied = !src.is_empty();
         let symlink = matches!(n.kind, Kind::Symlink(_));
-        let (uid, gid) = owner.unwrap_or((n.uid, n.gid));
+        let (uid, gid) = owner.filter(|_| copied).unwrap_or((n.uid, n.gid));
         let meta = Meta {
-            mode: mode.filter(|_| !symlink).unwrap_or(n.mode & 0o7777),
+            mode: mode.filter(|_| !symlink && copied).unwrap_or(n.mode & 0o7777),
             uid,
             gid,
             mtime: spec.epoch,
@@ -764,6 +805,45 @@ mod tests {
         let kept = copy(&built(), &["/app/dist"], "/srv/www", None, None).unwrap();
         let f = kept.iter().find(|e| e.0 == "srv/www/index.html").unwrap();
         assert_eq!((f.2 & 0o7777, f.3), (0o755, 1000));
+    }
+
+    #[test]
+    fn overrides_never_touch_the_parents_a_copy_creates() {
+        let out = copy(
+            &built(),
+            &["/app/bin"],
+            "/etc/conf.d/x.conf",
+            Some((33, 33)),
+            Some(0o640),
+        )
+        .unwrap();
+        for parent in ["etc", "etc/conf.d"] {
+            let p = out.iter().find(|e| e.0 == parent).unwrap();
+            assert_eq!((p.2 & 0o7777, p.3), (0o755, 0), "{parent}");
+        }
+        let f = out.iter().find(|e| e.0 == "etc/conf.d/x.conf").unwrap();
+        assert_eq!((f.2 & 0o7777, f.3), (0o640, 33));
+    }
+
+    #[test]
+    fn symlinked_sources_resolve_and_the_root_can_be_copied() {
+        let o = Opts::default().mode(0o755);
+        let mut t = TarBuilder::new();
+        t.dir("usr", &o)
+            .dir("usr/lib", &o)
+            .file("usr/lib/x", b"lib", &o)
+            .symlink("lib", "usr/lib", &o)
+            .dir("app", &o)
+            .dir("app/real", &o)
+            .file("app/real/f", b"f", &o)
+            .symlink("app/cur", "real", &o);
+        let layers = vec![layer(t.finish())];
+        let via_dir = copy(&layers, &["/app/cur"], "/dst", None, None).unwrap();
+        assert!(paths(&via_dir).contains(&"dst/f"), "{:?}", paths(&via_dir));
+        let via_parent = copy(&layers, &["/lib/x"], "/opt/x", None, None).unwrap();
+        assert_eq!(via_parent.iter().find(|e| e.0 == "opt/x").unwrap().4, b"lib");
+        let root = copy(&layers, &["/"], "/snapshot", None, None).unwrap();
+        assert!(paths(&root).contains(&"snapshot/usr/lib/x"), "{:?}", paths(&root));
     }
 
     #[test]

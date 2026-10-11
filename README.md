@@ -51,7 +51,7 @@ Layer blobs live in `$KILN_HOME`.
 
 ## Caching, monorepos and secrets
 
-- **Remote cache:** `--cache-to <registry>[/<prefix>]` publishes every sealed step, and `--cache-from` looks up local misses there. `POTTER_REMOTE_CACHE` sets both.
+- **Remote cache:** `--cache-to <registry>[/<prefix>]` publishes every step of a chain (local hits too), and `--cache-from` looks up local misses there. `POTTER_REMOTE_CACHE` sets both.
   - Entries live under `<prefix>/<tenant>/cache`, so tenants share nothing.
   - Pulled layers are verified.
   - A cache failure is a warning, never a failed build.

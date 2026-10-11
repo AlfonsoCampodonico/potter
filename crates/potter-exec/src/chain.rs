@@ -346,7 +346,8 @@ pub fn run_steps(
                         && *remote_live
                         && let Some(remote) = ctx.cache_from
                     {
-                        match remote.get(ctx.store, &key, &ctx.home.runs()) {
+                        let accept = [ExecutorClass::Ns, ExecutorClass::Vm];
+                        match remote.get(ctx.store, &key, &parent, &accept, &ctx.home.runs()) {
                             Ok(Some(entry)) if entry.layer.is_some() => {
                                 ctx.index.put(&key, &entry).map_err(cache_err)?;
                                 hit = local(ctx).map(|d| (d, StepState::Pulled));
@@ -358,6 +359,20 @@ pub fn run_steps(
                                     "step {sname}: the remote cache failed, building locally: {e}"
                                 )));
                             }
+                        }
+                    }
+                    // A local hit is published too, so a remote holds every step of a chain.
+                    if let (Some((d, StepState::Cached)), Some(remote)) = (&hit, ctx.cache_to) {
+                        let entry = Entry {
+                            layer: Some(d.to_string()),
+                            class: ExecutorClass::Ns,
+                            created: now(),
+                            potter: env!("CARGO_PKG_VERSION").into(),
+                        };
+                        if let Err(e) = remote.put(ctx.store, &key, &parent, &entry) {
+                            (ctx.progress)(Progress::Warning(format!(
+                                "step {sname}: pushing to the remote cache failed: {e}"
+                            )));
                         }
                     }
                     if let Some((d, how)) = hit {
@@ -461,12 +476,8 @@ pub fn run_steps(
                             .map_err(io(format!("writing the secret {}", s.id)))?;
                         secret_mounts.push((file, s.target.clone()));
                     }
-                    let redact = |line: &str| -> String {
-                        values.iter().fold(line.to_string(), |l, (_, v)| {
-                            let v = String::from_utf8_lossy(v);
-                            if v.is_empty() { l } else { l.replace(v.as_ref(), "***") }
-                        })
-                    };
+                    let secret_files = secret_mounts.clone();
+                    let redact = redactor(&values);
                     let started = Instant::now();
                     let progress = &mut *ctx.progress;
                     let mut log = |line: &str| {
@@ -492,13 +503,18 @@ pub fn run_steps(
                         },
                         network: *network,
                         cache_mounts: mounts,
-                        secrets: secret_mounts,
+                        secrets: secret_mounts.clone(),
                         timeout,
                         run_dir: run.join("run"),
                         log: &mut log,
                     };
                     let skip = mount_points(&step_run);
-                    let outcome = run_step(step_run)?;
+                    let outcome = run_step(step_run);
+                    // A secret lives on the host only while its step runs.
+                    for (file, _) in &secret_files {
+                        let _ = std::fs::remove_file(file);
+                    }
+                    let outcome = outcome?;
                     drop(held);
                     if !outcome.status.success() {
                         (ctx.progress)(Progress::Step {
@@ -623,6 +639,26 @@ fn input<'a>(
     }
 }
 
+/// Replaces each secret value in a log line with `***`: the whole value and, for values that
+/// span lines or end in a newline, each of their lines (best effort, spec §5.4).
+pub fn redactor(values: &[(String, Vec<u8>)]) -> impl Fn(&str) -> String + '_ {
+    let mut needles: Vec<String> = Vec::new();
+    for (_, v) in values {
+        let v = String::from_utf8_lossy(v);
+        needles.push(v.to_string());
+        needles.extend(v.lines().map(|l| l.trim_end_matches('\r').to_string()));
+    }
+    needles.retain(|n| !n.trim().is_empty());
+    // Longer values first, so a line inside a longer value does not break it up.
+    needles.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    needles.dedup();
+    move |line: &str| {
+        needles
+            .iter()
+            .fold(line.to_string(), |l, n| l.replace(n.as_str(), "***"))
+    }
+}
+
 fn cache_err(e: potter_cache::CacheError) -> BuildError {
     BuildError::Infra(format!("the cache: {e}"))
 }
@@ -721,6 +757,22 @@ mod tests {
         let err = run_steps(&mut ctx, "app:run", &chain, dir.path(), crate::stopgap::Role::Run).unwrap_err();
         assert_eq!(err.exit_code(), 2, "{err}");
         assert!(err.to_string().contains("stage"), "{err}");
+    }
+
+    #[test]
+    fn redaction_covers_trailing_newlines_and_every_line_of_a_secret() {
+        let values = vec![
+            ("tok".to_string(), b"abc123\n".to_vec()),
+            (
+                "pem".to_string(),
+                b"-----BEGIN KEY-----\r\nMIIsecret\n-----END KEY-----\n".to_vec(),
+            ),
+        ];
+        let r = redactor(&values);
+        assert_eq!(r("token=abc123"), "token=***");
+        assert_eq!(r("MIIsecret"), "***");
+        assert_eq!(r("-----BEGIN KEY-----"), "***");
+        assert_eq!(r("nothing here"), "nothing here");
     }
 
     #[test]
