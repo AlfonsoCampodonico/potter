@@ -28,3 +28,7 @@ zstd = "0.14.0"
 [dev-dependencies]
 filetime = "0.2.26"
 tempfile = "3.27.0"
+
+[features]
+# The scripted fake build VM, for other crates' tests.
+testing = []
