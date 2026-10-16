@@ -1,6 +1,6 @@
 # potter plan format (`potter.plan/v1`)
 
-A plan is what `potter plan --json` prints and what later milestones execute. The JSON Schema is
+A plan is what `potter plan --json` prints and what `potter build` executes. The JSON Schema is
 [`docs/schema/potter.plan.v1.json`](schema/potter.plan.v1.json), generated from the Rust types and
 checked in CI.
 
@@ -36,7 +36,7 @@ checked in CI.
   - `max_layers?`: the layer budget, 3-128. When it's absent the budget is 10, and the key is left
     out of the canonical form, so the hash doesn't change. See [layer-budget.md](layer-budget.md).
 
-## potter.toml (P1a)
+## potter.toml
 
 | Key | Meaning |
 |---|---|
@@ -45,7 +45,8 @@ checked in CI.
 | `[target.<name>.php]` `nginx_conf`, `fpm_pool`, `octane_server`, `port` | Replace the generated configs (repo-relative files); pick the Octane server; port alias. |
 | `[target.<name>.node]` `package_manager` | `npm`, `pnpm`, `yarn` or `bun`; its lockfile must exist. |
 | `[target.<name>.python]` `package_manager`; `[target.<name>.python.django]` `collectstatic` | `uv`, `poetry`, `pipenv` or `pip` (its lockfile must exist); turn Django's `collectstatic` step off. |
-| `[target.<name>.steps.<step>]` `run`, `inputs`, `skip`, `after`, `network`, `cache` | Override a detected step; with `after`, insert a new one. |
+| `[target.<name>.steps.<step>]` `run`, `inputs`, `skip`, `after`, `network`, `cache`, `secrets` | Override a detected step; with `after`, insert a new one. `cache` ids mount at `/cache/<id>`; `secrets` ids (from `potter build --secret`) mount read-only at `/run/secrets/<id>`. |
+| `[target.<name>.steps.<step>]` `copy = { from, paths, dest, owner?, mode? }` | Instead of `run` (explicit plans): copy paths out of another target's build, with the placement rules of `COPY --from`. |
 | `[target.<name>.process.<process>]` `cmd` | Replace a process (drops its services). |
 | `[target.<name>.build]` `commands` | Appended build steps `user-build-<n>`. |
 | `[target.<name>.deploy]` `commands` | A `deploy` process the platform runs once before rollout. |
@@ -66,7 +67,7 @@ A chain's root key is `SHA-256("potter.cache/v1/base" ‖ len ‖ base manifest 
 2. the step hash (the JCS of the step without `name` and `timeout_secs`);
 3. the inputs digest (an `inputs` step's layer, `sha256:…`, else empty);
 4. the SHA-256 of the JCS of the effective environment when the step runs (the base image's `Env`, then `meta` steps, then the step's own `env`);
-5. the secrets HMAC (empty until secrets are supported);
+5. the secrets HMAC (empty when the step mounts no secrets; see below);
 6. the platform (`linux/arm64`);
 7. the executor class (`ns` or `vm`);
 8. the potter major version (`1`).
@@ -127,4 +128,6 @@ Each is an OCI image manifest with `subject` set to the image, an empty config (
 
 ## Exit codes
 
-0 success · 2 usage, config, plan or detection error (including a missing path) · 4 other I/O errors.
+`potter plan` and `potter detect`: 0 success · 2 usage, config, plan or detection error (including a
+missing path) · 4 other I/O errors. `potter build` and `potter verify` also use 1 and 3; see the
+[README](../README.md#exit-codes).
