@@ -97,7 +97,7 @@ When the stack has `n` layers, the base has `b` of them, and the budget is `N`:
 potter doesn't merge anything itself. It uses kiln's squash in `kiln_image::convert_resolved`.
 
 **What kiln does on its own** (verified in `kiln-image/src/convert.rs`, pinned by
-`kiln/crates/kiln-image/tests/squash.rs` on kiln's `layer-budget` branch):
+`kiln/crates/kiln-image/tests/squash.rs`, on kiln's main since c9da031):
 - **Which layers:** with `n > max_layers`, kiln merges exactly the bottom `n - max_layers + 1`,
   leaving `max_layers` layers. That's the minimum, so the layers it merges depend on how many layers
   the image has: one more step changes the merge.
@@ -114,6 +114,13 @@ potter doesn't merge anything itself. It uses kiln's squash in `kiln_image::conv
 **How potter steers it.** potter passes kiln a `max_layers` of `n - k + 1`, which makes kiln merge
 exactly the `k` layers the policy chose. potter then checks that kiln merged `k` layers, and refuses
 the image (exit 4) if a future kiln merges otherwise. The policy is `potter_exec::assemble::layer_plan`.
+
+**Every executor.** The namespace executor and the VM executor (P4) differ only in where a step runs
+and how its layer is sealed. Both hand their chain's layers to the same assembly,
+`assemble::build_target`, which applies the budget, so an image is merged the same way whichever
+executor built its steps. The fake-backend test
+`vm::chain_tests::a_vm_image_is_assembled_within_its_layer_budget_like_an_ns_one` pins this for
+the VM path. (`--executor vm` is still refused by the CLI until kiln M3e lands.)
 
 ### What this buys
 
@@ -198,7 +205,7 @@ What the numbers show:
   again, so it costs at least as much as a flat merge and stores the base twice.
 - **A per-VMM default.** potter doesn't know where an image will run, so the default stays 10 and the
   warning is advisory. `kiln run` is what refuses an image that doesn't fit.
-- **The build-time VM executor (P4).** Its device budget for build steps (spec §9.3) is separate and
-  unchanged.
-- **kiln's pinned rev.** It's unchanged: the policy needs nothing new from kiln. kiln's `layer-budget`
-  branch only adds tests that pin the squash behaviour potter relies on, and README notes.
+- **The build-time VM's device budget (P4).** The device budget of the VM that runs build steps
+  (spec §9.3) is separate and unchanged: it bounds the build VM's disks, not the image's layers.
+- **kiln's pinned rev.** It's unchanged: the policy needs nothing new from kiln. kiln's main since
+  c9da031 only adds tests that pin the squash behaviour potter relies on, and README notes.
