@@ -10,6 +10,7 @@ use potter_plan::*;
 use super::backend::BuildBackend;
 use super::backend::Secret;
 use super::fake::{FakeBackend, Lie, Script, diff_tar};
+use crate::assemble::{LayerReport, build_target};
 use crate::chain::{BuildCtx, ChainState, Progress, run_chain};
 use crate::error::BuildError;
 use crate::sandboxed::SandboxCtx;
@@ -113,6 +114,17 @@ fn chain(
     backend: Option<&dyn BuildBackend>,
     secrets: &BTreeMap<String, Vec<u8>>,
 ) -> (Result<ChainState, BuildError>, Vec<String>) {
+    with_ctx(w, executor, backend, secrets, |ctx| run_chain(ctx, t, w.dir.path()))
+}
+
+/// Calls `f` with a build context for `executor` (and `backend` for vm), collecting the log lines.
+fn with_ctx<R>(
+    w: &World,
+    executor: ExecutorClass,
+    backend: Option<&dyn BuildBackend>,
+    secrets: &BTreeMap<String, Vec<u8>>,
+    f: impl FnOnce(&mut BuildCtx) -> R,
+) -> (R, Vec<String>) {
     let tenant = Tenant::local();
     let index: Index = w.home.index(&tenant).unwrap();
     let sandbox = SandboxCtx {
@@ -143,7 +155,7 @@ fn chain(
         deps: BTreeMap::new(),
         progress: &mut progress,
     };
-    let r = run_chain(&mut ctx, t, w.dir.path());
+    let r = f(&mut ctx);
     drop(ctx);
     (r, lines)
 }
@@ -395,6 +407,49 @@ fn a_full_device_budget_restarts_the_vm_and_builds_the_same_layers() {
     assert!(f.steps[1].lowers_added.is_empty());
     let ids = |s: &ChainState| s.layers.iter().map(|l| l.diff_id.clone()).collect::<Vec<_>>();
     assert_eq!(ids(&s), ids(&expected));
+}
+
+#[test]
+fn a_vm_image_is_assembled_within_its_layer_budget_like_an_ns_one() {
+    let steps = vec![run("a"), run("b"), run("c"), run("d")];
+    let script = || {
+        ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| Script::files(&[(&format!("app/{n}"), "1")]))
+            .collect::<Vec<_>>()
+    };
+    let assemble = |budget: Option<u32>| {
+        let w = world();
+        let mut t = target(&w, steps.clone());
+        t.image.max_layers = budget;
+        let fake = FakeBackend::new(31, script());
+        let (built, _) = with_ctx(&w, ExecutorClass::Vm, Some(&fake), &BTreeMap::new(), |ctx| {
+            build_target(ctx, &t, w.dir.path(), &[])
+        });
+        built.unwrap().layers
+    };
+    // The base's one layer and four steps: within the default budget of 10, nothing merges.
+    assert_eq!(
+        assemble(None),
+        LayerReport {
+            max_layers: 10,
+            base: 1,
+            stacked: 5,
+            composite: 0,
+            kiln: 5
+        }
+    );
+    // Over a budget of 3, the shared assembly merges the base and the two lowest steps.
+    assert_eq!(
+        assemble(Some(3)),
+        LayerReport {
+            max_layers: 3,
+            base: 1,
+            stacked: 5,
+            composite: 3,
+            kiln: 3
+        }
+    );
 }
 
 #[test]

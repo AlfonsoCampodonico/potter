@@ -13,7 +13,7 @@ use kiln_oci::{
 use kiln_store::{Digest, Store};
 use potter_plan::{Chain, GeneratedFile, Image, Process, Target};
 
-use crate::chain::{BuildCtx, LayerRef, StepRecord, run_chain, run_steps};
+use crate::chain::{BuildCtx, LayerRef, Progress, StepRecord, run_chain, run_steps};
 use crate::error::{BuildError, io};
 use crate::merge::{ExportSpec, export_layer};
 use crate::tarball::{Meta, TarWriter, epoch};
@@ -33,6 +33,105 @@ pub struct Built {
     pub bases: Vec<BaseRecord>,
     /// The OCI image manifest's digest (`digest` is the kiln image's).
     pub manifest_digest: Digest,
+    /// How its layers were fitted into the budget.
+    pub layers: LayerReport,
+}
+
+/// The image's layers against its budget (`docs/layer-budget.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerReport {
+    /// The budget it was built with.
+    pub max_layers: u32,
+    /// The OCI base's layers at the bottom of the stack.
+    pub base: usize,
+    /// The layers potter stacked: the base's, then one per layer-producing step, export and files.
+    pub stacked: usize,
+    /// The bottom layers merged into one composite (0: none).
+    pub composite: usize,
+    /// The kiln image's layers.
+    pub kiln: usize,
+}
+
+/// How `stacked` layers, the bottom `base` of them the OCI base's, fit into `budget`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerPlan {
+    /// The bottom layers to merge into one composite (0: none).
+    pub composite: usize,
+    /// The `max_layers` that makes kiln merge exactly those: kiln squashes the bottom
+    /// `n - max_layers + 1` of `n` layers when `n > max_layers` (spec §6.4 of kiln).
+    pub kiln_max_layers: usize,
+}
+
+impl LayerPlan {
+    /// The layers left: the composite counts as one.
+    pub fn layers(&self, stacked: usize) -> usize {
+        if self.composite == 0 {
+            stacked
+        } else {
+            stacked - self.composite + 1
+        }
+    }
+}
+
+/// The composite policy: nothing is merged while the layers fit. Otherwise the whole base is
+/// merged first, so the composite depends on the base alone and every image on that base shares
+/// it (kiln caches it by the ordered erofs digests it merges); only when that is not enough are
+/// the next-lowest step layers merged into it, bottom-up. The top layers, the ones rebuilt most,
+/// are always kept.
+pub fn layer_plan(stacked: usize, base: usize, budget: usize) -> LayerPlan {
+    let budget = budget.max(1);
+    if stacked <= budget {
+        return LayerPlan {
+            composite: 0,
+            kiln_max_layers: budget,
+        };
+    }
+    let needed = stacked - budget + 1;
+    let composite = needed.max(base).min(stacked);
+    LayerPlan {
+        composite,
+        kiln_max_layers: stacked - composite + 1,
+    }
+}
+
+/// Converts the OCI image `resolved` into a kiln image within `max_layers`, following
+/// [`layer_plan`]; `base` is how many of its layers are the OCI base's.
+pub fn convert_within_budget(
+    store: &Store,
+    resolved: ResolvedImage,
+    reference: &str,
+    base: usize,
+    max_layers: u32,
+) -> Result<(Digest, LayerReport), String> {
+    let stacked = resolved.manifest.layers.len();
+    let plan = layer_plan(stacked, base, max_layers as usize);
+    let opts = ConvertOptions {
+        max_layers: plan.kiln_max_layers,
+        ..ConvertOptions::default()
+    };
+    let output =
+        convert_resolved(store, &[resolved], Some(reference), &opts, &StoredLayers).map_err(|e| e.to_string())?;
+    let converted = &output.images[0];
+    // A kiln whose squash rule changed would silently break the policy: refuse instead.
+    if converted.squashed != plan.composite || converted.layers.len() != plan.layers(stacked) {
+        return Err(format!(
+            "kiln merged {} of {stacked} layers into {}; the layer budget expected {} into {}",
+            converted.squashed,
+            converted.layers.len(),
+            plan.composite,
+            plan.layers(stacked)
+        ));
+    }
+    Ok((
+        output.digest,
+        LayerReport {
+            max_layers,
+            base,
+            stacked,
+            composite: plan.composite,
+            kiln: converted.layers.len(),
+        },
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +264,8 @@ pub fn build_target(
     // the build chain itself.
     let mut steps = Vec::new();
     let mut bases = Vec::new();
+    // The OCI base's layers, at the bottom of the image: the composite merges them first.
+    let mut base_layers = chain.base.layers().len();
     let (base_env, mut layers): (BTreeMap<String, String>, Vec<LayerRef>) = if image.export.is_empty() {
         if image.base != target.build.base || !image.runtime_steps.is_empty() {
             return Err(BuildError::Plan(format!(
@@ -186,6 +287,7 @@ pub fn build_target(
             crate::stopgap::Role::Run,
         )?;
         let mut layers = run.layers.clone();
+        base_layers = run.base.layers().len();
         steps.extend(run.records.iter().cloned());
         bases.push(BaseRecord {
             reference: run.base_ref.clone(),
@@ -276,27 +378,26 @@ pub fn build_target(
         config,
         ref_name: None,
     };
-    let output = convert_resolved(
-        ctx.store,
-        &[resolved],
-        Some(&tags[0]),
-        &ConvertOptions::default(),
-        &StoredLayers,
-    )
-    .map_err(|e| infra(&e))?;
+    let max_layers = image.layer_budget();
+    if let Some(w) = potter_plan::budget::device_warning(max_layers) {
+        (ctx.progress)(Progress::Warning(format!("target {}: {w}", target.name)));
+    }
+    let (digest, layer_report) =
+        convert_within_budget(ctx.store, resolved, &tags[0], base_layers, max_layers).map_err(|e| infra(&e))?;
     let _lock = ctx.store.lock_shared().map_err(|e| infra(&e))?;
     for t in &tags {
-        ctx.store.set_ref(t, &output.digest).map_err(|e| infra(&e))?;
+        ctx.store.set_ref(t, &digest).map_err(|e| infra(&e))?;
     }
     Ok(Built {
         target: target.name.clone(),
         reference: tags[0].clone(),
-        digest: output.digest,
+        digest,
         executed: chain.executed,
         cached: chain.cached,
         steps,
         bases,
         manifest_digest,
+        layers: layer_report,
     })
 }
 

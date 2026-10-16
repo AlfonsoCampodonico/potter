@@ -628,6 +628,13 @@ mod tests {
                 digest: Digest::of(b"base"),
             }],
             manifest_digest: manifest,
+            layers: crate::assemble::LayerReport {
+                max_layers: 10,
+                base: 1,
+                stacked: 3,
+                composite: 0,
+                kiln: 3,
+            },
         }
     }
 
