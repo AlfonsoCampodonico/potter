@@ -128,6 +128,60 @@ fn repo_text_in_errors_is_sanitised() {
 }
 
 #[test]
+fn max_layers_enters_the_plan_and_wins_over_potter_toml() {
+    let plan = |args: &[&str], dir: &Path| -> serde_json::Value {
+        let out = potter()
+            .args(["plan", "--json"])
+            .args(args)
+            .arg(dir)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&out).unwrap()
+    };
+    let budget = |v: &serde_json::Value| v["targets"][0]["image"]["max_layers"].clone();
+    // Unset: absent, so plans without a budget keep their hash.
+    assert_eq!(budget(&plan(&[], &fixture("nestjs"))), serde_json::Value::Null);
+    assert_eq!(budget(&plan(&["--max-layers", "24"], &fixture("nestjs"))), 24);
+
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("potter.toml"),
+        "[target.app]\nprovider = \"none\"\n[target.app.base]\noci = \"debian:13\"\n\
+         [target.app.process.web]\ncmd = [\"/bin/x\"]\n[target.app.image]\nmax_layers = 16\n",
+    )
+    .unwrap();
+    assert_eq!(budget(&plan(&[], d.path())), 16);
+    assert_eq!(budget(&plan(&["--max-layers", "12"], d.path())), 12);
+    potter()
+        .args(["plan"])
+        .arg(d.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("max layers: 16"));
+}
+
+#[test]
+fn max_layers_out_of_range_is_a_usage_error() {
+    for bad in ["2", "129", "0", "-1", "ten"] {
+        let flag = format!("--max-layers={bad}");
+        potter()
+            .args(["plan", &flag])
+            .arg(fixture("nestjs"))
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("--max-layers"));
+        potter()
+            .args(["build", "--executor", "ns", &flag])
+            .arg(fixture("nestjs"))
+            .assert()
+            .code(2);
+    }
+}
+
+#[test]
 fn build_never_picks_the_namespace_executor_by_itself() {
     potter()
         .args(["build"])

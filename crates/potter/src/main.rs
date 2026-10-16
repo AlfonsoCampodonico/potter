@@ -34,6 +34,9 @@ enum Cmd {
         /// Show where each decision came from
         #[arg(long)]
         explain: bool,
+        /// The most layers each image may have (3-128), over potter.toml's `max_layers`
+        #[arg(long, value_parser = max_layers_arg)]
+        max_layers: Option<u32>,
     },
     /// Build images into the kiln store ($KILN_HOME)
     Build {
@@ -85,6 +88,10 @@ enum Cmd {
         /// The tenant's cache key: 32 bytes, raw or as 64 hex characters (default: kept in $POTTER_HOME)
         #[arg(long)]
         tenant_key_file: Option<PathBuf>,
+        /// The most layers each image may have (3-128; default potter.toml's `max_layers`, else 10).
+        /// Above it the bottom layers merge into one composite, the base's first
+        #[arg(long, value_parser = max_layers_arg)]
+        max_layers: Option<u32>,
     },
     /// Check a pushed image's SBOM, provenance and signature against a public key (spec §17)
     Verify {
@@ -154,6 +161,25 @@ enum Executor {
     Ns,
 }
 
+/// `--max-layers`: a budget potter-plan accepts.
+fn max_layers_arg(s: &str) -> Result<u32, String> {
+    let n: u32 = s.parse().map_err(|_| format!("expected a number, not {s:?}"))?;
+    match potter_plan::budget::check_max_layers(n) {
+        Some(why) => Err(why),
+        None => Ok(n),
+    }
+}
+
+/// `--max-layers` wins over every target's potter.toml value, and enters the plan (and so the
+/// target hash the image records).
+fn set_max_layers(plan: &mut potter_plan::Plan, max_layers: Option<u32>) {
+    if let Some(n) = max_layers {
+        for t in &mut plan.targets {
+            t.image.max_layers = Some(n);
+        }
+    }
+}
+
 fn fail(message: &str, code: u8) -> ExitCode {
     eprintln!("error: {}", sanitize(message));
     ExitCode::from(code)
@@ -166,7 +192,8 @@ fn main() -> ExitCode {
             target,
             json,
             explain,
-        } => plan(&path, target.as_deref(), json, explain),
+            max_layers,
+        } => plan(&path, target.as_deref(), json, explain, max_layers),
         Cmd::Detect { path } => detect(&path),
         Cmd::Verify {
             image,
@@ -194,6 +221,7 @@ fn main() -> ExitCode {
             builder_id,
             source_revision,
             tenant_key_file,
+            max_layers,
         } => {
             let publish = match Publish::check(output.as_deref(), sign_key, builder_id, source_revision, &target) {
                 Ok(p) => p,
@@ -218,6 +246,7 @@ fn main() -> ExitCode {
                 affected.as_deref(),
                 publish.as_ref(),
                 tenant_key,
+                max_layers,
             )
         }
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
@@ -525,6 +554,7 @@ fn build(
     affected_ref: Option<&str>,
     publish: Option<&Publish>,
     tenant_key_flag: Option<[u8; 32]>,
+    max_layers: Option<u32>,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
@@ -547,11 +577,12 @@ fn build(
     if !tags.is_empty() && only.len() != 1 {
         return fail("--tag needs exactly one --target", 2);
     }
-    let planned = match potter_config::plan_repo(path, None) {
+    let mut planned = match potter_config::plan_repo(path, None) {
         Ok(p) => p,
         Err(e) => return fail(&e.to_string(), if e.is_infrastructure() { 4 } else { 2 }),
     };
-    // With --affected, the selection shrinks to the targets that changed since the ref.
+    // With --affected, the selection shrinks to the targets that changed since the ref. Both
+    // sides are compared without --max-layers, which applies to every target alike.
     let mut selected: Vec<String> = only.to_vec();
     if let Some(r) = affected_ref {
         let changed = match changed_since(path, r, &planned.plan) {
@@ -577,6 +608,7 @@ fn build(
             return ExitCode::SUCCESS;
         }
     }
+    set_max_layers(&mut planned.plan, max_layers);
     // Every selected target, after the targets it copies from (spec §10).
     let order = match potter_exec::graph::order(&planned.plan.targets, &selected) {
         Ok(o) => o,
@@ -737,14 +769,30 @@ fn build(
                 "digest": b.digest.to_string(),
                 "executed": b.executed,
                 "cached": b.cached,
+                "layers": b.layers.kiln,
+                "max_layers": b.layers.max_layers,
+                "composite": b.layers.composite,
             })),
-            Ok(b) => println!(
-                "{} {} (executed {}, cached {})",
-                sanitize(&b.reference),
-                b.digest,
-                b.executed,
-                b.cached
-            ),
+            Ok(b) => {
+                let l = &b.layers;
+                if l.composite > 0 {
+                    eprintln!(
+                        "[{}] layers: {} over the budget of {}: the bottom {} (the base's {}) merged into one composite",
+                        sanitize(&b.target),
+                        l.stacked,
+                        l.max_layers,
+                        l.composite,
+                        l.base
+                    );
+                }
+                println!(
+                    "{} {} (executed {}, cached {})",
+                    sanitize(&b.reference),
+                    b.digest,
+                    b.executed,
+                    b.cached
+                )
+            }
             Err(e) => {
                 if json {
                     let class = if e.exit_code() == 3 { "hostile" } else { "error" };
@@ -757,11 +805,12 @@ fn build(
     ExitCode::SUCCESS
 }
 
-fn plan(path: &Path, target: Option<&str>, json: bool, explain: bool) -> ExitCode {
-    let planned = match potter_config::plan_repo(path, target) {
+fn plan(path: &Path, target: Option<&str>, json: bool, explain: bool, max_layers: Option<u32>) -> ExitCode {
+    let mut planned = match potter_config::plan_repo(path, target) {
         Ok(p) => p,
         Err(e) => return fail(&e.to_string(), if e.is_infrastructure() { 4 } else { 2 }),
     };
+    set_max_layers(&mut planned.plan, max_layers);
     if json {
         return match potter_plan::canonical_json(&planned.plan) {
             Ok(s) => {

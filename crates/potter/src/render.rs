@@ -58,6 +58,9 @@ pub fn plan(p: &PlannedRepo) -> String {
         if let Some(port) = t.image.config.port {
             writeln!(s, "  port: {port}").unwrap();
         }
+        if let Some(n) = t.image.max_layers {
+            writeln!(s, "  max layers: {n}").unwrap();
+        }
         writeln!(s, "  processes:").unwrap();
         for (name, pr) in &t.image.processes {
             let services = t
