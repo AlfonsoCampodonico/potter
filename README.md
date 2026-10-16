@@ -4,9 +4,9 @@ Build [kiln](../kiln) microVM images from source. potter detects PHP/Laravel, No
 Python, Ruby, Go and Rust projects, or reads an explicit `potter.toml`, and produces a canonical build plan.
 `potter build` runs the plan and writes kiln images to `$KILN_HOME`, caching every step by its inputs.
 
-    potter plan [PATH] [--target T] [--json | --explain]
+    potter plan [PATH] [--target T] [--json | --explain] [--max-layers N]
     potter detect [PATH]
-    potter build [PATH] --executor ns [--target T]... [--tenant ID] [--no-cache] [--tag REF]
+    potter build [PATH] --executor ns [--target T]... [--tenant ID] [--no-cache] [--tag REF] [--max-layers N]
 
 Detection only parses files; it never runs your code. See `docs/plan-format.md` and the design
 spec in `docs/superpowers/specs/`.
@@ -22,8 +22,19 @@ spec in `docs/superpowers/specs/`.
 Each step's diff is sealed into a layer and cached under a key of exactly what it declared (spec §8).
 Source files no step includes are invisible to every step, and changing them rebuilds nothing.
 
-The image is the run base, the `export` paths and the generated files. It is converted by kiln and tagged
+The image is the run base, the `export` paths and the generated files. It's converted by kiln and tagged
 `potter/<target>:latest`, so `kiln run potter/app:latest` runs it.
+
+**Layer budget.** Every layer is a virtio-blk disk in the microVM, so an image has at most `max_layers`
+layers: 10 by default, set with `[target.<name>.image] max_layers` or `--max-layers` (3-128).
+- Over the budget, the base image's layers merge into one composite. kiln caches it by its contents,
+  so every image on that base shares it.
+- Only if that isn't enough do the lowest step layers join the composite. The top layers always
+  stay their own.
+- The practical ceiling is the VMM's devices: 13 layers for Firecracker on x86_64 with a network
+  (potter warns above it), 26 for Cloud Hypervisor, 88 for Firecracker on aarch64.
+
+See [docs/layer-budget.md](docs/layer-budget.md).
 
 Requirements (Linux only):
 - `newuidmap`/`newgidmap` (`uidmap`);

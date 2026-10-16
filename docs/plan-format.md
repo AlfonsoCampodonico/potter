@@ -32,7 +32,9 @@ checked in CI.
   - `files[]` `{path, content, mode}`;
   - `config` `{env, workdir, user, labels, port?, stop_signal?}`;
   - `processes` `{name: {command[], workdir?, env}}`;
-  - `services` `{process: [{name, command[], ready: {unix: path} | {tcp: port} | "none", stop_signal}]}`.
+  - `services` `{process: [{name, command[], ready: {unix: path} | {tcp: port} | "none", stop_signal}]}`;
+  - `max_layers?`: the layer budget, 3-128. When it's absent the budget is 10, and the key is left
+    out of the canonical form, so the hash doesn't change. See [layer-budget.md](layer-budget.md).
 
 ## potter.toml (P1a)
 
@@ -49,6 +51,7 @@ checked in CI.
 | `[target.<name>.deploy]` `commands` | A `deploy` process the platform runs once before rollout. |
 | `[target.<name>]` `export` | Extra paths in the image: relative to the target root (copied under the image workdir, e.g. `/out/data` for Go/Rust) or absolute. Explicit plans default to `/app`. |
 | `[target.<name>.base]` `catalog`/`oci`, `run_catalog`/`run_oci` | Explicit plans only. |
+| `[target.<name>.image]` `max_layers` | The most layers the image may have: 3-128, default 10. Over it, the bottom layers merge into one composite, the base's first. `potter build --max-layers` overrides it for every target. Above 13 (Firecracker on x86_64), potter warns. See [layer-budget.md](layer-budget.md). |
 | `discover` (top level) | `false` turns off zero-config monorepo targets (directories with their own manifest when the root has none). Declared `[target.*]` entries otherwise merge over discovered ones. |
 | `[apt]` `build`, `runtime`, `snapshot` | Debian packages from a pinned snapshot.debian.org date. |
 
@@ -97,7 +100,7 @@ One JSON object per line on stdout, with `event` set to one of:
 | `log` | `target`, `step`, `line` | One line of step output, unmodified except secret redaction. |
 | `warning` | `message` | |
 | `unchanged` | `target` | `--affected` skipped the target. |
-| `target_built` | `target`, `reference`, `digest`, `executed`, `cached` | |
+| `target_built` | `target`, `reference`, `digest`, `executed`, `cached`, `layers`, `max_layers`, `composite` | `layers` is the kiln image's layer count; `composite` is how many bottom layers were merged into one (0: none). |
 | `error`, `hostile` | `target`, `message`, `exit` | The build failed. `hostile` is a sandbox violation (exit 3). |
 | `published` | `target`, `reference`, `digest`, `referrers` | `--output` pushed the image (`digest` is its OCI manifest) and attached the attestations. |
 
