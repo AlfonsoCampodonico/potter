@@ -343,6 +343,9 @@ impl Validator {
                 self.issue(&format!("{at}.files[{i}].path"), "duplicate generated file");
             }
         }
+        if let Some(why) = img.max_layers.and_then(crate::budget::check_max_layers) {
+            self.issue(&format!("{at}.max_layers"), why);
+        }
         self.env(&format!("{at}.config.env"), &img.config.env);
         self.abs(&format!("{at}.config.workdir"), &img.config.workdir);
         self.user(&format!("{at}.config.user"), &img.config.user);
@@ -556,6 +559,15 @@ mod tests {
         let mut p = sample_plan();
         p.targets[0].image.files[0].mode = 0o17777;
         assert!(has(&issues(&p), "targets[0].image.files[0].mode"));
+    }
+
+    #[test]
+    fn max_layers_bounds() {
+        for (n, ok) in [(2, false), (3, true), (10, true), (128, true), (129, false)] {
+            let mut p = sample_plan();
+            p.targets[0].image.max_layers = Some(n);
+            assert_eq!(!has(&issues(&p), "targets[0].image.max_layers"), ok, "max_layers {n}");
+        }
     }
 
     #[test]

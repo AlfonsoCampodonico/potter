@@ -66,6 +66,7 @@ pub(crate) fn sample_plan() -> Plan {
                     stop_signal: "SIGQUIT".into(),
                 }],
             )]),
+            max_layers: None,
         },
     }])
 }

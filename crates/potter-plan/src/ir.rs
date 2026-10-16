@@ -245,6 +245,17 @@ pub struct Image {
     pub processes: BTreeMap<String, Process>,
     #[serde(default)]
     pub services: BTreeMap<String, Vec<Service>>,
+    /// The most erofs layers the image may have (3-128; absent: 10). Above it, the bottom
+    /// layers are merged into one composite, the base's first (`docs/layer-budget.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_layers: Option<u32>,
+}
+
+impl Image {
+    /// The layer budget in effect.
+    pub fn layer_budget(&self) -> u32 {
+        self.max_layers.unwrap_or(crate::budget::DEFAULT_MAX_LAYERS)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

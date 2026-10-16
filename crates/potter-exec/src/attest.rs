@@ -597,6 +597,7 @@ mod tests {
                 config: ImageConfig::new("/app", "0:0"),
                 processes: Default::default(),
                 services: Default::default(),
+                max_layers: None,
             },
         }
     }

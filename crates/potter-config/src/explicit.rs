@@ -9,7 +9,7 @@ use potter_plan::{
 
 use crate::error::ConfigError;
 use crate::file::{AptConfig, TargetConfig};
-use crate::merge::{apply_apt, apply_commands, export_entry, inputs_step, run_step};
+use crate::merge::{apply_apt, apply_commands, apply_image, export_entry, inputs_step, run_step};
 
 fn parse_ref(s: &str) -> CatalogRef {
     match s.split_once('@') {
@@ -145,9 +145,11 @@ pub fn explicit_target(
             config,
             processes,
             services: BTreeMap::new(),
+            max_layers: None,
         },
     };
     apply_commands(&mut target, &prefix, tc, &mut decisions);
     apply_apt(&mut target, apt, &mut decisions);
+    apply_image(&mut target, &prefix, tc, &mut decisions)?;
     Ok((target, decisions))
 }

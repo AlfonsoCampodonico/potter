@@ -267,6 +267,15 @@
             "$ref": "#/$defs/GeneratedFile"
           }
         },
+        "max_layers": {
+          "description": "The most erofs layers the image may have (3-128; absent: 10). Above it, the bottom\nlayers are merged into one composite, the base's first (`docs/layer-budget.md`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "processes": {
           "type": "object",
           "additionalProperties": {

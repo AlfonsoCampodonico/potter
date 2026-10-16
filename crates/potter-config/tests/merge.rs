@@ -256,6 +256,61 @@ fn override_errors() {
 }
 
 #[test]
+fn the_image_layer_budget() {
+    let php = [
+        ("composer.json", r#"{"require":{}}"#),
+        ("composer.lock", r#"{"packages":[]}"#),
+    ];
+    // Unset: absent from the plan, so the default (10) applies.
+    let d = temp(&php);
+    let t = &plan_repo(d.path(), None).unwrap().plan.targets[0];
+    assert_eq!((t.image.max_layers, t.image.layer_budget()), (None, 10));
+
+    // Detected targets.
+    let d = temp(&[php[0], php[1], ("potter.toml", "[target.app.image]\nmax_layers = 24\n")]);
+    let p = plan_repo(d.path(), None).unwrap();
+    assert_eq!(p.plan.targets[0].image.max_layers, Some(24));
+    assert!(p.decisions[0].1.iter().any(|d| d.field == "image.max_layers"
+        && d.value == "24"
+        && d.origin
+            == Origin::Config {
+                key: "target.app.image.max_layers".into()
+            }));
+
+    // Explicit plans.
+    let explicit = "[target.x]\nprovider = \"none\"\n[target.x.base]\noci = \"debian:13\"\n\
+                    [target.x.process.web]\ncmd = [\"/bin/x\"]\n[target.x.image]\nmax_layers = 3\n";
+    let d = temp(&[("potter.toml", explicit)]);
+    assert_eq!(
+        plan_repo(d.path(), None).unwrap().plan.targets[0].image.max_layers,
+        Some(3)
+    );
+
+    // Out of range, either way.
+    for (n, files) in [
+        ("2", vec![php[0], php[1]]),
+        ("129", vec![php[0], php[1]]),
+        ("0", vec![]),
+    ] {
+        let toml = if files.is_empty() {
+            explicit.replace("max_layers = 3", &format!("max_layers = {n}"))
+        } else {
+            format!("[target.app.image]\nmax_layers = {n}\n")
+        };
+        let mut all = files.clone();
+        all.push(("potter.toml", &toml));
+        let d = temp(&all);
+        let err = plan_repo(d.path(), None).unwrap_err().to_string();
+        assert!(err.contains("image.max_layers") && err.contains("3-128"), "{n}: {err}");
+    }
+    // Not a number, or an unknown key in the table: refused by the schema.
+    for bad in ["max_layers = -1\n", "max_layers = \"20\"\n", "layers = 20\n"] {
+        let d = temp(&[php[0], php[1], ("potter.toml", &format!("[target.app.image]\n{bad}"))]);
+        assert!(plan_repo(d.path(), None).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn invalid_plans_from_config_are_caught() {
     let d = temp(&[
         ("composer.json", r#"{"require":{}}"#),

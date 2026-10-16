@@ -84,6 +84,25 @@ pub fn apply(
     apply_commands(target, &prefix, tc, decisions);
     apply_apt(target, apt, decisions);
     apply_exports(target, &prefix, tc, decisions)?;
+    apply_image(target, &prefix, tc, decisions)?;
+    Ok(())
+}
+
+/// `[target.<name>.image]`: the layer budget.
+pub(crate) fn apply_image(
+    target: &mut Target,
+    prefix: &str,
+    tc: &TargetConfig,
+    decisions: &mut Vec<Decision>,
+) -> Result<(), ConfigError> {
+    if let Some(n) = tc.image.max_layers {
+        let key = format!("{prefix}.image.max_layers");
+        if let Some(why) = potter_plan::budget::check_max_layers(n) {
+            return Err(ConfigError::invalid(key, why));
+        }
+        target.image.max_layers = Some(n);
+        decisions.push(Decision::config("image.max_layers", n.to_string(), key));
+    }
     Ok(())
 }
 

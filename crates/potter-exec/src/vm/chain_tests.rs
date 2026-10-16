@@ -100,6 +100,7 @@ fn target(w: &World, steps: Vec<Step>) -> Target {
             config: ImageConfig::new("/", "0:0"),
             processes: BTreeMap::new(),
             services: BTreeMap::new(),
+            max_layers: None,
         },
     }
 }

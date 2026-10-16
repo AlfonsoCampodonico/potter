@@ -162,6 +162,7 @@ impl Ctx {
                 config: potter_plan::ImageConfig::new("/", "0:0"),
                 processes: Default::default(),
                 services: Default::default(),
+                max_layers: None,
             },
         }
     }

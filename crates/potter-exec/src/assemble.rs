@@ -333,6 +333,7 @@ mod tests {
                 })
                 .collect(),
             services: BTreeMap::new(),
+            max_layers: None,
         }
     }
 

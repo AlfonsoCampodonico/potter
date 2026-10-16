@@ -186,6 +186,27 @@ mod tests {
     }
 
     #[test]
+    fn an_unset_layer_budget_is_absent_from_the_canonical_form() {
+        let plan = sample_plan();
+        let json = canonical_json(&plan).unwrap();
+        assert!(!json.contains("max_layers"), "plans without a budget hash as before");
+        let mut budgeted = plan.clone();
+        budgeted.targets[0].image.max_layers = Some(20);
+        assert!(canonical_json(&budgeted).unwrap().contains(r#""max_layers":20"#));
+        assert_ne!(
+            hash_of(&plan.targets[0]).unwrap(),
+            hash_of(&budgeted.targets[0]).unwrap(),
+            "the image changes, so the target's hash does"
+        );
+        // Step hashes (and so step cache keys) never see the image's budget.
+        let s = &plan.targets[0].build.steps[1];
+        assert_eq!(
+            step_hash(s).unwrap(),
+            step_hash(&budgeted.targets[0].build.steps[1]).unwrap()
+        );
+    }
+
+    #[test]
     fn digest_display() {
         let d = Sha256Digest::of(b"");
         assert_eq!(

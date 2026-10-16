@@ -52,6 +52,16 @@ pub struct TargetConfig {
     /// workdir) or absolute. Explicit plans default to `/app`; detected targets append to the
     /// detector's exports.
     pub export: Option<Vec<String>>,
+    #[serde(default)]
+    pub image: ImageTableConfig,
+}
+
+/// `[target.<name>.image]`: the built image itself.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageTableConfig {
+    /// The most layers the image may have (3-128, default 10); see `docs/layer-budget.md`.
+    pub max_layers: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

@@ -91,6 +91,7 @@ pub(crate) fn empty_image(run_layers: Vec<CatalogRef>, config: ImageConfig) -> I
         config,
         processes: BTreeMap::new(),
         services: BTreeMap::new(),
+        max_layers: None,
     }
 }
 

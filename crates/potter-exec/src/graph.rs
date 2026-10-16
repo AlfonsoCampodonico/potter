@@ -125,6 +125,7 @@ mod tests {
                 config: ImageConfig::new("/", "0:0"),
                 processes: BTreeMap::new(),
                 services: BTreeMap::new(),
+                max_layers: None,
             },
         }
     }

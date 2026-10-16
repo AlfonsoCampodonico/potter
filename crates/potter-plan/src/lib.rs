@@ -1,5 +1,6 @@
 //! potter's build plan IR (spec §5).
 
+pub mod budget;
 mod canon;
 mod error;
 mod explain;
