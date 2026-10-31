@@ -245,6 +245,35 @@ fn a_tenant_key_file_must_hold_32_bytes() {
 }
 
 #[test]
+fn key_generate_ed25519_writes_0600_key() {
+    let dir = tempfile::tempdir().unwrap();
+    potter()
+        .args(["key", "generate", "--ed25519"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let private = dir.path().join("catalog.key");
+    let pem = std::fs::read_to_string(&private).unwrap();
+    assert!(pem.starts_with("-----BEGIN PRIVATE KEY-----"), "{pem}");
+    assert!(
+        std::fs::read_to_string(dir.path().join("catalog.pub"))
+            .unwrap()
+            .contains("BEGIN PUBLIC KEY")
+    );
+    assert!(!dir.path().join("potter.key").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&private).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    potter()
+        .args(["key", "generate", "--ed25519"])
+        .arg(dir.path())
+        .assert()
+        .code(2);
+}
+
+#[test]
 fn key_generate_then_verify_a_published_image() {
     use kiln_oci::media::{OCI_CONFIG, OCI_MANIFEST};
     use kiln_oci::{Descriptor, ImageManifest, canonical_json};

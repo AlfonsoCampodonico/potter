@@ -158,7 +158,12 @@ enum Cmd {
 #[derive(Subcommand)]
 enum KeyCmd {
     /// Write a new P-256 signing key: <dir>/potter.key (0600) and <dir>/potter.pub
-    Generate { dir: PathBuf },
+    Generate {
+        dir: PathBuf,
+        /// Write an ed25519 catalog key instead: <dir>/catalog.key (0600) and <dir>/catalog.pub
+        #[arg(long)]
+        ed25519: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -230,8 +235,8 @@ fn main() -> ExitCode {
             expect_builder,
         } => verify(&image, &key, expect_tenant.as_deref(), expect_builder.as_deref()),
         Cmd::Key {
-            command: KeyCmd::Generate { dir },
-        } => key_generate(&dir),
+            command: KeyCmd::Generate { dir, ed25519 },
+        } => key_generate(&dir, ed25519),
         Cmd::Build {
             path,
             target,
@@ -422,10 +427,16 @@ fn read_tenant_key(path: &Path) -> Result<[u8; 32], (String, u8)> {
     Ok(k)
 }
 
-fn key_generate(dir: &Path) -> ExitCode {
+fn key_generate(dir: &Path, ed25519: bool) -> ExitCode {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let key = potter_supply::sign::SigningKey::generate();
+    let (private, public, names) = if ed25519 {
+        let (private, public) = potter_catalog::generate_pem();
+        (private, public, ("catalog.key", "catalog.pub"))
+    } else {
+        let key = potter_supply::sign::SigningKey::generate();
+        (key.to_pem(), key.verifying_key().to_pem(), ("potter.key", "potter.pub"))
+    };
     let write = |name: &str, mode: u32, text: &str| -> Result<(), (String, u8)> {
         let path = dir.join(name);
         let mut f = std::fs::OpenOptions::new()
@@ -440,12 +451,10 @@ fn key_generate(dir: &Path) -> ExitCode {
         f.write_all(text.as_bytes())
             .map_err(|e| (format!("{}: {e}", path.display()), 4))
     };
-    if let Err((e, code)) = write("potter.key", 0o600, &key.to_pem())
-        .and_then(|()| write("potter.pub", 0o644, &key.verifying_key().to_pem()))
-    {
+    if let Err((e, code)) = write(names.0, 0o600, &private).and_then(|()| write(names.1, 0o644, &public)) {
         return fail(&e, code);
     }
-    println!("{}", dir.join("potter.pub").display());
+    println!("{}", dir.join(names.1).display());
     ExitCode::SUCCESS
 }
 
