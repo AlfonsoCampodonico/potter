@@ -3,7 +3,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use ed25519_dalek::pkcs8::{DecodePublicKey, EncodePrivateKey, EncodePublicKey};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::CatalogError;
@@ -50,23 +50,29 @@ pub fn compiled_keys() -> Vec<TrustedKey> {
 
 /// The compiled keys plus the one named by `POTTER_CATALOG_KEY` (a path to a public-key PEM).
 pub fn trusted_keys() -> Result<Vec<TrustedKey>, CatalogError> {
-    trusted_keys_with(std::env::var("POTTER_CATALOG_KEY").ok().as_deref())
+    let (keys, notes) = trusted_keys_with(std::env::var("POTTER_CATALOG_KEY").ok().as_deref())?;
+    for note in notes {
+        eprintln!("{note}");
+    }
+    Ok(keys)
 }
 
-pub(crate) fn trusted_keys_with(extra: Option<&str>) -> Result<Vec<TrustedKey>, CatalogError> {
+/// The trusted keys and the `note:` lines the caller should print.
+pub(crate) fn trusted_keys_with(extra: Option<&str>) -> Result<(Vec<TrustedKey>, Vec<String>), CatalogError> {
     let mut keys = compiled_keys();
+    let mut notes = Vec::new();
     if let Some(path) = extra.filter(|p| !p.is_empty()) {
         let pem =
             std::fs::read_to_string(path).map_err(|e| CatalogError::Plan(format!("POTTER_CATALOG_KEY {path}: {e}")))?;
         let key =
             TrustedKey::from_pem(&pem).map_err(|e| CatalogError::Plan(format!("POTTER_CATALOG_KEY {path}: {e}")))?;
-        eprintln!(
+        notes.push(format!(
             "note: trusting the extra catalog key {} from POTTER_CATALOG_KEY",
             key.id
-        );
+        ));
         keys.push(key);
     }
-    Ok(keys)
+    Ok((keys, notes))
 }
 
 /// Signs `blob_sha256`; returns the key id and the base64 signature.
@@ -88,7 +94,7 @@ pub fn verify(blob_sha256: &[u8; 32], key_id: &str, sig_b64: &str, keys: &[Trust
     let sig = Signature::from_slice(&raw).map_err(|e| hostile(format!("the index signature is malformed: {e}")))?;
     trusted
         .key
-        .verify(blob_sha256, &sig)
+        .verify_strict(blob_sha256, &sig)
         .map_err(|_| hostile(format!("the index signature does not verify under key {key_id}")))
 }
 
@@ -168,15 +174,33 @@ mod tests {
     }
 
     #[test]
+    fn every_key_file_is_compiled() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("keys");
+        let files = std::fs::read_dir(dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pub"))
+            .count();
+        assert_eq!(COMPILED_KEYS.len(), files);
+        assert_eq!(compiled_keys().len(), files);
+    }
+
+    #[test]
     fn env_key_is_trusted_and_noted() {
         let (_, public) = generate_pem();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extra.pub");
         std::fs::write(&path, &public).unwrap();
         let expected = TrustedKey::from_pem(&public).unwrap();
-        let keys = trusted_keys_with(Some(path.to_str().unwrap())).unwrap();
+        let (keys, notes) = trusted_keys_with(Some(path.to_str().unwrap())).unwrap();
         assert!(keys.iter().any(|k| k.id == expected.id));
         assert_eq!(keys.len(), compiled_keys().len() + 1);
+        assert_eq!(
+            notes,
+            vec![format!(
+                "note: trusting the extra catalog key {} from POTTER_CATALOG_KEY",
+                expected.id
+            )]
+        );
         // A missing or malformed file is the caller's mistake.
         let bad = trusted_keys_with(Some("/nonexistent/key.pub")).unwrap_err();
         assert!(matches!(bad, CatalogError::Plan(_)));
@@ -185,7 +209,17 @@ mod tests {
             trusted_keys_with(path.to_str()).unwrap_err(),
             CatalogError::Plan(_)
         ));
-        // No variable: just the compiled keys.
-        assert_eq!(trusted_keys_with(None).unwrap().len(), compiled_keys().len());
+        // No variable: just the compiled keys, and nothing to say.
+        let (keys, notes) = trusted_keys_with(None).unwrap();
+        assert_eq!(keys.len(), compiled_keys().len());
+        assert!(notes.is_empty());
+
+        // trusted_keys() reads the variable. This is the only test that touches the process env.
+        std::fs::write(&path, &public).unwrap();
+        // SAFETY: no other test in this crate reads or writes POTTER_CATALOG_KEY.
+        unsafe { std::env::set_var("POTTER_CATALOG_KEY", &path) };
+        let keys = trusted_keys().unwrap();
+        unsafe { std::env::remove_var("POTTER_CATALOG_KEY") };
+        assert!(keys.iter().any(|k| k.id == expected.id));
     }
 }
