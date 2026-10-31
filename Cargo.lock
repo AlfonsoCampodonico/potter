@@ -1313,6 +1313,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "potter-catalog"
+version = "0.1.0"
+dependencies = [
+ "potter-plan",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "potter-config"
 version = "0.1.0"
 dependencies = [
