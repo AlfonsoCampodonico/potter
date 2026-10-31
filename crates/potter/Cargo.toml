@@ -6,9 +6,9 @@ license.workspace = true
 description = "Build kiln microVM images from source"
 
 [dependencies]
-kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
-kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
-kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
+kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 potter-cache = { path = "../potter-cache" }
 clap = { version = "4.6.7", features = ["derive"] }
 potter-config = { path = "../potter-config" }
@@ -21,10 +21,10 @@ tar = "0.4.44"
 tempfile = "3.27.0"
 
 [dev-dependencies]
-kiln-erofs = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
-kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
+kiln-erofs = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 rustix = { version = "1.1.5", features = ["fs"] }
-vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "c4363a2cfaf421aeaefad1e9c510040c1e0a0508" }
+vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "b1baf3a0712209dbe7c7659186ad02b702524d3e" }
 assert_cmd = "2.2.2"
 base64 = "0.22"
 predicates = "3.1.4"

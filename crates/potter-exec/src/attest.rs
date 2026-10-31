@@ -631,8 +631,10 @@ mod tests {
             layers: crate::assemble::LayerReport {
                 max_layers: 10,
                 base: 1,
+                run_base: 1,
                 stacked: 3,
                 composite: 0,
+                app_composite: 0,
                 kiln: 3,
             },
         }

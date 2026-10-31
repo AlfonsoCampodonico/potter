@@ -434,19 +434,24 @@ fn a_vm_image_is_assembled_within_its_layer_budget_like_an_ns_one() {
         LayerReport {
             max_layers: 10,
             base: 1,
+            run_base: 1,
             stacked: 5,
             composite: 0,
+            app_composite: 0,
             kiln: 5
         }
     );
-    // Over a budget of 3, the shared assembly merges the base and the two lowest steps.
+    // Over a budget of 3, the shared assembly keeps the one-layer base and merges the three
+    // lowest steps above it.
     assert_eq!(
         assemble(Some(3)),
         LayerReport {
             max_layers: 3,
             base: 1,
+            run_base: 1,
             stacked: 5,
-            composite: 3,
+            composite: 0,
+            app_composite: 3,
             kiln: 3
         }
     );

@@ -34,7 +34,7 @@ jobs:
           cargo build --release --manifest-path /tmp/vmkit/Cargo.toml --bin vmkit-sandbox
           sudo install -m 0755 /tmp/vmkit/target/release/vmkit-sandbox /usr/local/bin/vmkit-sandbox
           /tmp/vmkit/scripts/install-apparmor.sh /usr/local/bin/vmkit-sandbox
-      - run: cargo test -p potter --test sandboxed --test build
+      - run: cargo test -p potter --test sandboxed --test build --test layer_budget --test rebase
         env:
           VMKIT_SANDBOX: /usr/local/bin/vmkit-sandbox
           POTTER_REQUIRE_SANDBOX_TESTS: "1"

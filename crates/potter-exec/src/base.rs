@@ -39,12 +39,7 @@ impl BaseImage {
 
     /// The image's environment.
     pub fn env(&self) -> BTreeMap<String, String> {
-        self.container()
-            .and_then(|c| c.env.as_ref())
-            .into_iter()
-            .flatten()
-            .filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
-            .collect()
+        env_of(&self.resolved.config)
     }
 
     pub fn workdir(&self) -> Option<String> {
@@ -56,6 +51,18 @@ impl BaseImage {
     pub fn user(&self) -> Option<String> {
         self.container().and_then(|c| c.user.clone()).filter(|u| !u.is_empty())
     }
+}
+
+/// The environment an OCI config sets.
+pub fn env_of(config: &kiln_oci::ImageConfig) -> BTreeMap<String, String> {
+    config
+        .config
+        .as_ref()
+        .and_then(|c| c.env.as_ref())
+        .into_iter()
+        .flatten()
+        .filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect()
 }
 
 /// Resolves `reference` (pinned to `digest` when given) for `platform` and fetches its layers

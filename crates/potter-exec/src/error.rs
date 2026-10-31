@@ -27,14 +27,17 @@ pub enum BuildError {
     StepOutput(String),
     #[error("{0}")]
     Infra(String),
+    /// A rebase that kiln's gates refused: the image needs a rebuild (spec §16).
+    #[error("the rebase is refused, rebuild the image instead: {}", .0.join("; "))]
+    RebaseRefused(Vec<String>),
 }
 
 impl BuildError {
-    /// The process exit code (spec §11): 1 a step failed, 2 the plan or a usage error, 3 a
+    /// The process exit code (spec §11): 1 a step failed or a rebase was refused, 2 the plan or a usage error, 3 a
     /// sandbox or protocol violation, 4 infrastructure.
     pub fn exit_code(&self) -> u8 {
         match self {
-            BuildError::StepFailed { .. } | BuildError::StepOutput(_) => 1,
+            BuildError::StepFailed { .. } | BuildError::StepOutput(_) | BuildError::RebaseRefused(_) => 1,
             BuildError::SymlinkEscape { .. }
             | BuildError::SpecialFile { .. }
             | BuildError::Unsupported { .. }

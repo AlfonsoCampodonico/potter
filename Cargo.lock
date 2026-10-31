@@ -1061,7 +1061,7 @@ dependencies = [
 [[package]]
 name = "kiln-erofs"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=01e7a9fe288160cc2eef9dd1a4a205022b8aef77#01e7a9fe288160cc2eef9dd1a4a205022b8aef77"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
 dependencies = [
  "tar",
  "tempfile",
@@ -1071,7 +1071,7 @@ dependencies = [
 [[package]]
 name = "kiln-image"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=01e7a9fe288160cc2eef9dd1a4a205022b8aef77#01e7a9fe288160cc2eef9dd1a4a205022b8aef77"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
 dependencies = [
  "flate2",
  "kiln-erofs",
@@ -1088,7 +1088,7 @@ dependencies = [
 [[package]]
 name = "kiln-oci"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=01e7a9fe288160cc2eef9dd1a4a205022b8aef77#01e7a9fe288160cc2eef9dd1a4a205022b8aef77"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
 dependencies = [
  "kiln-registry",
  "kiln-store",
@@ -1101,7 +1101,7 @@ dependencies = [
 [[package]]
 name = "kiln-registry"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=01e7a9fe288160cc2eef9dd1a4a205022b8aef77#01e7a9fe288160cc2eef9dd1a4a205022b8aef77"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
 dependencies = [
  "base64 0.23.1",
  "kiln-store",
@@ -1116,7 +1116,7 @@ dependencies = [
 [[package]]
 name = "kiln-store"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=01e7a9fe288160cc2eef9dd1a4a205022b8aef77#01e7a9fe288160cc2eef9dd1a4a205022b8aef77"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
 dependencies = [
  "serde",
  "serde_json",
@@ -2429,13 +2429,14 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vmkit"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/vmkit?rev=c4363a2cfaf421aeaefad1e9c510040c1e0a0508#c4363a2cfaf421aeaefad1e9c510040c1e0a0508"
+source = "git+https://github.com/AlfonsoCampodonico/vmkit?rev=b1baf3a0712209dbe7c7659186ad02b702524d3e#b1baf3a0712209dbe7c7659186ad02b702524d3e"
 dependencies = [
  "libc",
  "rustix",
  "seccompiler",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror",
 ]
 

@@ -1,111 +1,21 @@
 //! The layer budget and the composite base (`docs/layer-budget.md`), through kiln's real
 //! conversion: no namespaces needed.
 
-use std::collections::BTreeMap;
+mod common;
+
 use std::time::{Duration, Instant};
 
+use common::{base_tars as base, kiln_layers, layer, oci_base, run_base, sources, steps};
 use kiln_erofs::testtar::{Opts, TarBuilder};
-use kiln_oci::media::{OCI_CONFIG, OCI_LAYER_TAR, OCI_MANIFEST};
-use kiln_oci::{Descriptor, ImageManifest, Platform, ResolvedImage, canonical_json};
 use kiln_store::{Digest, Store};
-use potter_exec::assemble::{LayerReport, convert_within_budget, image_config, layer_plan};
-use potter_plan::{Base, Image, ImageConfig};
+use potter_exec::assemble::{LayerReport, layer_plan};
 
-fn plan_image() -> Image {
-    Image {
-        base: Base::Oci {
-            reference: "x:1".into(),
-            digest: None,
-        },
-        runtime_steps: vec![],
-        export: vec![],
-        files: vec![],
-        config: ImageConfig::new("/app", "0:0"),
-        processes: BTreeMap::new(),
-        services: BTreeMap::new(),
-        max_layers: None,
-    }
-}
-
-/// The OCI image of `tars` (bottom first), stored as uncompressed layers, as potter assembles it.
-fn resolved(store: &Store, tars: &[Vec<u8>]) -> ResolvedImage {
-    let platform = Platform::parse("linux/arm64").unwrap();
-    let layers: Vec<Descriptor> = tars
-        .iter()
-        .map(|t| Descriptor::new(OCI_LAYER_TAR, store.put_bytes(t).unwrap(), t.len() as u64))
-        .collect();
-    let config = image_config(
-        &platform,
-        &BTreeMap::new(),
-        &plan_image(),
-        layers.iter().map(|l| l.digest.clone()).collect(),
-    );
-    let config_bytes = canonical_json(&config);
-    let config_digest = store.put_bytes(&config_bytes).unwrap();
-    let manifest = ImageManifest {
-        schema_version: 2,
-        media_type: Some(OCI_MANIFEST.into()),
-        artifact_type: None,
-        config: Descriptor::new(OCI_CONFIG, config_digest.clone(), config_bytes.len() as u64),
-        layers,
-        annotations: None,
-    };
-    let manifest_digest = store.put_bytes(&canonical_json(&manifest)).unwrap();
-    ResolvedImage {
-        platform,
-        manifest_digest,
-        manifest,
-        config_digest,
-        config,
-        ref_name: None,
-    }
-}
-
-/// A small layer: `dir/` with one file whose content is `note`. `tmp/` comes from base layer 0 and
-/// is never repeated, so step layers writing under it inherit it (an implicit parent).
-fn layer(dir: &str, note: &str) -> Vec<u8> {
-    let mut t = TarBuilder::new();
-    if dir == "base0" {
-        t.dir("tmp", &Opts::default().mode(0o1777));
-    }
-    t.dir(dir, &Opts::default().mode(0o755))
-        .file(&format!("{dir}/f"), note.as_bytes(), &Opts::default());
-    if dir.starts_with("step") {
-        t.file(&format!("tmp/{dir}"), b"t", &Opts::default());
-    }
-    t.finish()
-}
-
-fn base(n: usize, note: &str) -> Vec<Vec<u8>> {
-    (0..n).map(|i| layer(&format!("base{i}"), note)).collect()
-}
-
-fn steps(n: usize, note: &str) -> Vec<Vec<u8>> {
-    (0..n).map(|i| layer(&format!("step{i}"), note)).collect()
-}
-
-/// The kiln image's layers: (erofs digest, the OCI layers it was built from).
-fn kiln_layers(store: &Store, digest: &Digest) -> Vec<(Digest, Vec<String>)> {
-    let loaded = kiln_image::load(store, digest).unwrap();
-    loaded.entries[0]
-        .1
-        .manifest
-        .layers
-        .iter()
-        .map(|l| {
-            let sources = l
-                .annotation(kiln_image::types::ANN_SOURCE_DIGESTS)
-                .unwrap()
-                .split(',')
-                .map(str::to_string)
-                .collect();
-            (l.digest.clone(), sources)
-        })
-        .collect()
-}
-
+/// An image of `tars` (bottom first) whose bottom `base` layers are its OCI base, with no runtime
+/// steps, converted within `budget`.
 fn build(store: &Store, tars: &[Vec<u8>], base: usize, budget: u32) -> (Digest, LayerReport) {
-    convert_within_budget(store, resolved(store, tars), "t:1", base, budget).unwrap()
+    let b = oci_base(store, &tars[..base], &["PATH=/bin"]);
+    let rb = run_base(store, "x:1", &b, &[]);
+    common::image(store, &rb, &tars[base..], budget, "t:1")
 }
 
 fn stack(base: &[Vec<u8>], steps: &[Vec<u8>]) -> Vec<Vec<u8>> {
@@ -114,46 +24,61 @@ fn stack(base: &[Vec<u8>], steps: &[Vec<u8>]) -> Vec<Vec<u8>> {
 
 #[test]
 fn the_policy_for_several_plans() {
-    // (stacked, base, budget) → (composite, layers left)
+    // (stacked, base, run base, budget) → (composite, app composite, layers left)
     let cases = [
-        ((8, 5, 10), (0, 8)),
-        ((10, 5, 10), (0, 10)), // the ruby image: exactly at the default budget
-        ((11, 5, 10), (5, 7)),  // one more step: the whole base, not kiln's minimal 2
-        ((14, 5, 10), (5, 10)),
-        ((15, 5, 10), (6, 10)), // the base is not enough: the lowest step joins it
-        ((16, 5, 10), (7, 10)),
-        ((11, 1, 10), (2, 10)), // a one-layer base: as kiln alone would
-        ((11, 5, 20), (0, 11)),
-        ((40, 5, 32), (9, 32)),
-        ((4, 0, 3), (2, 3)),
-        ((130, 3, 128), (3, 128)),
+        ((8, 5, 5, 10), (0, 0, 8)),
+        ((10, 5, 5, 10), (0, 0, 10)), // the ruby image: exactly at the default budget
+        ((11, 5, 5, 10), (5, 0, 7)),  // one more step: the whole base, not kiln's minimal 2
+        ((14, 5, 5, 10), (5, 0, 10)),
+        ((15, 5, 5, 10), (5, 2, 10)), // the base is not enough: the two lowest steps merge too
+        ((16, 5, 5, 10), (5, 3, 10)),
+        ((11, 1, 1, 10), (0, 2, 10)), // a one-layer base: only the steps can merge
+        ((11, 5, 5, 20), (0, 0, 11)),
+        ((40, 5, 5, 32), (5, 5, 32)),
+        ((130, 3, 3, 128), (3, 0, 128)),
+        // Runtime steps: the OCI base merges first, then the runtime layers above it.
+        ((12, 3, 5, 10), (3, 0, 10)),
+        ((14, 3, 5, 10), (5, 0, 10)),
+        ((15, 3, 5, 10), (5, 2, 10)),
+        // Nothing above the run base, or no run base: not rebaseable, one composite as before.
+        ((12, 5, 12, 10), (5, 0, 8)),
+        ((4, 0, 0, 3), (2, 0, 3)),
     ];
-    for ((stacked, base, budget), (composite, left)) in cases {
-        let p = layer_plan(stacked, base, budget);
+    for ((stacked, b, rb, budget), (composite, app, left)) in cases {
+        let p = layer_plan(stacked, b, rb, budget);
         assert_eq!(
-            (p.composite, p.layers(stacked)),
-            (composite, left),
-            "{stacked} layers, base {base}, budget {budget}"
+            (p.composite, p.app_composite, p.layers(stacked, rb)),
+            (composite, app, left),
+            "{stacked} layers, base {b}, run base {rb}, budget {budget}"
         );
     }
 }
 
 #[test]
-fn the_policy_always_fits_and_agrees_with_kilns_squash_rule() {
+fn the_policy_always_fits_and_never_merges_across_the_run_base() {
     for budget in 3..=40 {
-        for stacked in 1..=70 {
-            for base in 0..=stacked {
-                let p = layer_plan(stacked, base, budget);
-                let at = format!("{stacked} layers, base {base}, budget {budget}");
-                assert!(p.layers(stacked) <= budget, "{at}");
-                assert_eq!(p.composite == 0, stacked <= budget, "{at}");
-                if p.composite > 0 {
-                    assert!(p.composite >= base.min(stacked) && p.composite >= 2, "{at}");
-                    // kiln squashes the bottom `n - max + 1` of `n` layers when `n > max`.
-                    assert!(stacked > p.kiln_max_layers, "{at}");
-                    assert_eq!(stacked - p.kiln_max_layers + 1, p.composite, "{at}");
-                } else {
-                    assert!(stacked <= p.kiln_max_layers, "{at}");
+        for stacked in 1..=50 {
+            for rb in 0..=stacked {
+                for b in 0..=rb {
+                    let p = layer_plan(stacked, b, rb, budget);
+                    let at = format!("{stacked} layers, base {b}, run base {rb}, budget {budget}");
+                    assert!(p.layers(stacked, rb) <= budget, "{at}");
+                    assert_eq!(p.composite == 0 && p.app_composite == 0, stacked <= budget, "{at}");
+                    assert_eq!(p.rebaseable, rb > 0 && stacked > rb, "{at}");
+                    for w in [p.composite, p.app_composite] {
+                        assert!(w == 0 || w >= 2, "{at}: a one-layer merge");
+                    }
+                    if p.rebaseable {
+                        assert!(p.composite <= rb, "{at}");
+                        assert!(p.app_composite <= stacked - rb, "{at}");
+                        if p.composite > 0 {
+                            assert!(p.composite >= b, "{at}: the whole OCI base first");
+                        }
+                        // Steps merge only once the run base is one layer, or cannot shrink.
+                        if p.app_composite > 0 {
+                            assert!(p.composite == rb || rb == 1, "{at}");
+                        }
+                    }
                 }
             }
         }
@@ -172,20 +97,16 @@ fn over_budget_the_whole_base_becomes_one_shared_composite() {
         LayerReport {
             max_layers: 10,
             base: 5,
+            run_base: 5,
             stacked: 11,
             composite: 5,
+            app_composite: 0,
             kiln: 7
         }
     );
     let la = kiln_layers(&store, &a);
     assert_eq!(la.len(), 7);
-    let base_sources: Vec<String> = resolved(&store, &b)
-        .manifest
-        .layers
-        .iter()
-        .map(|l| l.digest.to_string())
-        .collect();
-    assert_eq!(la[0].1, base_sources, "the composite is exactly the base");
+    assert_eq!(la[0].1, sources(&b), "the composite is exactly the base");
 
     // Another image on the same base, with more steps (9 + 5 = 14 layers): same composite.
     let (other, ro) = build(&store, &stack(&b, &steps(9, "other")), 5, 10);
@@ -205,23 +126,25 @@ fn over_budget_the_whole_base_becomes_one_shared_composite() {
 }
 
 #[test]
-fn the_composite_extends_upward_only_when_the_base_is_not_enough() {
+fn past_the_base_the_lowest_steps_merge_on_their_own_side() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
     let b = base(5, "ruby");
     let s = steps(11, "a");
     let (d, r) = build(&store, &stack(&b, &s), 5, 10);
-    assert_eq!((r.stacked, r.composite, r.kiln), (16, 7, 10));
+    assert_eq!((r.stacked, r.composite, r.app_composite, r.kiln), (16, 5, 3, 10));
     let layers = kiln_layers(&store, &d);
-    assert_eq!(layers[0].1.len(), 7, "the base and the two lowest steps");
-    let top_sources: Vec<String> = resolved(&store, &s[2..])
-        .manifest
-        .layers
-        .iter()
-        .map(|l| l.digest.to_string())
-        .collect();
-    let kept: Vec<String> = layers[1..].iter().flat_map(|l| l.1.clone()).collect();
-    assert_eq!(kept, top_sources, "the top nine steps stay their own layers");
+    assert_eq!(layers[0].1, sources(&b), "the composite is the base alone");
+    assert_eq!(layers[1].1, sources(&s[..3]), "the three lowest steps");
+    let kept: Vec<String> = layers[2..].iter().flat_map(|l| l.1.clone()).collect();
+    assert_eq!(kept, sources(&s[3..]), "the top eight steps stay their own layers");
+    let loaded = kiln_image::load(&store, &d).unwrap();
+    let record = loaded.entries[0].1.config.base.clone().unwrap();
+    assert_eq!(
+        (record.layers, record.source_layers),
+        (1, 5),
+        "the run base is recorded"
+    );
 }
 
 #[test]
@@ -319,9 +242,10 @@ fn timings() {
     println!("base {} MiB in 5 layers, steps {} MiB in 6 layers", mib(&b), mib(&s));
     let report = |what: &str, r: &LayerReport, t: Duration| {
         println!(
-            "{what:<58} {:>4} layers (composite {}) {:>7.2}s",
+            "{what:<58} {:>4} layers (composite {}+{}) {:>7.2}s",
             r.kiln,
             r.composite,
+            r.app_composite,
             t.as_secs_f64()
         );
     };
@@ -360,7 +284,7 @@ fn timings() {
         };
         let out = kiln_image::convert_resolved(
             &store,
-            &[resolved(&store, tars)],
+            &[oci_base(&store, tars, &[]).resolved],
             None,
             &opts,
             &kiln_image::StoredLayers,
@@ -381,16 +305,16 @@ fn timings() {
         t.as_secs_f64()
     );
 
-    // Beyond the base: the lowest step joins the composite; changing it rebuilds the composite.
+    // Beyond the base: the lowest steps merge above it; changing one rebuilds only that merge.
     let fifteen: Vec<Vec<u8>> = (0..10).map(|i| heavy(&format!("step{i}"), 50 + i, 200, 2)).collect();
     let ((_, r), t) = timed(|| build(&store, &stack(&b, &fifteen), 5, 10));
-    report("15 layers: base + lowest step merged", &r, t);
+    report("15 layers: base merged, the 2 lowest steps merged above it", &r, t);
     let mut low = fifteen.clone();
     low[0] = heavy("step0", 5555, 200, 2);
     let ((_, r), t) = timed(|| build(&store, &stack(&b, &low), 5, 10));
-    report("15 layers, merged step changed: composite rebuilt", &r, t);
+    report("15 layers, a merged step changed: only the step merge rebuilt", &r, t);
     let mut high = fifteen.clone();
     high[9] = heavy("step9", 6666, 200, 2);
     let ((_, r), t) = timed(|| build(&store, &stack(&b, &high), 5, 10));
-    report("15 layers, top step changed: composite cached", &r, t);
+    report("15 layers, top step changed: both merges cached", &r, t);
 }
