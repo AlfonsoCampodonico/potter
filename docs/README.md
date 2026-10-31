@@ -8,6 +8,7 @@ Start with the [project README](../README.md) for what potter does, its status a
 |---|---|
 | [plan-format.md](plan-format.md) | The `potter.plan/v1` plan: canonical form and hashing, shape, `potter.toml` keys, cache keys, secrets in keys, remote cache entries, `--progress json` events, image annotations, attestations |
 | [layer-budget.md](layer-budget.md) | Why layers are a resource in a microVM, the device ceiling per VMM, the composite policy, measured costs and how to choose a budget |
+| [rebase.md](rebase.md) | `potter rebase`: what the run base is, what a build records for it, how a patched base replaces it, the refusals and what's not done yet |
 | [schema/potter.plan.v1.json](schema/potter.plan.v1.json) | JSON Schema of the plan, generated from the Rust types and checked in CI |
 
 ## Design and project history

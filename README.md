@@ -18,6 +18,7 @@ image was made. Detection only parses files; it never runs your code.
 | Detected targets (catalog bases) | Built through a stopgap: catalog bases are lowered onto upstream Debian trixie images plus install steps (`potter-exec/src/stopgap.rs`) until the signed catalog exists |
 | Remote cache, target graph and `copy`, `--affected`, build secrets, `--progress json` | Works |
 | Layer budget and composite base | Works for every executor |
+| `potter rebase` (a patched base without a rebuild) | Works, Linux only (runtime steps re-run with `--executor ns`). Local store only: a rebased image isn't pushed with attestations yet |
 | `--output registry=`, SBOM, provenance, signing, `potter verify` | Works. KMS keys (`kms://`) are refused; there is no transparency log or keyless signing |
 | `--executor vm` (one microVM per target chain) | Experimental: implemented against a backend trait and tested with a scripted VM. The CLI refuses it (exit 4) until kiln's build mode lands |
 | PHP web images (nginx + php-fpm as kiln-init `services`) | Planned and refused at build time (exit 2) until kiln-init starts services. Laravel with Octane on Swoole has no services and is not affected |
@@ -194,11 +195,12 @@ flowchart TD
     fits -- no --> base["Merge the whole base<br/>into one composite"]
     base --> enough{"Fits now?"}
     enough -- yes --> done["Composite + steps"]
-    enough -- no --> steps["Also merge the lowest<br/>step layers, bottom-up"]
+    enough -- no --> steps["Also merge the lowest<br/>step layers above the run base<br/>into one of their own"]
     steps --> done
 ```
 
-*The composite policy: merging the base first keeps the composite shared by every image on that base.*
+*The composite policy: merging the base first keeps the composite shared by every image on that base,
+and no merge crosses the run base, so every image stays rebaseable.*
 
 Set the budget with `[target.<name>.image] max_layers` or `--max-layers` (3-128). The practical
 ceiling is the VMM's device count: 13 layers for Firecracker on x86_64 with a network (potter warns
@@ -259,11 +261,13 @@ flowchart LR
     potter["potter"] --> detect["detect PATH"]
     potter --> plan["plan PATH"]
     potter --> build["build PATH --executor ns"]
+    potter --> rebase["rebase IMAGE --executor ns"]
     potter --> verify["verify IMAGE --key PUB"]
     potter --> key["key generate DIR"]
     detect -.-> plan
     plan -.-> build
     key -.-> build
+    build -.-> rebase
     build -.-> verify
 ```
 
@@ -274,6 +278,7 @@ flowchart LR
 | `potter detect [PATH]` | Lists each provider's claim on `PATH` with its evidence, and the chosen one |
 | `potter plan [PATH] [--target T] [--json \| --explain] [--max-layers N]` | Prints the plan; `--json` prints canonical `potter.plan/v1`; `--explain` shows where every decision came from |
 | `potter build [PATH] --executor ns [options]` | Builds images into `$KILN_HOME` (see below) |
+| `potter rebase IMAGE --executor ns [--base REF] [--tag NAME] [--json]` | Swaps a built image's run base for a patched one without rebuilding it, or refuses with the reason ([docs/rebase.md](docs/rebase.md)) |
 | `potter verify IMAGE --key PUB [--expect-tenant T] [--expect-builder B]` | Checks a pushed image's SBOM, provenance and signature |
 | `potter key generate DIR` | Writes `DIR/potter.key` (0600, PKCS#8 P-256) and `DIR/potter.pub` |
 
@@ -301,7 +306,7 @@ flowchart LR
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | a build step failed, or the build output exceeded its limits |
+| 1 | a build step failed, the build output exceeded its limits, or a rebase was refused |
 | 2 | usage, config, plan or detection error (including a missing path, and features a later milestone ships) |
 | 3 | a sandbox violation (a hostile layer or step output), or a failed `potter verify` |
 | 4 | infrastructure: I/O, the registry, a missing prerequisite, no executor chosen |
@@ -333,7 +338,9 @@ cargo test --all
 - Detector tests live in `crates/potter-detect/tests/`; planning tests snapshot the plan of each
   sample project under `fixtures/` with insta (`crates/potter-config/tests/snapshots/`; review
   changes with `cargo insta review`).
-- End-to-end namespace builds (`crates/potter/tests/sandboxed.rs`, `build.rs`) skip without
+- `potter rebase` through kiln's real conversion and rebase: `crates/potter-exec/tests/rebase.rs`
+  (no namespaces needed), and end to end in `crates/potter/tests/rebase.rs`.
+- End-to-end namespace builds (`crates/potter/tests/sandboxed.rs`, `build.rs`, `rebase.rs`) skip without
   `VMKIT_SANDBOX`; set `POTTER_REQUIRE_SANDBOX_TESTS=1` to make a missing sandbox fail instead.
 - Builds of detected projects from real upstream images run only with `POTTER_TEST_NETWORK=1`.
 - Layer-budget timings: `cargo test --release -p potter-exec --test layer_budget -- --ignored --nocapture timings`.
