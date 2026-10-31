@@ -6,6 +6,9 @@ license.workspace = true
 description = "potter's signed runtime catalog: index format, signing, fetching and resolution (P3)"
 
 [dependencies]
+kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 potter-plan = { path = "../potter-plan" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -14,6 +17,7 @@ base64 = "0.22"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem", "rand_core"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 sha2 = "0.10.9"
+tempfile = "3.27.0"
 
 [build-dependencies]
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }

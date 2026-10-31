@@ -1377,6 +1377,9 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
+ "kiln-oci",
+ "kiln-registry",
+ "kiln-store",
  "potter-plan",
  "rand_core 0.6.4",
  "serde",
