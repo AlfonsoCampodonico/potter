@@ -14,6 +14,7 @@ pub mod inputs;
 pub mod merge;
 pub mod ns;
 pub mod publish;
+pub mod rebase;
 pub mod remote;
 pub mod sandboxed;
 pub mod seal;

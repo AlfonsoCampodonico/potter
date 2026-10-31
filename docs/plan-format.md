@@ -52,7 +52,7 @@ checked in CI.
 | `[target.<name>.deploy]` `commands` | A `deploy` process the platform runs once before rollout. |
 | `[target.<name>]` `export` | Extra paths in the image: relative to the target root (copied under the image workdir, e.g. `/out/data` for Go/Rust) or absolute. Explicit plans default to `/app`. |
 | `[target.<name>.base]` `catalog`/`oci`, `run_catalog`/`run_oci` | Explicit plans only. |
-| `[target.<name>.image]` `max_layers` | The most layers the image may have: 3-128, default 10. Over it, the bottom layers merge into one composite, the base's first. `potter build --max-layers` overrides it for every target. Above 13 (Firecracker on x86_64), potter warns. See [layer-budget.md](layer-budget.md). |
+| `[target.<name>.image]` `max_layers` | The most layers the image may have: 3-128, default 10. Over it, the bottom layers merge into one composite, the base's first, never across the run base's top. `potter build --max-layers` overrides it for every target. Above 13 (Firecracker on x86_64), potter warns. See [layer-budget.md](layer-budget.md). |
 | `discover` (top level) | `false` turns off zero-config monorepo targets (directories with their own manifest when the root has none). Declared `[target.*]` entries otherwise merge over discovered ones. |
 | `[apt]` `build`, `runtime`, `snapshot` | Debian packages from a pinned snapshot.debian.org date. |
 
@@ -101,7 +101,7 @@ One JSON object per line on stdout, with `event` set to one of:
 | `log` | `target`, `step`, `line` | One line of step output, unmodified except secret redaction. |
 | `warning` | `message` | |
 | `unchanged` | `target` | `--affected` skipped the target. |
-| `target_built` | `target`, `reference`, `digest`, `executed`, `cached`, `layers`, `max_layers`, `composite` | `layers` is the kiln image's layer count; `composite` is how many bottom layers were merged into one (0: none). |
+| `target_built` | `target`, `reference`, `digest`, `executed`, `cached`, `layers`, `max_layers`, `composite`, `app_composite` | `layers` is the kiln image's layer count; `composite` is how many bottom run base layers were merged into one, and `app_composite` how many of the lowest layers above the run base (0: none). |
 | `error`, `hostile` | `target`, `message`, `exit` | The build failed. `hostile` is a sandbox violation (exit 3). |
 | `published` | `target`, `reference`, `digest`, `referrers` | `--output` pushed the image (`digest` is its OCI manifest) and attached the attestations. |
 
@@ -114,7 +114,11 @@ Every image manifest potter writes carries:
 - the plan's `labels`;
 - `dev.potter.port`: the listen port, when the plan has one;
 - `dev.potter.process.<name>`: each process's command as a JSON array;
-- `dev.potter.target`: the canonical hash (hex) of the target that built it.
+- `dev.potter.target`: the canonical hash (hex) of the target that built it;
+- `dev.potter.run_chain`: the image's run base and runtime steps (canonical JSON), which `potter rebase` re-runs on a new base;
+- `dev.potter.max_layers`: the layer budget it was built with, which a rebase keeps.
+
+The image config inherits its run base's labels. The kiln image records its run base (kiln's `base` record), converted as a kiln image of its own; see [rebase.md](rebase.md).
 
 ## Attestations (spec §17)
 

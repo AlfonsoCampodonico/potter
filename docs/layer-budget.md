@@ -3,7 +3,9 @@
 A kiln image is a stack of erofs layers that `kiln-init` mounts with overlayfs, and every layer is
 its own virtio-blk disk in the microVM. The VMM has a fixed number of virtio devices, so the number
 of layers is a resource. The layer budget is the most layers potter lets an image have. When an image
-stacks more, potter merges its bottom layers into one composite layer, starting with the base.
+stacks more, potter merges its bottom layers into one composite layer, starting with the base. A
+merge never crosses the top of the image's run base, so every image stays rebaseable
+([rebase.md](rebase.md)).
 
 ## Setting it
 
@@ -30,7 +32,10 @@ stacks more, potter merges its bottom layers into one composite layer, starting 
 - **Reporting:**
   - `potter build` prints the merge on stderr:
     `[app] layers: 11 over the budget of 10: the bottom 5 (the base's 5) merged into one composite`.
-  - `--progress json` adds `layers`, `max_layers` and `composite` to `target_built`.
+  - Past the base it adds the merge above it:
+    `[app] layers: 10 over the budget of 4: the bottom 3 (the base's 3) merged into one composite, and
+    the lowest 5 above the run base into another`.
+  - `--progress json` adds `layers`, `max_layers`, `composite` and `app_composite` to `target_built`.
 
 ## The device ceiling
 
@@ -73,24 +78,35 @@ potter stacks these layers, bottom first:
 3. with `export`, the run base's layers instead, then the export layer;
 4. the files layer.
 
-When the stack has `n` layers, the base has `b` of them, and the budget is `N`:
+The run base is the bottom of that stack: the OCI base's layers and, with `export`, the runtime
+steps' layers. It's what `potter rebase` swaps. When the stack has `n` layers, the OCI base has `b` of
+them, the run base `r`, and the budget is `N`:
 
 - If `n <= N`, nothing is merged.
-- Otherwise, potter merges the bottom `max(n - N + 1, b)` layers into one composite:
-  - **The whole base first**, even when merging fewer layers would fit the budget.
-  - **Then the next-lowest step layers, one at a time, bottom-up**, only when the base alone isn't
-    enough.
+- Otherwise:
+  - **The whole OCI base first**, even when merging fewer layers would fit the budget: the bottom
+    `min(max(n - N + 1, b), r)` layers merge into one composite.
+  - **Then the rest of the run base**, when that's needed, up to its top and never past it.
+  - **Then the lowest layers above the run base, into a second merge of their own**, only when the
+    run base as one layer still isn't enough. kiln leaves them `N` minus the run base's layers.
   - The top layers, which a customer or the platform rebuilds most, are never merged while a lower
     layer can be.
+- An image with nothing above its run base (or no base layers) has nothing to rebase, and keeps the
+  single composite of the bottom `max(n - N + 1, b)` layers.
 
 | Stack (`n`, base `b`) | Budget | Merged | Layers left |
 |---|---|---|---|
 | ruby:3.4-slim (5) + source + 4 steps = 10 | 10 | none | 10 |
 | the same + 1 step = 11 | 10 | the 5 base layers (kiln alone would merge 2) | 7 |
 | 5 + 9 steps = 14 | 10 | the 5 base layers | 10 |
-| 5 + 10 steps = 15 | 10 | base + the lowest step | 10 |
+| 5 + 10 steps = 15 | 10 | the 5 base layers, and the 2 lowest steps into another | 10 |
 | 5 + 6 steps = 11 | 20 | none | 11 |
-| 1-layer base + 10 = 11 | 10 | the bottom 2 (as kiln alone) | 10 |
+| 1-layer base + 10 = 11 | 10 | the 2 lowest steps (the base can't shrink) | 10 |
+| 3-layer base + 2 runtime steps + 7 = 12 | 10 | the 3 base layers | 10 |
+
+Before rebase, a merge could run from the base into the lowest steps as one composite. The layer
+count is the same either way. The difference is that changing a merged step now rebuilds only the
+merge above the base, not the base's composite.
 
 ### How it's done
 
@@ -111,9 +127,13 @@ potter doesn't merge anything itself. It uses kiln's squash in `kiln_image::conv
 - **Determinism:** the merge is deterministic: the same inputs give the same digest in any store and
   with any job count.
 
-**How potter steers it.** potter passes kiln a `max_layers` of `n - k + 1`, which makes kiln merge
-exactly the `k` layers the policy chose. potter then checks that kiln merged `k` layers, and refuses
-the image (exit 4) if a future kiln merges otherwise. The policy is `potter_exec::assemble::layer_plan`.
+**How potter steers it.** The run base is converted on its own, as a kiln image with a `max_layers`
+of `r - k + 1`, which makes kiln merge exactly the `k` layers the policy chose for it. The image is
+then converted with that run base recorded (kiln's `ConvertOptions::base`, what `kiln convert --base`
+uses): kiln finds the run base's layers at the bottom, reuses its composite from the squash cache, and
+squashes only the layers above it, into `N` minus the run base's layers. potter checks that kiln
+merged what the policy chose on each side, and refuses the image (exit 4) if a future kiln merges
+otherwise. The policy is `potter_exec::assemble::layer_plan`.
 
 **Every executor.** The namespace executor and the VM executor (P4) differ only in where a step runs
 and how its layer is sealed. Both hand their chain's layers to the same assembly,
@@ -133,9 +153,11 @@ the VM path. (`--executor vm` is still refused by the CLI until kiln M3e lands.)
   - Changing the potter.toml of an explicit plan changes the `source` layer, whose key the steps
     above chain on.
   - Those steps run again but seal the same bytes, so they're the same blobs.
-- **Changing a layer inside the composite** (a new base digest, or a step that was merged into it)
-  reconverts that layer and rebuilds the whole composite. The cost is proportional to the bytes
-  merged. The layers above it are cache hits.
+- **Changing a layer inside the composite** (a new base digest) reconverts that layer and rebuilds
+  the whole composite. The cost is proportional to the bytes merged. The layers above it are cache
+  hits.
+- **Changing a step merged above the run base** rebuilds that merge only: the base's composite is a
+  cache hit.
 
 ## Measured cost
 
@@ -151,29 +173,30 @@ Release builds, kiln at potter's pinned rev, on two machines:
 - **Mac:** Apple M-series, macOS, APFS.
 - **Linux:** the Lima VM on that Mac, aarch64 Linux, 8 vCPUs, ext4 on a virtual disk.
 
-| Scenario | Layers (composite) | Mac | Linux |
+| Scenario | Layers (merged) | Mac | Linux |
 |---|---|---|---|
-| Cold: every layer converted, budget 20, no composite | 11 | 0.94 s | 1.59 s |
-| Same image at budget 10: layers cached, base merged | 7 (5) | 0.44 s | 1.30 s |
-| Unchanged rebuild | 7 (5) | 0.09 s | 0.13 s |
-| Top step changed: only it converts; composite cached | 7 (5) | 0.19 s | 0.86 s |
-| One more step (12 layers): composite still cached | 8 (5) | 0.14 s | 0.43 s |
-| A base layer changed: it converts and the composite is rebuilt | 7 (5) | 0.62 s | 2.54 s |
-| kiln's minimal squash alone, 11 layers | 10 (2) | 0.24 s | 1.15 s |
-| kiln's minimal squash alone, 12 layers: a new merge, nothing reused | 10 (3) | 0.32 s | 1.06 s |
-| 15 layers: base + lowest step merged | 10 (6) | 0.57 s | 1.54 s |
-| 15 layers, the merged step changed: composite rebuilt | 10 (6) | 0.61 s | 1.48 s |
-| 15 layers, the top step changed: composite cached | 10 (6) | 0.18 s | 0.30 s |
+| Cold: every layer converted, budget 20, no composite | 11 | 1.29 s | 0.40 s |
+| Same image at budget 10: layers cached, base merged | 7 (5) | 0.66 s | 0.43 s |
+| Unchanged rebuild | 7 (5) | 0.12 s | 0.09 s |
+| Top step changed: only it converts; composite cached | 7 (5) | 0.24 s | 0.53 s |
+| One more step (12 layers): composite still cached | 8 (5) | 0.23 s | 0.18 s |
+| A base layer changed: it converts and the composite is rebuilt | 7 (5) | 0.78 s | 4.56 s |
+| kiln's minimal squash alone, 11 layers | 10 (2) | 0.29 s | 0.38 s |
+| kiln's minimal squash alone, 12 layers: a new merge, nothing reused | 10 (3) | 0.37 s | 3.77 s |
+| 15 layers: base merged, the 2 lowest steps merged above it | 10 (5 + 2) | 0.30 s | 1.46 s |
+| 15 layers, a merged step changed: only the step merge rebuilt | 10 (5 + 2) | 0.20 s | 1.12 s |
+| 15 layers, the top step changed: both merges cached | 10 (5 + 2) | 0.19 s | 0.49 s |
 
-The Linux numbers are a single run on a shared VM and vary by run. Compare rows within a column.
+The numbers are single runs on a shared machine and VM, and vary by run (by 2x and more). Compare
+rows within a column.
 
 What the numbers show:
-- Merging a 190 MiB base costs about 0.35 s on the Mac and 1.2 s on the VM. It's paid once per base.
+- Merging a 190 MiB base is paid once per base.
 - With kiln's minimal rule, every change in the layer count paid for a new merge of part of the base.
 - With the base-first rule, a top-layer change costs about what converting that layer costs.
-- The price of merging a step into the composite is that changing that step rebuilds the whole
-  composite: 0.61 s against 0.18 s for a step above it on the Mac, and 1.48 s against 0.30 s on
-  Linux. So raise the budget before steps start being merged.
+- A step merged above the run base costs only its own merge when it changes. Before rebase it was
+  merged into the base's composite, and changing it rebuilt all 190 MiB: 0.61 s against 0.18 s for
+  a step above it on the Mac. Still, raise the budget before steps start being merged.
 
 ## Choosing a budget (for a platform)
 
@@ -183,7 +206,7 @@ What the numbers show:
    - aarch64 Firecracker: up to 88. Don't go past what boots on the smallest VMM you schedule on.
 2. **Leave room for the steps that change.** The budget should hold the composite, every
    platform-owned layer and every customer layer without merging a step. Count the image's stack as
-   1 (the composite) + steps + export + files.
+   1 (the composite) + runtime steps + steps + export + files.
 3. **Prefer fewer, larger base layers to more steps.** A merged base costs nothing after its first
    build. A merged step costs a full re-merge every time it changes.
 4. **Use one budget per VMM class across a fleet.** The composite is keyed by what it merges, not by
@@ -200,12 +223,12 @@ What the numbers show:
   image's layers. The stopgap's install steps count as steps.
 - **A composite when the image fits.** Nothing is merged under the budget: merging costs a copy, and
   separate base layers are already shared through kiln's layer cache.
-- **Nested composites.** Merging steps into an existing base composite (a composite of the composite
-  and the steps) would keep the base-only composite cached. But the second merge copies every byte
-  again, so it costs at least as much as a flat merge and stores the base twice.
+- **One composite across the run base.** It would merge the base and the lowest steps as one layer,
+  as potter did before rebase. The layer count is the same, but a rebase couldn't swap a base that
+  shares a layer with the app.
 - **A per-VMM default.** potter doesn't know where an image will run, so the default stays 10 and the
   warning is advisory. `kiln run` is what refuses an image that doesn't fit.
 - **The build-time VM's device budget (P4).** The device budget of the VM that runs build steps
   (spec §9.3) is separate and unchanged: it bounds the build VM's disks, not the image's layers.
-- **kiln's pinned rev.** It's unchanged: the policy needs nothing new from kiln. kiln's main since
-  c9da031 only adds tests that pin the squash behaviour potter relies on, and README notes.
+- **kiln's pinned rev.** potter pins kiln at a rev with rebase (kiln#11), whose `ConvertOptions::base`
+  keeps squashes on each side of the recorded base.

@@ -150,15 +150,21 @@ fn over_budget_the_base_merges_first_and_is_reused() {
 }
 
 #[test]
-fn the_cli_budget_wins_and_merges_upward_when_the_base_is_not_enough() {
+fn the_cli_budget_wins_and_steps_merge_above_the_base_when_it_is_not_enough() {
     let Some(ctx) = Ctx::new() else { return };
     let (_reg, _dir, base) = serve_base();
     let repo = project(&base, &SIX, Some(9));
-    // 10 layers into 4: the base and the four lowest step layers (source, s1, s2, s3) merge.
+    // 10 layers into 4: the base merges, then the five lowest step layers (source, s1 to s4)
+    // merge on their own side of it, so the image stays rebaseable.
     let (_, stderr) = build(&ctx, repo.path(), &["--max-layers", "4"]);
-    assert!(stderr.contains("the bottom 7 (the base's 3)"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "the bottom 3 (the base's 3) merged into one composite, and the lowest 5 above the run base into another"
+        ),
+        "{stderr}"
+    );
     let l = layers(&ctx);
-    assert_eq!(l.iter().map(|(_, n)| *n).collect::<Vec<_>>(), [7, 1, 1, 1]);
+    assert_eq!(l.iter().map(|(_, n)| *n).collect::<Vec<_>>(), [3, 5, 1, 1]);
 
     // Above Firecracker's x86_64 ceiling: a warning, never a failure; nothing merged.
     let (_, stderr) = build(&ctx, repo.path(), &["--max-layers", "20"]);

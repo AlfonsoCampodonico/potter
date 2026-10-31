@@ -119,3 +119,53 @@ pub fn detect(claims: &[Claim], chosen: Option<ProviderId>) -> String {
     }
     s
 }
+
+/// What fitting an image into its layer budget merged, if anything.
+pub fn layer_merges(l: &potter_exec::assemble::LayerReport) -> Option<String> {
+    let over = format!("{} over the budget of {}", l.stacked, l.max_layers);
+    match (l.composite, l.app_composite) {
+        (0, 0) => None,
+        (c, 0) => Some(format!(
+            "{over}: the bottom {c} (the base's {}) merged into one composite",
+            l.base
+        )),
+        (0, a) => Some(format!("{over}: the lowest {a} above the run base merged into one")),
+        (c, a) => Some(format!(
+            "{over}: the bottom {c} (the base's {}) merged into one composite, and the lowest {a} above the run base into another",
+            l.base
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use potter_exec::assemble::LayerReport;
+
+    use super::layer_merges;
+
+    #[test]
+    fn layer_merges_names_each_side_of_the_run_base() {
+        let r = |composite, app_composite| LayerReport {
+            max_layers: 10,
+            base: 5,
+            run_base: 5,
+            stacked: 15,
+            composite,
+            app_composite,
+            kiln: 10,
+        };
+        assert_eq!(layer_merges(&r(0, 0)), None);
+        assert_eq!(
+            layer_merges(&r(5, 0)).unwrap(),
+            "15 over the budget of 10: the bottom 5 (the base's 5) merged into one composite"
+        );
+        assert_eq!(
+            layer_merges(&r(5, 2)).unwrap(),
+            "15 over the budget of 10: the bottom 5 (the base's 5) merged into one composite, and the lowest 2 above the run base into another"
+        );
+        assert_eq!(
+            layer_merges(&r(0, 2)).unwrap(),
+            "15 over the budget of 10: the lowest 2 above the run base merged into one"
+        );
+    }
+}

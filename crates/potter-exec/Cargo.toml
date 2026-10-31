@@ -8,11 +8,11 @@ description = "potter's build engine: inputs layers, bases, the namespace execut
 [dependencies]
 flate2 = "1.1.10"
 globset = "0.4.16"
-kiln-erofs = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
-kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
-kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
-kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
-kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "01e7a9fe288160cc2eef9dd1a4a205022b8aef77" }
+kiln-erofs = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
+kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 potter-cache = { path = "../potter-cache" }
 potter-plan = { path = "../potter-plan" }
 potter-supply = { path = "../potter-supply" }
@@ -23,7 +23,7 @@ rustix = { version = "1.1.5", features = ["fs", "process"] }
 tar = "0.4.44"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "c4363a2cfaf421aeaefad1e9c510040c1e0a0508" }
+vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "b1baf3a0712209dbe7c7659186ad02b702524d3e" }
 zstd = "0.14.0"
 
 [dev-dependencies]

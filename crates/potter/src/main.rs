@@ -93,6 +93,26 @@ enum Cmd {
         #[arg(long, value_parser = max_layers_arg)]
         max_layers: Option<u32>,
     },
+    /// Swap a built image's run base for a patched one without rebuilding it (spec §16)
+    Rebase {
+        /// The image in the kiln store: a name or a digest
+        image: String,
+        /// Another OCI reference for the run base (default: the recorded one, resolved again)
+        #[arg(long)]
+        base: Option<String>,
+        /// Tag the result (default: IMAGE, when it is a name)
+        #[arg(long)]
+        tag: Option<String>,
+        /// Where the runtime steps run on the new base
+        #[arg(long, value_enum)]
+        executor: Option<Executor>,
+        /// Whose cache the runtime steps use
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Print a JSON summary
+        #[arg(long)]
+        json: bool,
+    },
     /// Check a pushed image's SBOM, provenance and signature against a public key (spec §17)
     Verify {
         /// The image: <registry>/<repository>[:tag|@digest]
@@ -195,6 +215,14 @@ fn main() -> ExitCode {
             max_layers,
         } => plan(&path, target.as_deref(), json, explain, max_layers),
         Cmd::Detect { path } => detect(&path),
+        Cmd::Rebase {
+            image,
+            base,
+            tag,
+            executor,
+            tenant,
+            json,
+        } => rebase(&image, base.as_deref(), tag.as_deref(), executor, &tenant, json),
         Cmd::Verify {
             image,
             key,
@@ -540,6 +568,156 @@ fn read_secrets(flags: &[String]) -> Result<std::collections::BTreeMap<String, V
     Ok(out)
 }
 
+const VM: &str = "VM builds need kiln build mode (kiln M3e), which this potter does not have yet";
+
+/// Refuses every executor but `ns` on Linux, with the reason.
+fn check_executor(executor: Option<Executor>) -> Result<(), ExitCode> {
+    match executor {
+        None => {
+            return Err(fail(
+                &format!(
+                    "choose an executor: {VM}; pass --executor ns to build in Linux namespaces, which isolate less than a VM"
+                ),
+                4,
+            ));
+        }
+        Some(Executor::Vm) => {
+            return Err(fail(
+                &format!("{VM}; pass --executor ns to build in Linux namespaces"),
+                4,
+            ));
+        }
+        Some(Executor::Ns) => {}
+    }
+    if !cfg!(target_os = "linux") {
+        return Err(fail("the namespace executor needs Linux", 4));
+    }
+    Ok(())
+}
+
+/// The kiln store, potter's home and potter itself (the sandbox's helper).
+fn open_homes() -> Result<(kiln_store::Store, potter_cache::PotterHome, PathBuf), String> {
+    let store = kiln_store::Store::open(kiln_store::Store::default_root().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let home = potter_cache::PotterHome::open(potter_cache::PotterHome::default_root().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let potter = std::env::current_exe().map_err(|e| format!("finding potter itself: {e}"))?;
+    Ok((store, home, potter))
+}
+
+fn rebase(
+    image: &str,
+    base: Option<&str>,
+    tag: Option<&str>,
+    executor: Option<Executor>,
+    tenant: &str,
+    json: bool,
+) -> ExitCode {
+    use potter_exec::chain::{BuildCtx, Progress, StepState};
+    if let Err(code) = check_executor(executor) {
+        return code;
+    }
+    let (store, home, potter) = match open_homes() {
+        Ok(s) => s,
+        Err(e) => return fail(&e, 4),
+    };
+    let tenant = match potter_cache::Tenant::new(tenant) {
+        Ok(t) => t,
+        Err(e) => return fail(&e.to_string(), 2),
+    };
+    let tenant_key = match potter_cache::tenant_key(&home, &tenant) {
+        Ok(k) => k,
+        Err(e) => return fail(&e.to_string(), 4),
+    };
+    let index = match home.index(&tenant) {
+        Ok(i) => i,
+        Err(e) => return fail(&e.to_string(), 4),
+    };
+    let sandbox = potter_exec::sandboxed::SandboxCtx {
+        potter,
+        runs: home.runs(),
+    };
+    let _lock = match potter_exec::sandboxed::begin_build(&sandbox, &home) {
+        Ok(l) => l,
+        Err(e) => return fail(&e.to_string(), e.exit_code()),
+    };
+    let secrets = Default::default();
+    let mut progress = |p: Progress| match p {
+        Progress::Step { target, step, state } => {
+            let state = match state {
+                StepState::Cached | StepState::Pulled => "cached".to_string(),
+                StepState::Pushed => "pushed".to_string(),
+                StepState::Running => "running".to_string(),
+                StepState::Done { secs } => format!("done ({secs:.1}s)"),
+                StepState::Failed => "failed".to_string(),
+            };
+            eprintln!("[{}] {}: {state}", sanitize(&target), sanitize(&step));
+        }
+        Progress::Warning(w) => eprintln!("warning: {}", sanitize(&w)),
+        Progress::Log { target, step, line } => eprintln!("[{target}/{step}] {line}"),
+    };
+    let mut ctx = BuildCtx {
+        store: &store,
+        home: &home,
+        tenant: &tenant,
+        index: &index,
+        sandbox: &sandbox,
+        platform: kiln_oci::Platform::host(),
+        no_cache: false,
+        auth: kiln_registry::DockerConfig::from_env(),
+        executor: potter_cache::ExecutorClass::Ns,
+        backend: None,
+        secrets: &secrets,
+        tenant_key,
+        cache_from: None,
+        cache_to: None,
+        deps: Default::default(),
+        progress: &mut progress,
+    };
+    let req = potter_exec::rebase::Request { image, base, tag };
+    let r = match potter_exec::rebase::rebase(&mut ctx, &req) {
+        Ok(r) => r,
+        Err(e) => return fail(&e.to_string(), e.exit_code()),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "digest": r.digest.to_string(),
+                "tag": r.tag,
+                "unchanged": r.unchanged,
+                "old_base": r.old_base.to_string(),
+                "new_base": r.new_base.to_string(),
+                "base_ref": r.base_ref,
+                "base_digest": r.base_digest.to_string(),
+                "reused": r.reused,
+                "changed": r.changed,
+                "executed": r.executed,
+                "cached": r.cached,
+            })
+        );
+    } else if r.unchanged {
+        println!(
+            "{} is already on {}@{}",
+            sanitize(image),
+            sanitize(&r.base_ref),
+            r.base_digest
+        );
+    } else {
+        println!(
+            "{} {} on {}@{} ({} app layers kept, {} re-derived; replaced run base {})",
+            sanitize(r.tag.as_deref().unwrap_or(image)),
+            r.digest,
+            sanitize(&r.base_ref),
+            r.base_digest,
+            r.reused,
+            r.changed,
+            r.old_base
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build(
     path: &Path,
@@ -558,21 +736,8 @@ fn build(
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
-    const VM: &str = "VM builds need kiln build mode (kiln M3e), which this potter does not have yet";
-    match executor {
-        None => {
-            return fail(
-                &format!(
-                    "choose an executor: {VM}; pass --executor ns to build in Linux namespaces, which isolate less than a VM"
-                ),
-                4,
-            );
-        }
-        Some(Executor::Vm) => return fail(&format!("{VM}; pass --executor ns to build in Linux namespaces"), 4),
-        Some(Executor::Ns) => {}
-    }
-    if !cfg!(target_os = "linux") {
-        return fail("the namespace executor needs Linux", 4);
+    if let Err(code) = check_executor(executor) {
+        return code;
     }
     if !tags.is_empty() && only.len() != 1 {
         return fail("--tag needs exactly one --target", 2);
@@ -615,15 +780,7 @@ fn build(
         Err(e) => return fail(&e.to_string(), e.exit_code()),
     };
     let targets: Vec<&potter_plan::Target> = order.iter().map(|&i| &planned.plan.targets[i]).collect();
-    let setup = || -> Result<_, String> {
-        let store = kiln_store::Store::open(kiln_store::Store::default_root().map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        let home = potter_cache::PotterHome::open(potter_cache::PotterHome::default_root().map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        let potter = std::env::current_exe().map_err(|e| format!("finding potter itself: {e}"))?;
-        Ok((store, home, potter))
-    };
-    let (store, home, potter) = match setup() {
+    let (store, home, potter) = match open_homes() {
         Ok(s) => s,
         Err(e) => return fail(&e, 4),
     };
@@ -772,18 +929,11 @@ fn build(
                 "layers": b.layers.kiln,
                 "max_layers": b.layers.max_layers,
                 "composite": b.layers.composite,
+                "app_composite": b.layers.app_composite,
             })),
             Ok(b) => {
-                let l = &b.layers;
-                if l.composite > 0 {
-                    eprintln!(
-                        "[{}] layers: {} over the budget of {}: the bottom {} (the base's {}) merged into one composite",
-                        sanitize(&b.target),
-                        l.stacked,
-                        l.max_layers,
-                        l.composite,
-                        l.base
-                    );
+                if let Some(m) = render::layer_merges(&b.layers) {
+                    eprintln!("[{}] layers: {m}", sanitize(&b.target));
                 }
                 println!(
                     "{} {} (executed {}, cached {})",
