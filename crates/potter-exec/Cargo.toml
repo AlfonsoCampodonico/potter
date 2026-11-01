@@ -14,6 +14,7 @@ kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6b
 kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 potter-cache = { path = "../potter-cache" }
+potter-catalog = { path = "../potter-catalog" }
 potter-plan = { path = "../potter-plan" }
 potter-supply = { path = "../potter-supply" }
 serde = { version = "1.0.229", features = ["derive"] }

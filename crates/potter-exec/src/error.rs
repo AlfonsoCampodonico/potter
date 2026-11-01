@@ -48,6 +48,19 @@ impl BuildError {
     }
 }
 
+/// Catalog failures keep their exit codes: hostile 3, infrastructure 4, plan and unsatisfiable 2.
+impl From<potter_catalog::CatalogError> for BuildError {
+    fn from(e: potter_catalog::CatalogError) -> Self {
+        use potter_catalog::CatalogError as C;
+        let msg = e.to_string();
+        match e {
+            C::Hostile(_) => BuildError::Hostile(msg),
+            C::Infra(_) => BuildError::Infra(msg),
+            C::Unsatisfied(_) | C::Plan(_) => BuildError::Plan(msg),
+        }
+    }
+}
+
 /// An I/O error with what was being done.
 pub(crate) fn io(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> BuildError {
     let context = context.into();

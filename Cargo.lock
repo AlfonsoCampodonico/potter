@@ -1431,6 +1431,7 @@ dependencies = [
  "kiln-registry",
  "kiln-store",
  "potter-cache",
+ "potter-catalog",
  "potter-plan",
  "potter-supply",
  "rustix",

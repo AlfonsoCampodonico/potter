@@ -7,6 +7,7 @@ pub mod assemble;
 pub mod attest;
 pub mod base;
 pub mod chain;
+pub mod composite;
 mod error;
 pub mod graph;
 pub mod ingest;
