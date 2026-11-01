@@ -126,7 +126,7 @@ An image whose run base is a composite of catalog layers (spec §16) also carrie
 - `dev.potter.chain`: the layers above the run base that a rebase keeps (JSON array). With `export`, they are the runtime steps' layers, the export layer, then the generated-files layer when the image has `files`. Without it, they are every layer above the base, the files layer last. The init layer is not listed: kiln adds it after the manifest is written, and a rebase stacks the current one;
 - `dev.potter.sonames.needed`: the `DT_NEEDED` sonames of the ELF files in the export layer, or in every layer above the base when there is no export (JSON array). It is left out, with a warning, when the scan hits a cap: an ELF file over 256 MiB, more than 4 GiB of ELF files, more than 100 000 ELF files, an ELF file that does not parse, or a tar entry other than a regular file, directory, symlink or hard link (a sparse file or a device, say).
 
-The image config inherits its run base's labels. The kiln image records its run base (kiln's `base` record), converted as a kiln image of its own; see [rebase.md](rebase.md).
+The image config inherits its run base's labels. The kiln image records its run base (kiln's `base` record), converted as a kiln image of its own; see [rebase.md](rebase.md). A composite run base's own manifest carries `dev.potter.catalog.layers` too, naming the layers it is made of. A rebased image keeps the source manifest it was built from, so a rebase reads the layers an image is on now from its run base.
 
 ## Attestations (spec §17)
 

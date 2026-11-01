@@ -320,7 +320,7 @@ pub(crate) fn lower_base(
 }
 
 /// The catalog's name for `platform`'s architecture.
-fn catalog_arch(platform: &Platform) -> Result<Arch, BuildError> {
+pub(crate) fn catalog_arch(platform: &Platform) -> Result<Arch, BuildError> {
     match platform.architecture.as_str() {
         "amd64" | "x86_64" => Ok(Arch::X86_64),
         "arm64" | "aarch64" => Ok(Arch::Aarch64),

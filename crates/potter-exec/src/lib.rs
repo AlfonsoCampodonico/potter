@@ -28,4 +28,4 @@ mod testing;
 pub mod unpack;
 pub mod vm;
 
-pub use error::BuildError;
+pub use error::{BuildError, RefusedBy};

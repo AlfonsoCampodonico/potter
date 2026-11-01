@@ -118,6 +118,9 @@ enum Cmd {
         /// Resolve a catalog run base against this index (sha256:<hex>) instead of the catalog's current one
         #[arg(long)]
         catalog_index: Option<String>,
+        /// Print the catalog layers a rebase would replace and every gate's verdict, writing nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Check a pushed image's SBOM, provenance and signature against a public key (spec §17)
     Verify {
@@ -234,6 +237,7 @@ fn main() -> ExitCode {
             tenant,
             json,
             catalog_index,
+            dry_run,
         } => rebase(
             &image,
             base.as_deref(),
@@ -242,6 +246,7 @@ fn main() -> ExitCode {
             &tenant,
             json,
             catalog_index.as_deref(),
+            dry_run,
         ),
         Cmd::Verify {
             image,
@@ -632,13 +637,15 @@ fn open_homes() -> Result<(kiln_store::Store, potter_cache::PotterHome, PathBuf)
 }
 
 /// The catalog, loaded only when one of `bases` is built from it: PHP and OCI bases never
-/// fetch it (spec §7.2). Every catalog base is resolved and its layers fetched now, before any
-/// step runs, so that a base the catalog cannot satisfy or a bad layer fails the build early.
+/// fetch it (spec §7.2). With `prepare`, every catalog base is resolved and its layers fetched
+/// now, before any step runs, so that a base the catalog cannot satisfy or a bad layer fails the
+/// build early.
 fn load_catalog<'b>(
     store: &kiln_store::Store,
     home: &potter_cache::PotterHome,
     pin: Option<&str>,
     bases: impl IntoIterator<Item = &'b potter_plan::Base>,
+    prepare: bool,
 ) -> Result<Option<potter_exec::chain::CatalogCtx>, (String, u8)> {
     let bases: Vec<&potter_plan::Base> = bases.into_iter().collect();
     if !bases.iter().any(|b| potter_exec::chain::needs_catalog(b)) {
@@ -650,9 +657,11 @@ fn load_catalog<'b>(
     let failed = |e: potter_exec::BuildError| (e.to_string(), e.exit_code());
     let auth = kiln_registry::DockerConfig::from_env;
     let catalog = potter_exec::chain::CatalogCtx::load(store, home, pin, auth()).map_err(failed)?;
-    catalog
-        .prepare(store, bases, &kiln_oci::Platform::host(), auth())
-        .map_err(failed)?;
+    if prepare {
+        catalog
+            .prepare(store, bases, &kiln_oci::Platform::host(), auth())
+            .map_err(failed)?;
+    }
     Ok(Some(catalog))
 }
 
@@ -665,9 +674,11 @@ fn rebase(
     tenant: &str,
     json: bool,
     catalog_index: Option<&str>,
+    dry_run: bool,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
-    if let Err(code) = check_executor(executor) {
+    // A dry run runs nothing, so it needs no executor.
+    if let Err(code) = check_executor(executor).or_else(|code| if dry_run { Ok(()) } else { Err(code) }) {
         return code;
     }
     let (store, home, potter) = match open_homes() {
@@ -678,9 +689,13 @@ fn rebase(
         Ok(t) => t,
         Err(e) => return fail(&e.to_string(), 2),
     };
-    let tenant_key = match potter_cache::tenant_key(&home, &tenant) {
-        Ok(k) => k,
-        Err(e) => return fail(&e.to_string(), 4),
+    // A dry run hashes nothing with the tenant's key, so it never makes one.
+    let tenant_key = match dry_run {
+        true => [0; 32],
+        false => match potter_cache::tenant_key(&home, &tenant) {
+            Ok(k) => k,
+            Err(e) => return fail(&e.to_string(), 4),
+        },
     };
     let index = match home.index(&tenant) {
         Ok(i) => i,
@@ -690,18 +705,22 @@ fn rebase(
         potter,
         runs: home.runs(),
     };
-    // An image that cannot be read is reported by the rebase itself, and `--base` names an OCI
-    // base, which a rebase refuses for an image on a catalog one.
-    let recorded = potter_exec::rebase::recorded(&store, image)
-        .ok()
-        .filter(|_| base.is_none());
-    let catalog = match load_catalog(&store, &home, catalog_index, recorded.iter().map(|r| &r.run_chain.base)) {
+    // The run chain the rebase re-runs decides whether the catalog is loaded: an image built
+    // through the stopgap before P3 goes through it again, never the catalog. An image that
+    // cannot be read, or a `--base` the image refuses, is reported by the rebase itself.
+    let chain = potter_exec::rebase::recorded(&store, image)
+        .and_then(|r| potter_exec::rebase::rebase_chain(&r, base))
+        .ok();
+    let catalog = match load_catalog(&store, &home, catalog_index, chain.iter().map(|c| &c.base), !dry_run) {
         Ok(c) => c,
         Err((e, code)) => return fail(&e, code),
     };
-    let _lock = match potter_exec::sandboxed::begin_build(&sandbox, &home) {
-        Ok(l) => l,
-        Err(e) => return fail(&e.to_string(), e.exit_code()),
+    let _lock = match dry_run {
+        true => None,
+        false => match potter_exec::sandboxed::begin_build(&sandbox, &home) {
+            Ok(l) => Some(l),
+            Err(e) => return fail(&e.to_string(), e.exit_code()),
+        },
     };
     let secrets = Default::default();
     let mut progress = |p: Progress| match p {
@@ -737,11 +756,21 @@ fn rebase(
         catalog: catalog.as_ref(),
         progress: &mut progress,
     };
-    let req = potter_exec::rebase::Request { image, base, tag };
+    let req = potter_exec::rebase::Request {
+        image,
+        base,
+        tag,
+        catalog_index,
+        dry_run,
+    };
     let r = match potter_exec::rebase::rebase(&mut ctx, &req) {
         Ok(r) => r,
         Err(e) => return fail(&e.to_string(), e.exit_code()),
     };
+    let replaced: Vec<[&str; 2]> = r.replaced.iter().map(|(o, n)| [o.as_str(), n.as_str()]).collect();
+    if r.dry_run {
+        return print_dry_run(image, &r, json);
+    }
     if json {
         println!(
             "{}",
@@ -757,6 +786,7 @@ fn rebase(
                 "changed": r.changed,
                 "executed": r.executed,
                 "cached": r.cached,
+                "replaced": replaced,
             })
         );
     } else if r.unchanged {
@@ -767,18 +797,80 @@ fn rebase(
             r.base_digest
         );
     } else {
+        // A catalog image names the catalog layers it swapped, never the composite's display name.
+        let replaced = match r.replaced.is_empty() {
+            true => format!("replaced run base {}", r.old_base),
+            false => format!(
+                "replaced catalog layers {}",
+                r.replaced
+                    .iter()
+                    .map(|(o, n)| format!("{o} -> {n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
         println!(
-            "{} {} on {}@{} ({} app layers kept, {} re-derived; replaced run base {})",
+            "{} {} on {}@{} ({} app layers kept, {} re-derived; {replaced})",
             sanitize(r.tag.as_deref().unwrap_or(image)),
             r.digest,
             sanitize(&r.base_ref),
             r.base_digest,
             r.reused,
             r.changed,
-            r.old_base
         );
     }
     ExitCode::SUCCESS
+}
+
+/// `potter rebase --dry-run`: the layers a rebase would replace and every gate's verdict; exit 2
+/// when a catalog gate refuses. kiln's gates need the new run base built, so a dry run cannot
+/// check them.
+fn print_dry_run(image: &str, r: &potter_exec::rebase::Rebased, json: bool) -> ExitCode {
+    const KILN: &str = "not checked: kiln's gates need the new run base built";
+    let refused = r.verdicts.iter().any(|v| !v.refusals.is_empty());
+    if json {
+        let mut gates: Vec<serde_json::Value> = r
+            .verdicts
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "gate": v.gate,
+                    "verdict": if v.refusals.is_empty() { "pass" } else { "refused" },
+                    "reasons": v.refusals,
+                })
+            })
+            .collect();
+        gates.push(serde_json::json!({"gate": "kiln", "verdict": "not checked", "reasons": [KILN]}));
+        let replaced: Vec<[&str; 2]> = r.replaced.iter().map(|(o, n)| [o.as_str(), n.as_str()]).collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "dry_run": true,
+                "digest": r.digest.to_string(),
+                "index": r.base_ref.trim_start_matches("potter-catalog@"),
+                "replaced": replaced,
+                "gates": gates,
+            })
+        );
+    } else {
+        if r.replaced.is_empty() {
+            println!("{}: the catalog has nothing newer for its run base", sanitize(image));
+        }
+        for (o, n) in &r.replaced {
+            println!("{}: would replace {o} with {n}", sanitize(image));
+        }
+        for v in &r.verdicts {
+            match v.refusals.as_slice() {
+                [] => println!("{}: pass", v.gate),
+                reasons => println!("{}: refused: {}", v.gate, sanitize(&reasons.join("; "))),
+            }
+        }
+        println!("kiln: {KILN}");
+    }
+    match refused {
+        true => ExitCode::from(2),
+        false => ExitCode::SUCCESS,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -881,6 +973,7 @@ fn build(
         &home,
         catalog_index,
         targets.iter().flat_map(|t| [&t.build.base, &t.image.base]),
+        true,
     ) {
         Ok(c) => c,
         Err((e, code)) => return fail(&e, code),

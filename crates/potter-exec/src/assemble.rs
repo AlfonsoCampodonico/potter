@@ -186,6 +186,30 @@ impl RunBase {
         })
     }
 
+    /// The run base a run chain ended in: its base and runtime steps' layers, under its env, with
+    /// its catalog layers recorded when it is a composite.
+    pub fn of(store: &Store, run: &crate::chain::ChainState) -> Result<Self, String> {
+        let b = RunBase::new(store, &run.base_ref, &run.base, &run.env, &run.layers)?;
+        match &run.catalog {
+            Some(r) => b.with_catalog(store, r),
+            None => Ok(b),
+        }
+    }
+
+    /// Records the catalog layers `r` resolved to on the run base's own manifest. A rebased image
+    /// keeps the source manifest it was built from, whose `dev.potter.catalog.layers` then names
+    /// the layers it left; its run base's record says which ones it is on now.
+    pub fn with_catalog(mut self, store: &Store, r: &Resolution) -> Result<Self, String> {
+        let digests: Vec<&str> = r.entries.iter().map(|e| e.digest.as_str()).collect();
+        let list = serde_json::to_string(&digests).expect("a string list serialises");
+        let manifest = &mut self.resolved.manifest;
+        manifest.annotations = Some(BTreeMap::from([(ANN_CATALOG_LAYERS.to_string(), list)]));
+        self.resolved.manifest_digest = store
+            .put_bytes(&canonical_json(&self.resolved.manifest))
+            .map_err(|e| e.to_string())?;
+        Ok(self)
+    }
+
     pub fn layers(&self) -> usize {
         self.resolved.manifest.layers.len()
     }
@@ -506,6 +530,10 @@ pub fn build_target(
             &chain.base.env(),
             &chain.layers[..n],
         )
+        .and_then(|b| match &chain.catalog {
+            Some(r) => b.with_catalog(ctx.store, r),
+            None => Ok(b),
+        })
         .map_err(|e| infra(&e))?;
         // A rebase resolves a composite's catalog base again; any other base is an OCI one.
         let base = match &chain.catalog {
@@ -542,8 +570,7 @@ pub fn build_target(
             crate::stopgap::Role::Run,
         )?;
         let mut layers = run.layers.clone();
-        let run_base =
-            RunBase::new(ctx.store, &run.base_ref, &run.base, &run.env, &run.layers).map_err(|e| infra(&e))?;
+        let run_base = RunBase::of(ctx.store, &run).map_err(|e| infra(&e))?;
         steps.extend(run.records.iter().cloned());
         if run.catalog.is_none() {
             bases.push(BaseRecord {

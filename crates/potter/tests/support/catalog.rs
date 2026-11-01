@@ -20,6 +20,11 @@ pub struct Layer {
     pub tar: Vec<u8>,
     pub env: Vec<(String, String)>,
     pub requires: Vec<CatalogRef>,
+    /// ABI values over the defaults (`os` debian-13, `libc` glibc-2.41).
+    pub abi: Vec<(String, String)>,
+    pub provides_sonames: Vec<String>,
+    /// The entry this one replaces, which then drops out of the current entries.
+    pub supersedes: Option<String>,
 }
 
 impl Layer {
@@ -31,7 +36,20 @@ impl Layer {
             tar,
             env: Vec::new(),
             requires: Vec::new(),
+            abi: Vec::new(),
+            provides_sonames: Vec::new(),
+            supersedes: None,
         }
+    }
+
+    pub fn abi(mut self, key: &str, value: &str) -> Self {
+        self.abi.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn supersedes(mut self, digest: &str) -> Self {
+        self.supersedes = Some(digest.into());
+        self
     }
 
     pub fn env(mut self, key: &str, value: &str) -> Self {
@@ -85,6 +103,11 @@ impl TestCatalog {
         catalog
     }
 
+    /// The current entry named `name`.
+    pub fn current(&self, name: &str) -> &Entry {
+        self.index.current().find(|e| e.name == name).unwrap()
+    }
+
     /// Adds `layers` and publishes the index again as `serial`.
     pub fn publish(&mut self, serial: u64, layers: Vec<Layer>) {
         let blobs = self.dir.path().join("layers");
@@ -109,15 +132,16 @@ impl TestCatalog {
                 abi: [("os", "debian-13"), ("libc", "glibc-2.41")]
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .chain(l.abi)
                     .collect(),
                 requires: l.requires,
                 conflicts: vec![],
                 env: l.env.into_iter().collect(),
-                provides_sonames: vec![],
+                provides_sonames: l.provides_sonames,
                 executor: "ns".into(),
                 source: "https://example.test".into(),
                 license: "MIT".into(),
-                supersedes: None,
+                supersedes: l.supersedes,
                 fixes: vec![],
             });
         }

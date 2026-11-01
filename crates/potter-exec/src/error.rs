@@ -27,18 +27,34 @@ pub enum BuildError {
     StepOutput(String),
     #[error("{0}")]
     Infra(String),
-    /// A rebase that kiln's gates refused: the image needs a rebuild (spec §16).
-    #[error("the rebase is refused, rebuild the image instead: {}", .0.join("; "))]
-    RebaseRefused(Vec<String>),
+    /// A refused rebase: the image needs a rebuild (spec §16).
+    #[error("the rebase is refused, rebuild the image instead: {}", .reasons.join("; "))]
+    RebaseRefused { reasons: Vec<String>, by: RefusedBy },
+}
+
+/// Which gates refused a rebase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedBy {
+    /// kiln's: the new base changes in a way the app could notice (exit 1).
+    Kiln,
+    /// The catalog's (design §8): a line, ABI or soname change, or a record the image lacks (exit 2).
+    Catalog,
 }
 
 impl BuildError {
-    /// The process exit code (spec §11): 1 a step failed or a rebase was refused, 2 the plan or a usage error, 3 a
-    /// sandbox or protocol violation, 4 infrastructure.
+    /// The process exit code (spec §11): 1 a step failed or kiln refused a rebase, 2 the plan, a
+    /// usage error or a catalog gate's refusal, 3 a sandbox or protocol violation, 4 infrastructure.
     pub fn exit_code(&self) -> u8 {
         match self {
-            BuildError::StepFailed { .. } | BuildError::StepOutput(_) | BuildError::RebaseRefused(_) => 1,
-            BuildError::SymlinkEscape { .. }
+            BuildError::StepFailed { .. }
+            | BuildError::StepOutput(_)
+            | BuildError::RebaseRefused {
+                by: RefusedBy::Kiln, ..
+            } => 1,
+            BuildError::RebaseRefused {
+                by: RefusedBy::Catalog, ..
+            }
+            | BuildError::SymlinkEscape { .. }
             | BuildError::SpecialFile { .. }
             | BuildError::Unsupported { .. }
             | BuildError::Plan(_) => 2,
