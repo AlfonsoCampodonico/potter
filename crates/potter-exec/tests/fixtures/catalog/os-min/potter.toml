@@ -1,0 +1,14 @@
+# A stand-in os-min for the catalog driver's tests: the busybox root the sandbox tests serve
+# (the tests put its reference in for @BASE@), plus the two files the driver reads os-min's ABI
+# from. Nothing is downloaded.
+[target.os-min]
+provider = "none"
+
+[target.os-min.base]
+oci = "@BASE@"
+
+[target.os-min.steps.release]
+run = "mkdir -p /etc /var/lib/dpkg && printf 'ID=debian\\nVERSION_ID=\"13\"\\n' > /etc/os-release && printf 'Package: libc6\\nStatus: install ok installed\\nVersion: 2.41-12\\n\\n' > /var/lib/dpkg/status"
+
+[target.os-min.process.sh]
+cmd = ["/bin/sh"]

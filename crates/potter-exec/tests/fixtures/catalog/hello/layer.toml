@@ -1,0 +1,10 @@
+name = "hello"
+line = "1"
+version = "1.0.0"
+kind = "tool"
+requires = ["os-min"]
+env = { PATH = "/usr/local/bin" }
+source = "https://example.test/hello"
+license = "MIT"
+smoke = "test \"$(hello)\" = hello"
+fixes = ["TEST-2026-0001"]

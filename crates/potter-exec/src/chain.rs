@@ -67,6 +67,20 @@ impl CatalogCtx {
         Ok(CatalogCtx { verified })
     }
 
+    /// The verified index at `location`, trusting `extra` keys besides the usual ones (the
+    /// catalog driver's in-process key for the layout it is building). `home` keeps the
+    /// location's serial record.
+    pub fn load_at(
+        store: &Store,
+        home: &Path,
+        location: &Location,
+        auth: DockerConfig,
+        extra: &[potter_catalog::TrustedKey],
+    ) -> Result<Self, BuildError> {
+        let verified = potter_catalog::load_trusting(location, None, home, store, auth, extra)?;
+        Ok(CatalogCtx { verified })
+    }
+
     /// Resolves every catalog base among `bases` for `platform` and fetches each layer, so that an
     /// unsatisfiable base or a bad layer fails the invocation before any step runs (spec §7.2).
     /// The chains resolve again later, against the same index and with the layers in the store.

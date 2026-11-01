@@ -1,9 +1,10 @@
 //! ed25519 signatures over an index blob's SHA-256, and the keys that are trusted to make them.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+pub use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
-use ed25519_dalek::pkcs8::{DecodePublicKey, EncodePrivateKey, EncodePublicKey};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
+use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::CatalogError;
@@ -50,10 +51,20 @@ pub fn compiled_keys() -> Vec<TrustedKey> {
 
 /// The compiled keys plus the one named by `POTTER_CATALOG_KEY` (a path to a public-key PEM).
 pub fn trusted_keys() -> Result<Vec<TrustedKey>, CatalogError> {
-    let (keys, notes) = trusted_keys_with(std::env::var("POTTER_CATALOG_KEY").ok().as_deref())?;
-    for note in notes {
-        eprintln!("{note}");
+    trusted_keys_and(&[])
+}
+
+/// [`trusted_keys`] and `extra`, keys the process made itself (the catalog driver's ephemeral
+/// key). With `extra` the `POTTER_CATALOG_KEY` note is not printed again: a process that makes
+/// its own keys loads catalogs many times, and notes the variable on its first plain load.
+pub(crate) fn trusted_keys_and(extra: &[TrustedKey]) -> Result<Vec<TrustedKey>, CatalogError> {
+    let (mut keys, notes) = trusted_keys_with(std::env::var("POTTER_CATALOG_KEY").ok().as_deref())?;
+    if extra.is_empty() {
+        for note in notes {
+            eprintln!("{note}");
+        }
     }
+    keys.extend(extra.iter().cloned());
     Ok(keys)
 }
 
@@ -96,6 +107,11 @@ pub fn verify(blob_sha256: &[u8; 32], key_id: &str, sig_b64: &str, keys: &[Trust
         .key
         .verify_strict(blob_sha256, &sig)
         .map_err(|_| hostile(format!("the index signature does not verify under key {key_id}")))
+}
+
+/// The ed25519 signing key in a PKCS#8 PEM, as `potter key generate --ed25519` writes it.
+pub fn signing_key_from_pem(pem: &str) -> Result<SigningKey, String> {
+    SigningKey::from_pkcs8_pem(pem).map_err(|e| format!("not an ed25519 private key in PKCS#8 PEM: {e}"))
 }
 
 /// A new ed25519 key pair as PEM: (PKCS#8 private, SPKI public).

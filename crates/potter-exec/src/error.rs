@@ -27,6 +27,10 @@ pub enum BuildError {
     StepOutput(String),
     #[error("{0}")]
     Infra(String),
+    /// A catalog layer failed a check the catalog driver runs on it: an overlap or its smoke
+    /// test (design §6.2).
+    #[error("{0}")]
+    LayerCheck(String),
     /// A refused rebase: the image needs a rebuild (spec §16).
     #[error("the rebase is refused, rebuild the image instead: {}", .reasons.join("; "))]
     RebaseRefused { reasons: Vec<String>, by: RefusedBy },
@@ -42,12 +46,14 @@ pub enum RefusedBy {
 }
 
 impl BuildError {
-    /// The process exit code (spec §11): 1 a step failed or kiln refused a rebase, 2 the plan, a
-    /// usage error or a catalog gate's refusal, 3 a sandbox or protocol violation, 4 infrastructure.
+    /// The process exit code (spec §11): 1 a step failed, a catalog layer failed its checks or
+    /// kiln refused a rebase, 2 the plan, a usage error or a catalog gate's refusal, 3 a sandbox
+    /// or protocol violation, 4 infrastructure.
     pub fn exit_code(&self) -> u8 {
         match self {
             BuildError::StepFailed { .. }
             | BuildError::StepOutput(_)
+            | BuildError::LayerCheck(_)
             | BuildError::RebaseRefused {
                 by: RefusedBy::Kiln, ..
             } => 1,

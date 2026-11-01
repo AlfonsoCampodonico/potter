@@ -7,6 +7,7 @@ pub mod apt;
 pub mod assemble;
 pub mod attest;
 pub mod base;
+pub mod catalog_build;
 pub mod chain;
 pub mod composite;
 mod error;

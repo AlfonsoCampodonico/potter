@@ -1375,6 +1375,7 @@ dependencies = [
  "tar",
  "tempfile",
  "vmkit",
+ "zstd",
 ]
 
 [[package]]
@@ -1452,6 +1453,7 @@ dependencies = [
  "kiln-store",
  "potter-cache",
  "potter-catalog",
+ "potter-config",
  "potter-plan",
  "potter-supply",
  "rustix",
@@ -1461,6 +1463,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "toml",
  "vmkit",
  "zstd",
 ]

@@ -19,7 +19,8 @@ use kiln_store::{Digest, HashingReader, Store, StoreError};
 use sha2::{Digest as _, Sha256};
 
 use crate::location::INDEX_TAG;
-use crate::{CatalogError, Entry, Index, Location, MAX_INDEX_BYTES, TrustedKey, trusted_keys, verify};
+use crate::sign::trusted_keys_and;
+use crate::{CatalogError, Entry, Index, Location, MAX_INDEX_BYTES, TrustedKey, verify};
 
 /// The index artifact's `artifactType`, and its one layer's media type.
 pub const INDEX_TYPE: &str = "application/vnd.potter.catalog.index.v1+json";
@@ -238,7 +239,20 @@ pub fn load(
     store: &Store,
     auth: DockerConfig,
 ) -> Result<Verified, CatalogError> {
-    load_with(loc, pin, home, store, auth, &trusted_keys()?)
+    load_trusting(loc, pin, home, store, auth, &[])
+}
+
+/// [`load`], trusting `extra` keys too, next to the compiled ones and `POTTER_CATALOG_KEY`'s:
+/// the catalog driver's in-process key for the layout it is building.
+pub fn load_trusting(
+    loc: &Location,
+    pin: Option<&str>,
+    home: &Path,
+    store: &Store,
+    auth: DockerConfig,
+    extra: &[TrustedKey],
+) -> Result<Verified, CatalogError> {
+    load_with(loc, pin, home, store, auth, &trusted_keys_and(extra)?)
 }
 
 pub(crate) fn load_with(
@@ -388,11 +402,15 @@ pub fn write_layout(
     let blobs = dir.join("blobs/sha256");
     fs::create_dir_all(&blobs).map_err(fail)?;
     fs::write(dir.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#).map_err(fail)?;
+    // Each blob is written to a temp file and renamed into place, so an interrupted write never
+    // leaves a torn blob under its digest; one already there is kept only if it is whole.
     let put = |bytes: &[u8]| -> Result<Descriptor, CatalogError> {
         let d = Digest::of(bytes);
         let path = blobs.join(d.hex());
-        if !path.is_file() {
-            fs::write(&path, bytes).map_err(fail)?;
+        if fs::read(&path).ok().as_deref() != Some(bytes) {
+            let mut tmp = tempfile::NamedTempFile::new_in(&blobs).map_err(fail)?;
+            tmp.write_all(bytes).map_err(fail)?;
+            tmp.persist(&path).map_err(|e| fail(e.error))?;
         }
         Ok(Descriptor::new(OCI_MANIFEST, d, bytes.len() as u64))
     };
@@ -426,11 +444,22 @@ pub fn write_layout(
     }
 
     let index_json = dir.join("index.json");
-    let mut manifests: Vec<Descriptor> = fs::read(&index_json)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<ImageIndex>(&b).ok())
-        .map(|i| i.manifests)
-        .unwrap_or_default()
+    // An index.json that does not parse would lose every name it holds: refuse it.
+    let existing = match fs::read(&index_json) {
+        Ok(b) => {
+            serde_json::from_slice::<ImageIndex>(&b)
+                .map_err(|e| {
+                    CatalogError::Infra(format!(
+                        "the catalog layout {}: index.json does not parse ({e}); refusing to replace it",
+                        dir.display()
+                    ))
+                })?
+                .manifests
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(fail(e)),
+    };
+    let mut manifests: Vec<Descriptor> = existing
         .into_iter()
         .filter(|m| !named.iter().any(|(n, _)| m.annotation(REF_NAME) == Some(n)))
         .collect();
@@ -451,11 +480,20 @@ pub fn write_layout(
     Ok(index_manifest)
 }
 
+/// Whether the blob at `path` is `want`'s bytes, as a blob left by an interrupted copy is not.
+fn is_whole(path: &Path, want: &Descriptor) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == want.size)
+        && fs::File::open(path)
+            .ok()
+            .and_then(|f| HashingReader::new(f).finish_to_eof().ok())
+            .is_some_and(|(d, _)| d == want.digest)
+}
+
 /// Copies the layer at `from` into `blobs`, checking it is `want`.
 fn copy_blob(from: &Path, blobs: &Path, want: &Descriptor) -> Result<(), CatalogError> {
     let fail = |e: io::Error| CatalogError::Infra(format!("copying layer {}: {e}", from.display()));
     let dest = blobs.join(want.digest.hex());
-    if dest.is_file() {
+    if is_whole(&dest, want) {
         return Ok(());
     }
     let mut reader = HashingReader::new(fs::File::open(from).map_err(fail)?);
@@ -778,6 +816,62 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(err.exit_code(), 4);
+    }
+
+    #[test]
+    fn an_unparseable_index_json_is_refused_not_dropped() {
+        let f = fx();
+        std::fs::create_dir_all(&f.layout).unwrap();
+        std::fs::write(f.layout.join("index.json"), b"{not json").unwrap();
+        let blob = f.index(7);
+        let (id, sig) = sign(&Sha256::digest(&blob).into(), &f.key);
+        let err = write_layout(&f.layout, &blob, &id, &sig, std::slice::from_ref(&f.layer)).unwrap_err();
+        assert!(
+            matches!(&err, CatalogError::Infra(m) if m.contains("index.json")),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::fs::read(f.layout.join("index.json")).unwrap(),
+            b"{not json",
+            "the unparseable index.json is left for a person to look at"
+        );
+    }
+
+    #[test]
+    fn a_torn_blob_from_an_interrupted_write_is_replaced() {
+        let f = fx();
+        let blob = f.index(7);
+        let d = Digest::of(&blob).to_string();
+        std::fs::create_dir_all(f.layout.join("blobs/sha256")).unwrap();
+        std::fs::write(f.blob_path(&d), &blob[..blob.len() / 2]).unwrap();
+        std::fs::write(f.blob_path(&f.layer.0.digest.to_string()), b"a go").unwrap();
+        f.publish(7);
+        let v = f.load(&f.loc(), None).unwrap();
+        assert_eq!(v.digest, d);
+        assert_eq!(
+            std::fs::read(f.blob_path(&f.layer.0.digest.to_string())).unwrap(),
+            b"a go layer"
+        );
+        // Nothing is left behind next to the blobs.
+        let names: Vec<_> = std::fs::read_dir(f.layout.join("blobs/sha256"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(names.iter().all(|n| n.len() == 64), "{names:?}");
+    }
+
+    #[test]
+    fn an_extra_in_process_key_is_trusted_through_the_env_seam() {
+        let f = fx();
+        f.publish(7);
+        let extra = TrustedKey::new(f.key.verifying_key());
+        let v = load_trusting(&f.loc(), None, &f.home, &f.store, DockerConfig::anonymous(), &[extra]).unwrap();
+        assert_eq!(v.index.serial, 7);
+        // Without it the fixture key is not trusted.
+        hostile(
+            load_trusting(&f.loc(), None, &f.home, &f.store, DockerConfig::anonymous(), &[]),
+            "not trusted",
+        );
     }
 
     #[test]

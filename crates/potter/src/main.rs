@@ -206,6 +206,28 @@ enum CatalogCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Build every recipe of a catalog directory into a signed OCI layout (the catalog's CI)
+    #[command(hide = true)]
+    Build {
+        /// One <name>/potter.toml and <name>/layer.toml per layer
+        catalog_dir: PathBuf,
+        /// The OCI layout to write
+        #[arg(long)]
+        out: PathBuf,
+        /// The ed25519 private key (PKCS#8 PEM) that signs the index
+        #[arg(long)]
+        sign_key: PathBuf,
+        /// The catalog this one follows, verified first: <registry ref> or oci-layout:<dir>
+        #[arg(long)]
+        previous: Option<String>,
+    },
+    /// Verify a catalog layout with the trusted keys, then push its layers and its index
+    #[command(hide = true)]
+    Publish {
+        layout: PathBuf,
+        /// <registry>/<repository>:<tag>
+        registry_ref: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1238,6 +1260,17 @@ fn catalog(command: CatalogCmd) -> ExitCode {
 fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
     use potter_catalog::{Entry, fetch_layer};
     let catalog_err = |e: potter_catalog::CatalogError| (e.to_string(), e.exit_code());
+    // Building and publishing make a catalog: they never read the configured one.
+    let command = match command {
+        CatalogCmd::Build {
+            catalog_dir,
+            out,
+            sign_key,
+            previous,
+        } => return catalog_build(&catalog_dir, &out, &sign_key, previous.as_deref()),
+        CatalogCmd::Publish { layout, registry_ref } => return catalog_publish(&layout, &registry_ref),
+        other => other,
+    };
     let pin = match &command {
         CatalogCmd::Verify { catalog_index } => catalog_index.as_deref(),
         _ => None,
@@ -1333,6 +1366,7 @@ fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
             }
             println!("ok {n} layers");
         }
+        CatalogCmd::Build { .. } | CatalogCmd::Publish { .. } => unreachable!("handled above"),
         CatalogCmd::Affected { what, json } => {
             let mut rows: Vec<(&Entry, Option<String>)> = Vec::new();
             if what.starts_with("sha256:") {
@@ -1376,5 +1410,91 @@ fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
             }
         }
     }
+    Ok(())
+}
+
+/// `potter catalog build`: every recipe built with the namespace executor in the `catalog`
+/// tenant, checked, and written to `out` signed with `sign_key`. Exit 1 when a layer overlaps
+/// another or fails its smoke test, 2 for a recipe or usage error, 3 when `previous` does not
+/// verify, 4 for infrastructure.
+fn catalog_build(catalog_dir: &Path, out: &Path, sign_key: &Path, previous: Option<&str>) -> Result<(), (String, u8)> {
+    use potter_exec::chain::{Progress, StepState};
+    let built = |e: potter_exec::BuildError| (e.to_string(), e.exit_code());
+    let pem = std::fs::read_to_string(sign_key).map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 4))?;
+    let key = potter_catalog::signing_key_from_pem(&pem)
+        .map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
+    let previous = previous
+        .map(potter_catalog::Location::parse)
+        .transpose()
+        .map_err(|e| (format!("--previous: {e}"), e.exit_code()))?;
+    if !cfg!(target_os = "linux") {
+        return Err(("the namespace executor needs Linux".into(), 4));
+    }
+    let (store, home, potter) = open_homes().map_err(|e| (e, 4))?;
+    let sandbox = potter_exec::sandboxed::SandboxCtx {
+        potter,
+        runs: home.runs(),
+    };
+    let _lock = potter_exec::sandboxed::begin_build(&sandbox, &home).map_err(built)?;
+    let mut progress = |p: Progress| match p {
+        Progress::Step { target, step, state } => {
+            let state = match state {
+                StepState::Cached | StepState::Pulled => "cached".to_string(),
+                StepState::Pushed => "pushed".to_string(),
+                StepState::Running => "running".to_string(),
+                StepState::Done { secs } => format!("done ({secs:.1}s)"),
+                StepState::Failed => "failed".to_string(),
+            };
+            eprintln!("[{}] {}: {state}", sanitize(&target), sanitize(&step));
+        }
+        Progress::Warning(w) => eprintln!("warning: {}", sanitize(&w)),
+        Progress::Log { target, step, line } => eprintln!("[{target}/{step}] {line}"),
+    };
+    let mut parts = potter_exec::catalog_build::Parts {
+        store: &store,
+        home: &home,
+        sandbox: &sandbox,
+        platform: kiln_oci::Platform::host(),
+        auth: kiln_registry::DockerConfig::from_env(),
+        progress: &mut progress,
+    };
+    let req = potter_exec::catalog_build::Request {
+        catalog_dir,
+        out,
+        sign_key: &key,
+        previous: previous.as_ref(),
+        created: now_rfc3339(),
+    };
+    let report = potter_exec::catalog_build::build(&mut parts, &req).map_err(built)?;
+    for (e, outcome) in &report.layers {
+        use potter_exec::catalog_build::assign::Outcome;
+        let what = match outcome {
+            Outcome::New => "new".to_string(),
+            Outcome::Kept => "kept".to_string(),
+            Outcome::Supersedes(old) => format!("supersedes {old}"),
+        };
+        println!("{} {} {} {what}", sanitize(&e.name), sanitize(&e.version), e.digest);
+    }
+    println!(
+        "wrote {}: serial {}, index {}",
+        sanitize(&out.display().to_string()),
+        report.index.serial,
+        report.digest
+    );
+    Ok(())
+}
+
+/// `potter catalog publish`: 3 when the layout does not verify under the trusted keys, 4 when
+/// the registry fails.
+fn catalog_publish(layout: &Path, registry_ref: &str) -> Result<(), (String, u8)> {
+    let to = kiln_registry::Reference::parse(registry_ref).map_err(|e| (format!("{registry_ref}: {e}"), 2))?;
+    let v = potter_exec::catalog_build::publish(layout, &to, kiln_registry::DockerConfig::from_env())
+        .map_err(|e| (e.to_string(), e.exit_code()))?;
+    println!(
+        "pushed {} serial {} index {}",
+        sanitize(registry_ref),
+        v.index.serial,
+        v.digest
+    );
     Ok(())
 }

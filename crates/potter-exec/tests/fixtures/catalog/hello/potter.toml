@@ -1,0 +1,11 @@
+[target.hello]
+provider = "none"
+
+[target.hello.base]
+catalog = ["os-min"]
+
+[target.hello.steps.install]
+run = "mkdir -p /usr/local/bin && printf '#!/bin/sh\\necho hello\\n' > /usr/local/bin/hello && busybox chmod 755 /usr/local/bin/hello"
+
+[target.hello.process.hello]
+cmd = ["/usr/local/bin/hello"]
