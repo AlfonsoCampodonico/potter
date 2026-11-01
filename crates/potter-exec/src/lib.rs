@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod affected;
+pub mod apt;
 pub mod assemble;
 pub mod attest;
 pub mod base;

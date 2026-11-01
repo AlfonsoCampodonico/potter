@@ -92,6 +92,9 @@ enum Cmd {
         /// Above it the bottom layers merge into one composite, the base's first
         #[arg(long, value_parser = max_layers_arg)]
         max_layers: Option<u32>,
+        /// Resolve catalog bases against this index (sha256:<hex>) instead of the catalog's current one
+        #[arg(long)]
+        catalog_index: Option<String>,
     },
     /// Swap a built image's run base for a patched one without rebuilding it (spec §16)
     Rebase {
@@ -112,6 +115,9 @@ enum Cmd {
         /// Print a JSON summary
         #[arg(long)]
         json: bool,
+        /// Resolve a catalog run base against this index (sha256:<hex>) instead of the catalog's current one
+        #[arg(long)]
+        catalog_index: Option<String>,
     },
     /// Check a pushed image's SBOM, provenance and signature against a public key (spec §17)
     Verify {
@@ -227,7 +233,16 @@ fn main() -> ExitCode {
             executor,
             tenant,
             json,
-        } => rebase(&image, base.as_deref(), tag.as_deref(), executor, &tenant, json),
+            catalog_index,
+        } => rebase(
+            &image,
+            base.as_deref(),
+            tag.as_deref(),
+            executor,
+            &tenant,
+            json,
+            catalog_index.as_deref(),
+        ),
         Cmd::Verify {
             image,
             key,
@@ -255,6 +270,7 @@ fn main() -> ExitCode {
             source_revision,
             tenant_key_file,
             max_layers,
+            catalog_index,
         } => {
             let publish = match Publish::check(output.as_deref(), sign_key, builder_id, source_revision, &target) {
                 Ok(p) => p,
@@ -280,6 +296,7 @@ fn main() -> ExitCode {
                 publish.as_ref(),
                 tenant_key,
                 max_layers,
+                catalog_index.as_deref(),
             )
         }
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
@@ -614,6 +631,23 @@ fn open_homes() -> Result<(kiln_store::Store, potter_cache::PotterHome, PathBuf)
     Ok((store, home, potter))
 }
 
+/// The catalog, loaded only when one of `bases` is built from it: PHP and OCI bases never
+/// fetch it (spec §7.2).
+fn load_catalog<'b>(
+    store: &kiln_store::Store,
+    home: &potter_cache::PotterHome,
+    pin: Option<&str>,
+    mut bases: impl Iterator<Item = &'b potter_plan::Base>,
+) -> Result<Option<potter_exec::chain::CatalogCtx>, (String, u8)> {
+    if !bases.any(potter_exec::chain::needs_catalog) {
+        return Ok(None);
+    }
+    potter_exec::chain::CatalogCtx::load(store, home, pin, kiln_registry::DockerConfig::from_env())
+        .map(Some)
+        .map_err(|e| (e.to_string(), e.exit_code()))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn rebase(
     image: &str,
     base: Option<&str>,
@@ -621,6 +655,7 @@ fn rebase(
     executor: Option<Executor>,
     tenant: &str,
     json: bool,
+    catalog_index: Option<&str>,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     if let Err(code) = check_executor(executor) {
@@ -649,6 +684,12 @@ fn rebase(
     let _lock = match potter_exec::sandboxed::begin_build(&sandbox, &home) {
         Ok(l) => l,
         Err(e) => return fail(&e.to_string(), e.exit_code()),
+    };
+    // An image that cannot be read is reported by the rebase itself.
+    let recorded = potter_exec::rebase::recorded(&store, image).ok();
+    let catalog = match load_catalog(&store, &home, catalog_index, recorded.iter().map(|r| &r.run_chain.base)) {
+        Ok(c) => c,
+        Err((e, code)) => return fail(&e, code),
     };
     let secrets = Default::default();
     let mut progress = |p: Progress| match p {
@@ -681,6 +722,7 @@ fn rebase(
         cache_from: None,
         cache_to: None,
         deps: Default::default(),
+        catalog: catalog.as_ref(),
         progress: &mut progress,
     };
     let req = potter_exec::rebase::Request { image, base, tag };
@@ -742,6 +784,7 @@ fn build(
     publish: Option<&Publish>,
     tenant_key_flag: Option<[u8; 32]>,
     max_layers: Option<u32>,
+    catalog_index: Option<&str>,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
@@ -821,6 +864,15 @@ fn build(
         Ok(i) => i,
         Err(e) => return fail(&e.to_string(), 4),
     };
+    let catalog = match load_catalog(
+        &store,
+        &home,
+        catalog_index,
+        targets.iter().flat_map(|t| [&t.build.base, &t.image.base]),
+    ) {
+        Ok(c) => c,
+        Err((e, code)) => return fail(&e, code),
+    };
     let sandbox = potter_exec::sandboxed::SandboxCtx {
         potter,
         runs: home.runs(),
@@ -875,6 +927,7 @@ fn build(
         cache_from: cache_from.as_ref(),
         cache_to: cache_to.as_ref(),
         deps: Default::default(),
+        catalog: catalog.as_ref(),
         progress: &mut progress,
     };
     let sign_key = match publish

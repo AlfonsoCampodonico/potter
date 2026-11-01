@@ -413,7 +413,7 @@ pub fn build_target(
     let image = &target.image;
     let infra = |e: &dyn std::fmt::Display| BuildError::Infra(format!("target {}: {e}", target.name));
     // The image's base: its own chain (the run base and its runtime steps), or with no exports
-    // the build chain itself, whose run base is the OCI base it was lowered onto.
+    // the build chain itself, whose run base is the OCI base it was lowered onto or its composite.
     let mut steps = Vec::new();
     let mut bases = Vec::new();
     let (run_base, run_chain, mut layers): (RunBase, Chain, Vec<LayerRef>) = if image.export.is_empty() {
@@ -432,11 +432,16 @@ pub fn build_target(
             &chain.layers[..n],
         )
         .map_err(|e| infra(&e))?;
-        let run_chain = Chain {
-            base: Base::Oci {
+        // A rebase resolves a composite's catalog base again; any other base is an OCI one.
+        let base = match &chain.catalog {
+            Some(_) => target.build.base.clone(),
+            None => Base::Oci {
                 reference: chain.base_ref.clone(),
                 digest: None,
             },
+        };
+        let run_chain = Chain {
+            base,
             steps: Vec::new(),
         };
         (run_base, run_chain, chain.layers.clone())

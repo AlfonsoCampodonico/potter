@@ -33,6 +33,11 @@ cmd = ["/bin/cat", "/app/out"]
 }
 
 fn build(ctx: &Ctx, repo: &Path, extra: &[&str]) -> (i32, String, String) {
+    build_with(ctx, repo, extra, &[])
+}
+
+/// `potter build` with `env` set too.
+fn build_with(ctx: &Ctx, repo: &Path, extra: &[&str], env: &[(&str, String)]) -> (i32, String, String) {
     let out = Command::cargo_bin("potter")
         .unwrap()
         .args(["build", "--executor", "ns"])
@@ -40,6 +45,7 @@ fn build(ctx: &Ctx, repo: &Path, extra: &[&str]) -> (i32, String, String) {
         .arg(repo)
         .env("KILN_HOME", ctx.store.root())
         .env("POTTER_HOME", ctx.home.root())
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .output()
         .unwrap();
     (
@@ -114,6 +120,80 @@ fn build_detected(ctx: &Ctx, files: &[(&str, &str)]) -> Vec<String> {
     let digest = kiln_image::resolve_name(&ctx.store, "potter/app:latest").unwrap();
     let loaded = kiln_image::load(&ctx.store, &digest).unwrap();
     loaded.entries[0].1.config.process.entrypoint.clone()
+}
+
+/// A detected Go module built on the catalog: the build base is the composite of a busybox
+/// `os-min` and a fake `go`, the run base `os-min` alone. No registry and no network.
+#[test]
+fn detected_go_builds_on_a_test_catalog() {
+    let Some(ctx) = Ctx::new() else { return };
+    let repo = tempfile::tempdir().unwrap();
+    write(
+        repo.path(),
+        &[
+            ("go.mod", "module example.com/hello\n\ngo 1.25\n"),
+            ("main.go", "package main\n\nfunc main() {}\n"),
+        ],
+    );
+    // The go line the plan asks for.
+    let plan = Command::cargo_bin("potter")
+        .unwrap()
+        .args(["plan", "--json"])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    let layers = &plan["targets"][0]["build"]["base"]["layers"];
+    let line = layers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == "go")
+        .and_then(|l| l["version"].as_str())
+        .unwrap()
+        .to_string();
+    let catalog = support::catalog::go_catalog(&line);
+    let (code, stdout, stderr) = build_with(&ctx, repo.path(), &[], &catalog.env());
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.starts_with("potter/app:latest sha256:"), "{stdout}");
+    assert!(stdout.contains("(executed 2, cached 0)"), "{stdout}");
+    assert!(stderr.contains("using the catalog at oci-layout:"), "{stderr}");
+    assert!(stderr.contains("[app] build: done"), "{stderr}");
+    let digest = kiln_image::resolve_name(&ctx.store, "potter/app:latest").unwrap();
+    let loaded = kiln_image::load(&ctx.store, &digest).unwrap();
+    assert_eq!(loaded.entries[0].1.config.process.entrypoint, ["/out/app"]);
+    // The composite was cached under potter's home.
+    let composites = std::fs::read_dir(ctx.home.root().join("composite")).unwrap().count();
+    assert_eq!(composites, 2, "the build base and the run base");
+
+    // Pinned to the same index, everything is cached; a pin the catalog lacks is refused.
+    let pin = catalog.digest.clone();
+    let (code, stdout, stderr) = build_with(&ctx, repo.path(), &["--catalog-index", &pin], &catalog.env());
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("(executed 0, cached 2)"), "{stdout}");
+    let other = format!("sha256:{}", "0".repeat(64));
+    let (code, _, stderr) = build_with(&ctx, repo.path(), &["--catalog-index", &other], &catalog.env());
+    assert_ne!(code, 0, "{stderr}");
+    assert!(stderr.contains("catalog"), "{stderr}");
+
+    // A rebase resolves the catalog run base again: the same index gives the same composite.
+    let out = Command::cargo_bin("potter")
+        .unwrap()
+        .args(["rebase", "potter/app:latest", "--executor", "ns", "--json"])
+        .env("KILN_HOME", ctx.store.root())
+        .env("POTTER_HOME", ctx.home.root())
+        .envs(catalog.env())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["unchanged"], true, "{summary}");
+    assert_eq!(
+        summary["base_ref"],
+        format!("potter-catalog@{}", catalog.digest),
+        "{summary}"
+    );
 }
 
 #[test]

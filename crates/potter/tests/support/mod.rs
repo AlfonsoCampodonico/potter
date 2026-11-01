@@ -2,6 +2,8 @@
 //! `vmkit-sandbox` that may create user namespaces), `newuidmap` and a subordinate id range.
 #![allow(dead_code)]
 
+pub mod catalog;
+
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -192,6 +194,7 @@ impl Ctx {
             cache_from: None,
             cache_to: None,
             deps: Default::default(),
+            catalog: None,
             progress: &mut progress,
         };
         potter_exec::chain::run_chain(&mut ctx, target, repo)
@@ -223,6 +226,7 @@ impl Ctx {
             cache_from: None,
             cache_to: None,
             deps: Default::default(),
+            catalog: None,
             progress: &mut progress,
         };
         potter_exec::assemble::build_target(&mut ctx, target, repo, tags)
@@ -261,6 +265,7 @@ impl Ctx {
             cache_from: None,
             cache_to: None,
             deps: Default::default(),
+            catalog: None,
             progress: &mut progress,
         };
         let r = potter_exec::chain::run_chain(&mut ctx, target, repo);
