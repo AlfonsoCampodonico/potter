@@ -66,6 +66,29 @@ impl CatalogCtx {
         let verified = potter_catalog::load(&location, pin, home.root(), store, auth)?;
         Ok(CatalogCtx { verified })
     }
+
+    /// Resolves every catalog base among `bases` for `platform` and fetches each layer, so that an
+    /// unsatisfiable base or a bad layer fails the invocation before any step runs (spec §7.2).
+    /// The chains resolve again later, against the same index and with the layers in the store.
+    pub fn prepare<'b>(
+        &self,
+        store: &Store,
+        bases: impl IntoIterator<Item = &'b Base>,
+        platform: &Platform,
+        auth: DockerConfig,
+    ) -> Result<(), BuildError> {
+        for base in bases {
+            let Base::Catalog { layers } = base else { continue };
+            if !needs_catalog(base) {
+                continue;
+            }
+            let r = resolve(&self.verified, layers, catalog_arch(platform)?)?;
+            for e in &r.entries {
+                fetch_layer(&self.verified, e, store, auth.clone())?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Whether `base` is built from the catalog: a catalog base with no PHP-only layer. PHP bases
@@ -1322,6 +1345,50 @@ mod tests {
     }
 
     #[test]
+    fn prepare_resolves_and_fetches_every_catalog_base_up_front() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = test_catalog(&dir.path().join("catalog"));
+        let store = kiln_store::Store::open(dir.path().join("kiln")).unwrap();
+        let arm = kiln_oci::Platform::parse("linux/arm64").unwrap();
+        let anon = kiln_registry::DockerConfig::anonymous;
+        let build = catalog(&[("os-min", None), ("go", Some("1.25"))]);
+        let php = catalog(&[("php", Some("8.4"))]);
+        cat.prepare(&store, [&build, &php, &oci()], &arm, anon()).unwrap();
+        for e in &cat.verified.index.entries {
+            assert!(
+                store.has_blob(&kiln_store::Digest::parse(&e.digest).unwrap()),
+                "{}",
+                e.name
+            );
+        }
+        // A base the catalog cannot satisfy fails before anything is built, whichever chain it is.
+        let run = catalog(&[("os-min", None), ("zig", Some("0.14"))]);
+        let err = cat.prepare(&store, [&build, &run], &arm, anon()).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
+        let riscv = kiln_oci::Platform::parse("linux/riscv64").unwrap();
+        assert_eq!(
+            cat.prepare(&store, [&build], &riscv, anon()).unwrap_err().exit_code(),
+            2
+        );
+        // Only PHP and OCI bases: the architecture is never asked about.
+        cat.prepare(&store, [&php, &oci()], &riscv, anon()).unwrap();
+        // A layer whose bytes do not match the index is hostile.
+        let dir = tempfile::tempdir().unwrap();
+        let cat = test_catalog(&dir.path().join("catalog"));
+        let go = cat.verified.index.entries.iter().find(|e| e.name == "go").unwrap();
+        let blob = dir
+            .path()
+            .join("catalog/layout/blobs/sha256")
+            .join(&go.digest["sha256:".len()..]);
+        let mut bytes = std::fs::read(&blob).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&blob, bytes).unwrap();
+        let store = kiln_store::Store::open(dir.path().join("kiln")).unwrap();
+        let err = cat.prepare(&store, [&build], &arm, anon()).unwrap_err();
+        assert_eq!(err.exit_code(), 3, "{err}");
+    }
+
+    #[test]
     fn apt_step_pins_the_snapshot() {
         let chain = Chain {
             base: catalog(&[("os-min", None), ("go", Some("1.25"))]),
@@ -1347,8 +1414,8 @@ mod tests {
             format!("http://snapshot.debian.org/archive/debian/{snap}/"),
             format!("http://snapshot.debian.org/archive/debian-security/{snap}/"),
             "Suites: trixie".into(),
-            "apt-get -o Acquire::Check-Valid-Until=false update".into(),
-            "apt-get install -y --no-install-recommends curl".into(),
+            "apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3 update".into(),
+            "apt-get -o Acquire::Retries=3 install -y --no-install-recommends curl".into(),
             "rm -rf /var/lib/apt/lists/*".into(),
         ] {
             assert!(script.contains(&want), "{want:?} not in {script}");

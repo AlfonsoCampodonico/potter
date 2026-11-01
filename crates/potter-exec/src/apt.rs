@@ -31,10 +31,10 @@ pub fn lower(step: &Step) -> Step {
          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg\n"
     );
     let script = format!(
-        "mkdir -p /etc/apt/sources.list.d && rm -f /etc/apt/sources.list && \
+        "mkdir -p /etc/apt/sources.list.d && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* && \
          cat > /etc/apt/sources.list.d/debian.sources <<'POTTER' &&\n{sources}POTTER\n\
-         apt-get -o Acquire::Check-Valid-Until=false update && \
-         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {} && \
+         apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3 update && \
+         DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends {} && \
          rm -rf /var/lib/apt/lists/*",
         packages.join(" ")
     );
@@ -84,5 +84,13 @@ mod tests {
         assert!(env.is_empty(), "the snapshot is in the script: {env:?}");
         assert!(script.contains("--no-install-recommends curl libpq5"), "{script}");
         assert!(script.ends_with("rm -rf /var/lib/apt/lists/*"), "{script}");
+        // Only the snapshot's sources are left, and a flaky mirror is retried.
+        assert!(
+            script.starts_with(
+                "mkdir -p /etc/apt/sources.list.d && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* && "
+            ),
+            "{script}"
+        );
+        assert_eq!(script.matches("-o Acquire::Retries=3").count(), 2, "{script}");
     }
 }

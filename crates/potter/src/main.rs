@@ -632,19 +632,28 @@ fn open_homes() -> Result<(kiln_store::Store, potter_cache::PotterHome, PathBuf)
 }
 
 /// The catalog, loaded only when one of `bases` is built from it: PHP and OCI bases never
-/// fetch it (spec §7.2).
+/// fetch it (spec §7.2). Every catalog base is resolved and its layers fetched now, before any
+/// step runs, so that a base the catalog cannot satisfy or a bad layer fails the build early.
 fn load_catalog<'b>(
     store: &kiln_store::Store,
     home: &potter_cache::PotterHome,
     pin: Option<&str>,
-    mut bases: impl Iterator<Item = &'b potter_plan::Base>,
+    bases: impl IntoIterator<Item = &'b potter_plan::Base>,
 ) -> Result<Option<potter_exec::chain::CatalogCtx>, (String, u8)> {
-    if !bases.any(potter_exec::chain::needs_catalog) {
+    let bases: Vec<&potter_plan::Base> = bases.into_iter().collect();
+    if !bases.iter().any(|b| potter_exec::chain::needs_catalog(b)) {
+        if pin.is_some() {
+            eprintln!("warning: --catalog-index is ignored: nothing here builds on the catalog");
+        }
         return Ok(None);
     }
-    potter_exec::chain::CatalogCtx::load(store, home, pin, kiln_registry::DockerConfig::from_env())
-        .map(Some)
-        .map_err(|e| (e.to_string(), e.exit_code()))
+    let failed = |e: potter_exec::BuildError| (e.to_string(), e.exit_code());
+    let auth = kiln_registry::DockerConfig::from_env;
+    let catalog = potter_exec::chain::CatalogCtx::load(store, home, pin, auth()).map_err(failed)?;
+    catalog
+        .prepare(store, bases, &kiln_oci::Platform::host(), auth())
+        .map_err(failed)?;
+    Ok(Some(catalog))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -681,15 +690,18 @@ fn rebase(
         potter,
         runs: home.runs(),
     };
-    let _lock = match potter_exec::sandboxed::begin_build(&sandbox, &home) {
-        Ok(l) => l,
-        Err(e) => return fail(&e.to_string(), e.exit_code()),
-    };
-    // An image that cannot be read is reported by the rebase itself.
-    let recorded = potter_exec::rebase::recorded(&store, image).ok();
+    // An image that cannot be read is reported by the rebase itself, and `--base` names an OCI
+    // base, which a rebase refuses for an image on a catalog one.
+    let recorded = potter_exec::rebase::recorded(&store, image)
+        .ok()
+        .filter(|_| base.is_none());
     let catalog = match load_catalog(&store, &home, catalog_index, recorded.iter().map(|r| &r.run_chain.base)) {
         Ok(c) => c,
         Err((e, code)) => return fail(&e, code),
+    };
+    let _lock = match potter_exec::sandboxed::begin_build(&sandbox, &home) {
+        Ok(l) => l,
+        Err(e) => return fail(&e.to_string(), e.exit_code()),
     };
     let secrets = Default::default();
     let mut progress = |p: Progress| match p {
