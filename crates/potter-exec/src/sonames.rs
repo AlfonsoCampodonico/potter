@@ -6,7 +6,11 @@
 use std::collections::BTreeSet;
 use std::io::Read;
 
-use goblin::elf::Elf;
+use goblin::container::Ctx;
+use goblin::elf::dynamic::{DT_NEEDED, DT_SONAME, DT_STRTAB};
+use goblin::elf::{Dynamic, Elf, ProgramHeader};
+use goblin::strtab::Strtab;
+use tar::EntryType;
 
 use crate::error::{BuildError, io};
 
@@ -55,9 +59,7 @@ impl Caps {
 /// The sonames the ELF files in `layer` (an uncompressed tar) need.
 pub fn needed(layer: &mut dyn Read, caps: &mut Caps) -> Result<BTreeSet<String>, BuildError> {
     let mut out = BTreeSet::new();
-    scan(layer, caps, |_, elf| {
-        out.extend(elf.libraries.iter().map(|l| l.to_string()));
-    })?;
+    scan(layer, caps, |_, names| out.extend(names.needed.iter().cloned()))?;
     Ok(out)
 }
 
@@ -65,37 +67,100 @@ pub fn needed(layer: &mut dyn Read, caps: &mut Caps) -> Result<BTreeSet<String>,
 /// `DT_SONAME`, or its file name when it has none.
 pub fn provided(layer: &mut dyn Read, caps: &mut Caps) -> Result<BTreeSet<String>, BuildError> {
     let mut out = BTreeSet::new();
-    scan(layer, caps, |path, elf| match elf.soname {
+    scan(layer, caps, |path, names| match &names.soname {
         Some(s) => {
-            out.insert(s.to_string());
+            out.insert(s.clone());
         }
-        None if elf.dynamic.is_some() => {
+        None => {
             let name = path.rsplit('/').next().unwrap_or(path);
             if name.contains(".so") {
                 out.insert(name.to_string());
             }
         }
-        None => {}
     })?;
     Ok(out)
 }
 
 const MAGIC: [u8; 4] = *b"\x7fELF";
 
-/// Calls `f` with each ELF file of `layer` until a cap is hit; an ELF file goblin cannot read
-/// stops the scan too, since skipping it could hide a soname.
-fn scan(layer: &mut dyn Read, caps: &mut Caps, mut f: impl FnMut(&str, &Elf)) -> Result<(), BuildError> {
+/// The names in a dynamically linked ELF file's dynamic section.
+struct DynNames {
+    needed: Vec<String>,
+    soname: Option<String>,
+}
+
+/// `DT_NEEDED` and `DT_SONAME` of the ELF file `bytes`, reading only its header, program headers,
+/// dynamic section and dynamic string table; `None` for a statically linked file.
+fn dyn_names(bytes: &[u8]) -> Result<Option<DynNames>, String> {
+    let header = Elf::parse_header(bytes).map_err(|e| e.to_string())?;
+    let ctx = Ctx::new(
+        header.container().map_err(|e| e.to_string())?,
+        header.endianness().map_err(|e| e.to_string())?,
+    );
+    let phdrs = ProgramHeader::parse(bytes, header.e_phoff as usize, header.e_phnum as usize, ctx)
+        .map_err(|e| e.to_string())?;
+    let Some(dynamic) = Dynamic::parse(bytes, &phdrs, ctx).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let names: Vec<(u64, usize)> = dynamic
+        .dyns
+        .iter()
+        .filter(|d| d.d_tag == DT_NEEDED || d.d_tag == DT_SONAME)
+        .map(|d| (d.d_tag, d.d_val as usize))
+        .collect();
+    if names.is_empty() {
+        return Ok(Some(DynNames {
+            needed: Vec::new(),
+            soname: None,
+        }));
+    }
+    // goblin maps DT_STRTAB to a file offset, or to 0 when no segment holds it.
+    if dynamic.info.strtab == 0 || !dynamic.dyns.iter().any(|d| d.d_tag == DT_STRTAB) {
+        return Err("its dynamic string table is in no loaded segment".into());
+    }
+    let strtab = Strtab::parse(bytes, dynamic.info.strtab, dynamic.info.strsz, 0).map_err(|e| e.to_string())?;
+    let mut out = DynNames {
+        needed: Vec::new(),
+        soname: None,
+    };
+    for (tag, at) in names {
+        let name = strtab
+            .get_at(at)
+            .ok_or_else(|| format!("a dynamic entry names offset {at}, outside its string table"))?
+            .to_string();
+        if tag == DT_NEEDED {
+            out.needed.push(name);
+        } else {
+            out.soname = Some(name);
+        }
+    }
+    Ok(Some(out))
+}
+
+/// Calls `f` with the dynamic names of each dynamically linked ELF file of `layer` until a cap is
+/// hit. An ELF file that cannot be read, and an entry that is not a regular file, directory,
+/// symlink or hard link (a sparse file, a device), stop the scan too: skipping either could hide
+/// a soname.
+fn scan(layer: &mut dyn Read, caps: &mut Caps, mut f: impl FnMut(&str, &DynNames)) -> Result<(), BuildError> {
     if caps.exceeded.is_some() {
         return Ok(());
     }
     let mut archive = tar::Archive::new(layer);
     for entry in archive.entries().map_err(io("reading a layer for its sonames"))? {
         let mut entry = entry.map_err(io("reading a layer for its sonames"))?;
-        if !entry.header().entry_type().is_file() || entry.size() < MAGIC.len() as u64 {
-            continue;
-        }
         let path = entry.path().map_err(io("reading a layer for its sonames"))?;
         let path = path.to_string_lossy().trim_start_matches("./").to_string();
+        match entry.header().entry_type() {
+            EntryType::Regular => {}
+            EntryType::Directory | EntryType::Symlink | EntryType::Link => continue,
+            other => {
+                caps.exceeded = Some(format!("/{path} is a {other:?} entry, which the scan cannot read"));
+                return Ok(());
+            }
+        }
+        if entry.size() < MAGIC.len() as u64 {
+            continue;
+        }
         let mut magic = [0u8; 4];
         entry.read_exact(&mut magic).map_err(io(format!("reading /{path}")))?;
         if magic != MAGIC {
@@ -129,8 +194,12 @@ fn scan(layer: &mut dyn Read, caps: &mut Caps, mut f: impl FnMut(&str, &Elf)) ->
         let mut bytes = Vec::with_capacity(size as usize);
         bytes.extend_from_slice(&magic);
         entry.read_to_end(&mut bytes).map_err(io(format!("reading /{path}")))?;
-        match Elf::parse(&bytes) {
-            Ok(elf) => f(&path, &elf),
+        // A parser bug must not take the build down: a panic reads as a file it cannot read.
+        let parsed = std::panic::catch_unwind(|| dyn_names(&bytes))
+            .unwrap_or_else(|_| Err("the ELF parser panicked on it".into()));
+        match parsed {
+            Ok(Some(names)) => f(&path, &names),
+            Ok(None) => {}
             Err(e) => {
                 caps.exceeded = Some(format!("/{path} starts like an ELF file but does not parse: {e}"));
                 return Ok(());
@@ -294,6 +363,60 @@ mod tests {
         assert_eq!(caps.exceeded(), None);
         needed(&mut &tar(&[("c.so", X86_64)])[..], &mut caps).unwrap();
         assert!(caps.exceeded().is_some());
+    }
+
+    /// A tar of `kind` entries named `path`, after a readable ELF file.
+    fn with_entry(kind: tar::EntryType, path: &str) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(X86_64.len() as u64);
+        h.set_mode(0o755);
+        h.set_entry_type(tar::EntryType::Regular);
+        b.append_data(&mut h, "lib/a.so", X86_64).unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_size(0);
+        h.set_mode(0o644);
+        h.set_entry_type(kind);
+        b.append_data(&mut h, path, &[][..]).unwrap();
+        b.into_inner().unwrap()
+    }
+
+    #[test]
+    fn an_entry_of_another_kind_stops_the_scan() {
+        for kind in [tar::EntryType::Fifo, tar::EntryType::Char, tar::EntryType::Continuous] {
+            let mut caps = Caps::default();
+            needed(&mut &with_entry(kind, "odd")[..], &mut caps).unwrap();
+            assert!(
+                caps.exceeded().is_some_and(|e| e.contains("/odd")),
+                "{kind:?}: {caps:?}"
+            );
+        }
+        for kind in [tar::EntryType::Directory, tar::EntryType::Symlink, tar::EntryType::Link] {
+            let mut caps = Caps::default();
+            needed(&mut &with_entry(kind, "fine")[..], &mut caps).unwrap();
+            assert_eq!(caps.exceeded(), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_string_table_outside_the_loaded_segments_stops_the_scan() {
+        let mut elf = fixture::checked_in(EM_X86_64);
+        // PT_LOAD's p_filesz and p_memsz (at 64 + 32 and 64 + 40): the segment now maps nothing.
+        elf[96..112].fill(0);
+        let mut caps = Caps::default();
+        needed(&mut &tar(&[("lib/a.so", &elf)])[..], &mut caps).unwrap();
+        assert!(caps.exceeded().is_some_and(|e| e.contains("/lib/a.so")), "{caps:?}");
+    }
+
+    #[test]
+    fn a_static_elf_file_needs_and_provides_nothing() {
+        let mut elf = fixture::checked_in(EM_AARCH64);
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum: PT_LOAD only
+        let layer = tar(&[("bin/static", &elf)]);
+        let mut caps = Caps::default();
+        assert!(needed(&mut &layer[..], &mut caps).unwrap().is_empty());
+        assert!(provided(&mut &layer[..], &mut caps).unwrap().is_empty());
+        assert_eq!(caps.exceeded(), None);
     }
 
     #[test]

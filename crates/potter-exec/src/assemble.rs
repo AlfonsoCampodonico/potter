@@ -347,7 +347,10 @@ pub const ANN_CATALOG_LAYERS: &str = "dev.potter.catalog.layers";
 pub const ANN_CATALOG_CONSTRAINTS: &str = "dev.potter.catalog.constraints";
 /// The digest of the index the run base resolved against.
 pub const ANN_CATALOG_INDEX: &str = "dev.potter.catalog.index";
-/// The layers potter stacked on the run base that a rebase keeps.
+/// The layers potter stacked on the run base that a rebase keeps, bottom first: with an export,
+/// the runtime steps' layers, the export layer and the generated-files layer; without one, every
+/// layer above the base. The init layer is not among them: kiln adds it after the manifest is
+/// written, and a rebase stacks the current one.
 pub const ANN_CHAIN: &str = "dev.potter.chain";
 /// The sonames the app's ELF files need, which a rebase's new run base must provide.
 pub const ANN_SONAMES_NEEDED: &str = "dev.potter.sonames.needed";
@@ -481,7 +484,7 @@ pub fn build_target(
     let mut bases = Vec::new();
     // Besides the run base and the image's layers: the catalog resolution of a composite run
     // base, the layers above the run base a rebase keeps, and those whose ELF files the app needs.
-    let (run_base, run_chain, mut layers, run_catalog, kept, app): (
+    let (run_base, run_chain, mut layers, run_catalog, mut kept, app): (
         RunBase,
         Chain,
         Vec<LayerRef>,
@@ -585,6 +588,7 @@ pub fn build_target(
             layer: files.diff_id.clone(),
             class: None,
         });
+        kept.push(files.clone());
         layers.push(files);
     }
 

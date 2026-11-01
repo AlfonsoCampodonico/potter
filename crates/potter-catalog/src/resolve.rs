@@ -255,7 +255,7 @@ mod tests {
             conflicts: vec![],
             env: BTreeMap::new(),
             provides_sonames: vec![],
-            executor: name.into(),
+            executor: "ns".into(),
             source: "https://example.test".into(),
             license: "MIT".into(),
             supersedes: None,

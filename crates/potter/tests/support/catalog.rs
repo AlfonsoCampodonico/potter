@@ -114,7 +114,7 @@ impl TestCatalog {
                 conflicts: vec![],
                 env: l.env.into_iter().collect(),
                 provides_sonames: vec![],
-                executor: l.name,
+                executor: "ns".into(),
                 source: "https://example.test".into(),
                 license: "MIT".into(),
                 supersedes: None,

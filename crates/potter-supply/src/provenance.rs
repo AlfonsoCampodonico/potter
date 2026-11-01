@@ -68,8 +68,11 @@ pub fn in_toto(subject_name: &str, subject_digest: &str, predicate_type: &str, p
 }
 
 /// The executor class the image as a whole may claim (P12): `ns` when any layer, a step's or a
-/// catalog layer's, is not `vm`-built; `vm` when they all are; `host` when potter built every
-/// layer itself.
+/// catalog layer's, is not `vm`-built; `vm` when they all are; `host` when no layer carries a
+/// class at all. That happens only on an OCI base with no `Run` or `Apt` step: potter built
+/// every layer above the base on the host (inputs, export, files). The OCI base's own layers
+/// are not classed here: no potter executor built them, and they appear as resolved
+/// dependencies by reference and digest.
 pub fn image_executor(steps: &[ProvStep], catalog: &[CatalogLayer]) -> &'static str {
     let classes: Vec<&str> = steps
         .iter()

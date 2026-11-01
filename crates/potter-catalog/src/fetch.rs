@@ -579,7 +579,7 @@ mod tests {
                     conflicts: vec![],
                     env: Default::default(),
                     provides_sonames: vec![],
-                    executor: "go".into(),
+                    executor: "ns".into(),
                     source: "https://example.test/go".into(),
                     license: "BSD-3-Clause".into(),
                     supersedes: None,

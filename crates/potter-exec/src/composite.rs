@@ -241,7 +241,7 @@ mod tests {
             conflicts: vec![],
             env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             provides_sonames: vec![],
-            executor: name.into(),
+            executor: "ns".into(),
             source: "https://example.test".into(),
             license: "MIT".into(),
             supersedes: None,

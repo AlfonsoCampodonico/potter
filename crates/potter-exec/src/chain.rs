@@ -1212,7 +1212,7 @@ mod tests {
                 conflicts: vec![],
                 env: [("PATH".to_string(), path.to_string())].into(),
                 provides_sonames: vec![],
-                executor: name.into(),
+                executor: "ns".into(),
                 source: "https://example.test".into(),
                 license: "MIT".into(),
                 supersedes: None,
@@ -1319,6 +1319,51 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.exit_code(), 4, "{err}");
         assert!(err.to_string().contains("the catalog was not loaded"), "{err}");
+    }
+
+    /// A catalog image records the layers a rebase keeps: the export, then the generated files.
+    #[test]
+    fn the_chain_annotation_lists_export_then_files() {
+        use crate::assemble::{ANN_CATALOG_INDEX, ANN_CHAIN, ANN_SONAMES_NEEDED, build_target};
+        let dir = tempfile::tempdir().unwrap();
+        let cat = test_catalog(&dir.path().join("catalog"));
+        let mut t = target(catalog(&[("os-min", None), ("go", Some("1.25"))]), vec![]);
+        t.image.base = catalog(&[("os-min", None)]);
+        t.image.export = vec![Export {
+            path: "/usr/local/go/bin/go".into(),
+            dest: "/app/go".into(),
+            exclude: vec![],
+        }];
+        t.image.files = vec![GeneratedFile {
+            path: "/etc/app.conf".into(),
+            content: "x\n".into(),
+            mode: 0o644,
+        }];
+        let built = with_ctx(dir.path(), "linux/arm64", Some(&cat), |ctx| {
+            build_target(ctx, &t, dir.path(), &[])
+        })
+        .unwrap();
+        let bytes = built_manifest(dir.path(), &built.manifest_digest);
+        let m: kiln_oci::ImageManifest = serde_json::from_slice(&bytes).unwrap();
+        let a = m.annotations.unwrap();
+        let layers: Vec<String> = m.layers.iter().map(|l| l.digest.to_string()).collect();
+        let chain: Vec<String> = serde_json::from_str(&a[ANN_CHAIN]).unwrap();
+        assert_eq!(chain, layers[layers.len() - 2..], "the export, then the files layer");
+        assert_eq!(a[ANN_CATALOG_INDEX], cat.verified.digest);
+        assert_eq!(a[ANN_SONAMES_NEEDED], "[]");
+        assert!(
+            built.bases.is_empty(),
+            "composites are not base images: {:?}",
+            built.bases
+        );
+        assert_eq!(built.catalog.len(), 2, "the build and the run composites");
+    }
+
+    fn built_manifest(dir: &std::path::Path, digest: &kiln_store::Digest) -> Vec<u8> {
+        kiln_store::Store::open(dir.join("kiln"))
+            .unwrap()
+            .read_metadata(digest)
+            .unwrap()
     }
 
     #[test]

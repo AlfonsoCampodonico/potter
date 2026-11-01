@@ -9,6 +9,8 @@ pub const SCHEMA: &str = "potter.catalog/v1";
 /// Largest index blob `parse` will look at.
 pub const MAX_INDEX_BYTES: u64 = 8 << 20;
 pub const MAX_ENTRIES: usize = 10_000;
+/// The executor classes a catalog layer can be built with (P12).
+pub const EXECUTORS: [&str; 2] = ["ns", "vm"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +93,12 @@ impl Index {
                     return Err(hostile(format!("{} {field} {value:?} is not sha256:<64 hex>", e.name)));
                 }
             }
+            if !EXECUTORS.contains(&e.executor.as_str()) {
+                return Err(hostile(format!(
+                    "{} executor {:?} is neither \"ns\" nor \"vm\"",
+                    e.name, e.executor
+                )));
+            }
             if !seen.insert(e.digest.as_str()) {
                 return Err(hostile(format!("duplicate digest {}", e.digest)));
             }
@@ -151,7 +159,7 @@ mod tests {
             conflicts: vec![],
             env: [("PHP_INI_DIR".to_string(), "/etc/php".to_string())].into(),
             provides_sonames: vec!["libphp.so".into()],
-            executor: "php".into(),
+            executor: "ns".into(),
             source: "https://example.test/php".into(),
             license: "PHP-3.01".into(),
             supersedes: None,
@@ -223,6 +231,24 @@ mod tests {
         let mut i = index(vec![entry(1)]);
         i.entries[0].digest = "sha256:XYZ".into();
         assert!(matches!(Index::parse(&bytes(&i)), Err(CatalogError::Hostile(_))));
+    }
+
+    #[test]
+    fn an_executor_other_than_ns_or_vm_is_hostile() {
+        for ok in ["ns", "vm"] {
+            let mut i = index(vec![entry(1)]);
+            i.entries[0].executor = ok.into();
+            Index::parse(&bytes(&i)).unwrap();
+        }
+        for bad in ["", "host", "php", "VM"] {
+            let mut i = index(vec![entry(1)]);
+            i.entries[0].executor = bad.into();
+            let err = Index::parse(&bytes(&i)).unwrap_err();
+            assert!(
+                matches!(&err, CatalogError::Hostile(m) if m.contains("executor")),
+                "{bad:?}: {err:?}"
+            );
+        }
     }
 
     #[test]
