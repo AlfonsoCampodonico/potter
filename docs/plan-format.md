@@ -118,6 +118,14 @@ Every image manifest potter writes carries:
 - `dev.potter.run_chain`: the image's run base and runtime steps (canonical JSON), which `potter rebase` re-runs on a new base;
 - `dev.potter.max_layers`: the layer budget it was built with, which a rebase keeps.
 
+An image whose run base is a composite of catalog layers (spec §16) also carries the following. Images on OCI or stopgap bases carry none of them.
+
+- `dev.potter.catalog.layers`: the catalog layer digests behind the run base, bottom first (JSON array);
+- `dev.potter.catalog.constraints`: one `name@line` per requested layer (JSON array);
+- `dev.potter.catalog.index`: the digest of the index they resolved against;
+- `dev.potter.chain`: the layers above the run base that a rebase keeps (JSON array). With `export`, they are the runtime steps' layers and then the export layer. Without it, they are every layer above the base. The generated-files layer is not included. potter writes provisional kiln images with no init layer yet, so none is listed;
+- `dev.potter.sonames.needed`: the `DT_NEEDED` sonames of the ELF files in the export layer, or in every layer above the base when there is no export (JSON array). It is left out, with a warning, when the scan hits a cap: an ELF file over 256 MiB, more than 4 GiB of ELF files, more than 100 000 ELF files, or an ELF file that does not parse.
+
 The image config inherits its run base's labels. The kiln image records its run base (kiln's `base` record), converted as a kiln image of its own; see [rebase.md](rebase.md).
 
 ## Attestations (spec §17)
@@ -129,6 +137,8 @@ Each is an OCI image manifest with `subject` set to the image, an empty config (
   - `signature`: a `messageSignature` over the image manifest bytes (ECDSA P-256, SHA-256).
   - `verificationMaterial.publicKey.hint` is the base64 SHA-256 of the public key's SPKI DER; `tlogEntries` is empty (no transparency log in v1).
 - **Unsigned**: `artifactType` `application/vnd.in-toto+json`, the statement itself; no `signature` referrer.
+
+A composite catalog base is never listed as a base image. The provenance names `internalParameters.catalogIndex`, and each catalog layer is a resolved dependency `{name, digest, annotations: {version, executor}}`. `internalParameters.executor` is `ns` when any layer, a step's or a catalog layer's, is not VM-built (P12), `vm` when all are, and `host` when potter built every layer itself. The SBOM lists one package per catalog layer, from the index: `versionInfo` is the version, `downloadLocation` the upstream source, and `licenseConcluded` the licence.
 
 ## Exit codes
 

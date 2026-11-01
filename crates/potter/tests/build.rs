@@ -55,6 +55,14 @@ fn build_with(ctx: &Ctx, repo: &Path, extra: &[&str], env: &[(&str, String)]) ->
     )
 }
 
+/// The OCI manifest `name` was converted from: its annotations are what a rebase reads.
+fn source_manifest(ctx: &Ctx, name: &str) -> serde_json::Value {
+    let digest = kiln_image::resolve_name(&ctx.store, name).unwrap();
+    let loaded = kiln_image::load(&ctx.store, &digest).unwrap();
+    let source = &loaded.entries[0].1.config.source.manifest_digest;
+    serde_json::from_slice(&ctx.store.read_metadata(source).unwrap()).unwrap()
+}
+
 #[test]
 fn potter_build_makes_a_kiln_image_and_then_hits_the_cache() {
     let Some(ctx) = Ctx::new() else { return };
@@ -68,6 +76,15 @@ fn potter_build_makes_a_kiln_image_and_then_hits_the_cache() {
     let digest = kiln_image::resolve_name(&ctx.store, "potter/app:latest").unwrap();
     let loaded = kiln_image::load(&ctx.store, &digest).unwrap();
     assert_eq!(loaded.entries[0].1.config.process.entrypoint, ["/bin/cat", "/app/out"]);
+    // An image on an OCI base records nothing about the catalog.
+    let annotations = source_manifest(&ctx, "potter/app:latest")["annotations"].clone();
+    let keys: Vec<&String> = annotations.as_object().unwrap().keys().collect();
+    assert!(
+        !keys.iter().any(|k| k.starts_with("dev.potter.catalog.")
+            || *k == "dev.potter.chain"
+            || k.starts_with("dev.potter.sonames.")),
+        "{keys:?}"
+    );
 
     let (code, stdout, stderr) = build(&ctx, repo.path(), &[]);
     assert_eq!(code, 0, "{stderr}");
@@ -165,6 +182,33 @@ fn detected_go_builds_on_a_test_catalog() {
     // The composite was cached under potter's home.
     let composites = std::fs::read_dir(ctx.home.root().join("composite")).unwrap().count();
     assert_eq!(composites, 2, "the build base and the run base");
+    // The image names its run base through the catalog, and the layers a rebase keeps.
+    let manifest = source_manifest(&ctx, "potter/app:latest");
+    let a = &manifest["annotations"];
+    let json = |k: &str| serde_json::from_str::<serde_json::Value>(a[k].as_str().unwrap()).unwrap();
+    let os_min = catalog.index.entries.iter().find(|e| e.name == "os-min").unwrap();
+    assert_eq!(a["dev.potter.catalog.index"], catalog.digest.as_str(), "{a}");
+    assert_eq!(
+        json("dev.potter.catalog.layers"),
+        serde_json::json!([os_min.digest]),
+        "{a}"
+    );
+    assert_eq!(
+        json("dev.potter.catalog.constraints"),
+        serde_json::json!(["os-min@13"]),
+        "{a}"
+    );
+    let export = manifest["layers"].as_array().unwrap().last().unwrap()["digest"].clone();
+    assert_eq!(
+        json("dev.potter.chain"),
+        serde_json::json!([export]),
+        "the export layer: {a}"
+    );
+    assert_eq!(
+        json("dev.potter.sonames.needed"),
+        serde_json::json!([]),
+        "a shell script needs none: {a}"
+    );
 
     // Pinned to the same index, everything is cached; a pin the catalog lacks is refused.
     let pin = catalog.digest.clone();

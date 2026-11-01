@@ -20,6 +20,7 @@ pub mod rebase;
 pub mod remote;
 pub mod sandboxed;
 pub mod seal;
+pub mod sonames;
 pub mod stopgap;
 pub mod tarball;
 #[cfg(test)]
