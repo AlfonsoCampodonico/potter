@@ -28,7 +28,7 @@ pub fn is_php_only(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
     pub entries: Vec<Entry>,
-    /// Version constraints of the runtimes chosen, e.g. `python@3.15`.
+    /// One `<name>@<chosen line>` per requested ref, in request order (not dependencies).
     pub constraints: Vec<String>,
     /// The digest of the index this resolved against.
     pub index_digest: String,
@@ -58,10 +58,17 @@ fn arch_name(arch: Arch) -> &'static str {
 
 /// Dotted-numeric sort key: `3.9` < `3.15`.
 fn dotted(s: &str) -> Dotted<'_> {
-    s.split('.').map(|p| (p.parse().unwrap_or(0), p)).collect()
+    s.split('.')
+        .map(|p| {
+            let at = p.find(|c: char| !c.is_ascii_digit()).unwrap_or(p.len());
+            let (num, suffix) = p.split_at(at);
+            (num.parse().unwrap_or(0), suffix.is_empty(), suffix)
+        })
+        .collect()
 }
 
-type Dotted<'a> = Vec<(u64, &'a str)>;
+/// Per part: number, whether it is a bare number (a suffix like `rc1` sorts below), suffix.
+type Dotted<'a> = Vec<(u64, bool, &'a str)>;
 
 fn rank(e: &Entry) -> (Dotted<'_>, Dotted<'_>, &str) {
     (dotted(&e.line), dotted(&e.version), e.digest.as_str())
@@ -200,11 +207,13 @@ pub fn resolve(v: &Verified, refs: &[CatalogRef], arch: Arch) -> Result<Resoluti
     check_conflicts(&chosen)?;
     check_abi(&chosen)?;
     let entries: Vec<Entry> = order(&chosen)?.into_iter().cloned().collect();
-    let constraints = entries
-        .iter()
-        .filter(|e| e.kind == Kind::Runtime)
-        .map(|e| format!("{}@{}", e.name, e.line))
-        .collect();
+    let mut constraints: Vec<String> = Vec::new();
+    for r in refs {
+        let c = format!("{}@{}", r.name, chosen[r.name.as_str()].line);
+        if !constraints.contains(&c) {
+            constraints.push(c);
+        }
+    }
     Ok(Resolution {
         entries,
         constraints,
@@ -307,6 +316,40 @@ mod tests {
         // dotted-numeric: 3.9 is below 3.15, and an explicit line picks it.
         let res = resolve(&v, &[r("python", Some("3.9"))], Arch::X86_64).unwrap();
         assert_eq!(res.entries[0].line, "3.9");
+    }
+
+    #[test]
+    fn constraints_follow_requested_refs() {
+        let base = entry(1, "base", "1", Kind::Base);
+        let mut osmin = entry(2, "os-min", "12", Kind::Extension);
+        osmin.requires = vec![r("base", None)];
+        let mut py = entry(3, "python", "3.15", Kind::Runtime);
+        py.requires = vec![r("libs", None)];
+        let mut libs = entry(4, "libs", "1", Kind::Extension);
+        libs.requires = vec![r("base", None)];
+        let mut uv = entry(5, "uv", "0.9", Kind::Tool);
+        uv.requires = vec![r("python", None)];
+        let v = verified(vec![base, osmin, py, libs, uv]);
+        let refs = [
+            r("os-min", None),
+            r("python", Some("3.15")),
+            r("uv", None),
+            r("python", None),
+        ];
+        let res = resolve(&v, &refs, Arch::X86_64).unwrap();
+        assert_eq!(res.constraints, ["os-min@12", "python@3.15", "uv@0.9"]);
+        assert!(names(&res).contains(&"libs"));
+    }
+
+    #[test]
+    fn prerelease_sorts_below_release() {
+        let mut rc = entry(1, "python", "3.15", Kind::Runtime);
+        rc.version = "3.15.0rc1".into();
+        let mut rel = entry(2, "python", "3.15", Kind::Runtime);
+        rel.version = "3.15.0".into();
+        let v = verified(vec![rc, rel.clone()]);
+        let res = resolve(&v, &[r("python", None)], Arch::X86_64).unwrap();
+        assert_eq!(res.entries, vec![rel]);
     }
 
     #[test]
