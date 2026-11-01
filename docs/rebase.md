@@ -67,16 +67,25 @@ ELF files need (see [plan-format.md](plan-format.md#image-annotations-spec-51-18
 
 1. Resolves the recorded constraints again, against the catalog's current index or the one
    `--catalog-index` pins. A layer some newer entry supersedes is replaced by it.
-2. Runs the catalog gates. Any refusal stops the rebase before any step runs, and it exits 2:
+2. Runs the line and ABI gates. A refusal stops the rebase before any layer is fetched or any step
+   runs, and it exits 2:
    - `line`: a layer changes its line, leaves the run base or joins it, or the index no longer
      lists a layer the image is on;
-   - `abi`: a layer changes any ABI value (the refusal names the key, the old and the new value);
-   - `sonames`: the image records no `dev.potter.sonames.needed`, or the app needs a soname that
-     no new catalog layer's `provides_sonames` lists and no layer above the run base provides.
-     Shared objects the app ships itself never cause a refusal.
-3. Builds the new composite and re-runs the runtime steps on it, then goes on through kiln's
-   rebase as for any image. kiln's gates stay in force. An image with `export` keeps its export
-   and files layers byte for byte. An image without one takes kiln's re-derive path.
+   - `abi`: a layer changes any ABI value (the refusal names the key, the old and the new value).
+3. Builds the new composite and re-runs the runtime steps on it.
+4. Runs the `sonames` gate before anything is tagged, also exiting 2 on refusal. The gate refuses
+   when the image records no `dev.potter.sonames.needed`, or when the app needs a soname that none
+   of these provides: a new catalog layer's `provides_sonames`, a layer the rebase keeps byte for
+   byte (export and files, or every layer above the base without an export), or a re-run runtime
+   step's new layer. The old runtime-step layers don't count, because the rebase drops them.
+   Shared objects the app ships itself never cause a refusal.
+5. Goes on through kiln's rebase as for any image. kiln's gates stay in force. An image with
+   `export` keeps its export and files layers byte for byte. An image without one takes kiln's
+   re-derive path.
+
+An image that records part of a catalog record (`dev.potter.chain`, `dev.potter.sonames.needed` or
+any `dev.potter.catalog.*` key) but not `dev.potter.catalog.layers` is refused as not a potter
+catalog image (exit 2). It is never treated as a pre-P3 stopgap image.
 
 The run base records the catalog layers it was built from on its own manifest. A rebased image
 keeps the source manifest it was built from, so this record is how a later rebase knows which
@@ -86,10 +95,13 @@ The result's `replaced` lists the `[old, new]` catalog entry digests that were s
 composite's display name (`potter-catalog@<index>`) is never reported as the replaced base.
 
 `--dry-run` resolves and runs the catalog gates, prints the replacements and every gate's verdict,
-and writes nothing: no step runs, no composite is built and nothing is tagged. Loading the catalog
-still keeps its verified index, as any read of it does. kiln's gates need the new run base built,
-so a dry run reports them as not checked. It exits 2 when a catalog gate refuses, and it takes
-catalog images only.
+and writes nothing: no layer is fetched, no step runs, no composite is built and nothing is tagged.
+Loading the catalog still keeps its verified index, as any read of it does.
+- The runtime steps aren't re-run, so the `sonames` verdict counts none of their layers. When the
+  image has runtime steps, it's marked provisional ("runtime steps not re-run"): the real rebase
+  may pass where the dry run refused.
+- kiln's gates need the new run base built, so a dry run reports them as not checked.
+- It exits 2 when a catalog gate refuses, and it takes catalog images only.
 
 ## Refusals
 
@@ -112,7 +124,7 @@ kiln's gates decide (kiln `docs/format.md`, kiln spec §16.3). A rebase is refus
 | `--tenant ID` | Whose cache the runtime steps use (default `local`) |
 | `--catalog-index D` | Resolve a catalog run base against this index (`sha256:<hex>`, still verified) instead of the current one |
 | `--dry-run` | Catalog images: print what would be replaced and every gate's verdict, writing nothing (`--executor` not needed) |
-| `--json` | Print `digest`, `tag`, `unchanged`, `old_base`, `new_base`, `base_ref`, `base_digest`, `reused`, `changed`, `executed`, `cached`, `replaced`. With `--dry-run`: `dry_run`, `digest`, `index`, `replaced`, and `gates` (`gate`, `verdict`, `reasons`) |
+| `--json` | Print `digest`, `tag`, `unchanged`, `old_base`, `new_base`, `base_ref`, `base_digest`, `reused`, `changed`, `executed`, `cached`, `replaced`. With `--dry-run`: `dry_run`, `digest`, `index`, `replaced`, and `gates` (`gate`, `verdict`, `reasons`, `provisional`) |
 
 ## Not done yet
 

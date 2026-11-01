@@ -32,8 +32,6 @@ pub struct Request<'a> {
     pub tag: Option<&'a str>,
     /// The catalog index the run base resolves against, when pinned: the loaded catalog must be it.
     pub catalog_index: Option<&'a str>,
-    /// Check the catalog gates and report what would change, writing nothing (catalog images only).
-    pub dry_run: bool,
 }
 
 /// A potter image as a rebase reads it.
@@ -62,8 +60,12 @@ pub struct RecordedCatalog {
     pub constraints: Vec<String>,
     /// The index it was built against.
     pub index: String,
-    /// The layers above the run base a rebase keeps (`dev.potter.chain`).
+    /// The layers of `dev.potter.chain` a rebase keeps byte for byte: the export and files layers,
+    /// or every layer above the base when there is no export.
     pub chain: Vec<Descriptor>,
+    /// The layers of `dev.potter.chain` that are the run base's runtime steps: a rebase re-runs
+    /// them, so what they provide says nothing about the new run base.
+    pub runtime: Vec<Descriptor>,
     /// The sonames its ELF files need; `None` when the image records none.
     pub sonames_needed: Option<BTreeSet<String>>,
 }
@@ -73,7 +75,25 @@ pub struct RecordedCatalog {
 pub struct Verdict {
     pub gate: &'static str,
     pub refusals: Vec<String>,
+    /// Why the verdict may change once the rebase runs: a dry run checks sonames without the
+    /// runtime steps, which only a real rebase re-runs.
+    pub provisional: Option<&'static str>,
 }
+
+/// What a dry run found: the layers a rebase would replace and the catalog gates' verdicts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DryRun {
+    /// The image.
+    pub digest: Digest,
+    /// The index the run base resolved against.
+    pub index: String,
+    /// (old, new) catalog entry digests, bottom first.
+    pub replaced: Vec<(String, String)>,
+    pub verdicts: Vec<Verdict>,
+}
+
+/// Why a dry run's soname verdict may differ from the rebase's.
+pub const NOT_RE_RUN: &str = "runtime steps not re-run";
 
 /// The catalog gates' verdicts on a new resolution, and the layers it replaces.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -118,8 +138,6 @@ pub struct Rebased {
     pub replaced: Vec<(String, String)>,
     /// The catalog gates' verdicts (none for an image on an OCI or stopgap base).
     pub verdicts: Vec<Verdict>,
-    /// A dry run: nothing was written, and only `digest`, `replaced` and `verdicts` say anything.
-    pub dry_run: bool,
 }
 
 fn image_error(e: ImageError) -> BuildError {
@@ -171,28 +189,45 @@ pub fn recorded(store: &Store, image: &str) -> Result<Recorded, BuildError> {
         .checked_sub(base.source_layers)
         .filter(|&n| n > 0)
         .ok_or_else(|| not_potter("its base record does not match its source manifest"))?;
-    let catalog = match manifest.annotations.as_ref().and_then(|a| a.get(ANN_CATALOG_LAYERS)) {
-        None => None,
+    let annotations = manifest.annotations.clone().unwrap_or_default();
+    let catalog = match annotations.get(ANN_CATALOG_LAYERS) {
+        None => {
+            // Part of a catalog image's record without its layers: not the pre-P3 image the
+            // stopgap path is for.
+            if let Some(k) = annotations
+                .keys()
+                .find(|k| k.starts_with("dev.potter.catalog.") || *k == ANN_CHAIN || *k == ANN_SONAMES_NEEDED)
+            {
+                return Err(BuildError::Plan(format!(
+                    "{image} is not a potter catalog image: it records {k} but no {ANN_CATALOG_LAYERS}"
+                )));
+            }
+            None
+        }
         Some(built_on) => {
             let list = |key: &str, value: &str| -> Result<Vec<String>, BuildError> {
                 serde_json::from_str(value).map_err(|e| not_potter(&format!("{key}: {e}")))
             };
-            let chain = list(ANN_CHAIN, annotation(ANN_CHAIN)?)?
-                .iter()
-                .map(|d| {
-                    manifest
-                        .layers
-                        .iter()
-                        .find(|l| l.digest.to_string() == *d)
-                        .cloned()
-                        .ok_or_else(|| not_potter(&format!("{ANN_CHAIN} names {d}, which it does not have")))
-                })
-                .collect::<Result<_, _>>()?;
+            // A chain layer among the run base's own is a runtime step's.
+            let (mut chain, mut runtime) = (Vec::new(), Vec::new());
+            for d in list(ANN_CHAIN, annotation(ANN_CHAIN)?)? {
+                let at = manifest
+                    .layers
+                    .iter()
+                    .position(|l| l.digest.to_string() == d)
+                    .ok_or_else(|| not_potter(&format!("{ANN_CHAIN} names {d}, which it does not have")))?;
+                let l = manifest.layers[at].clone();
+                if at < base.source_layers {
+                    runtime.push(l);
+                } else {
+                    chain.push(l);
+                }
+            }
             let sonames_needed = match manifest.annotations.as_ref().and_then(|a| a.get(ANN_SONAMES_NEEDED)) {
                 Some(v) => Some(list(ANN_SONAMES_NEEDED, v)?.into_iter().collect()),
                 None => None,
             };
-            let layers = match run_base_layers(store, &base.manifest_digest) {
+            let layers = match run_base_layers(store, &base.manifest_digest)? {
                 Some(layers) => layers,
                 None => list(ANN_CATALOG_LAYERS, built_on)?,
             };
@@ -201,6 +236,7 @@ pub fn recorded(store: &Store, image: &str) -> Result<Recorded, BuildError> {
                 constraints: list(ANN_CATALOG_CONSTRAINTS, annotation(ANN_CATALOG_CONSTRAINTS)?)?,
                 index: annotation(ANN_CATALOG_INDEX)?.clone(),
                 chain,
+                runtime,
                 sonames_needed,
             })
         }
@@ -215,12 +251,23 @@ pub fn recorded(store: &Store, image: &str) -> Result<Recorded, BuildError> {
     })
 }
 
-/// The catalog layers the kiln image `base` (a run base) records on its source manifest.
-fn run_base_layers(store: &Store, base: &Digest) -> Option<Vec<String>> {
-    let loaded = kiln_image::load(store, base).ok()?;
-    let source = &loaded.entries.first()?.1.config.source.manifest_digest;
-    let manifest: ImageManifest = serde_json::from_slice(&store.read_metadata(source).ok()?).ok()?;
-    serde_json::from_str(manifest.annotations?.get(ANN_CATALOG_LAYERS)?).ok()
+/// The catalog layers the kiln image `base` (a run base) records on its source manifest: `None`
+/// when it records none (a run base built before it did). A run base that cannot be read is an
+/// infrastructure failure.
+fn run_base_layers(store: &Store, base: &Digest) -> Result<Option<Vec<String>>, BuildError> {
+    let bad = |e: &dyn std::fmt::Display| BuildError::Infra(format!("the run base {base}: {e}"));
+    let loaded = kiln_image::load(store, base).map_err(|e| bad(&e))?;
+    let (_, m) = loaded.entries.first().ok_or_else(|| bad(&"it holds no image"))?;
+    let bytes = store
+        .read_metadata(&m.config.source.manifest_digest)
+        .map_err(|e| bad(&e))?;
+    let manifest: ImageManifest = serde_json::from_slice(&bytes).map_err(|e| bad(&e))?;
+    match manifest.annotations.as_ref().and_then(|a| a.get(ANN_CATALOG_LAYERS)) {
+        None => Ok(None),
+        Some(v) => serde_json::from_str(v)
+            .map(Some)
+            .map_err(|e| bad(&format!("{ANN_CATALOG_LAYERS}: {e}"))),
+    }
 }
 
 /// The refs a recorded constraint list resolves from: `name@line` each.
@@ -274,12 +321,18 @@ pub fn rebase_chain(recorded: &Recorded, base: Option<&str>) -> Result<Chain, Bu
     })
 }
 
-/// The sonames the layers a rebase keeps provide themselves (`.so` files the app bundles), which
-/// the new run base need not.
+/// The sonames the layers a rebase keeps byte for byte provide themselves (`.so` files the app
+/// bundles), which the new run base need not. The old runtime-step layers are not among them: the
+/// rebase re-runs those, and [`provided_sonames`] reads the new ones.
 pub fn kept_sonames(store: &Store, recorded: &RecordedCatalog) -> Result<BTreeSet<String>, BuildError> {
+    provided_sonames(store, &recorded.chain)
+}
+
+/// The sonames the ELF files in `layers` provide.
+pub fn provided_sonames(store: &Store, layers: &[Descriptor]) -> Result<BTreeSet<String>, BuildError> {
     let mut caps = Caps::default();
     let mut out = BTreeSet::new();
-    for l in &recorded.chain {
+    for l in layers {
         let mut reader = crate::base::layer_reader(store, l)?;
         out.extend(crate::sonames::provided(&mut reader, &mut caps)?);
         // A partial list only makes the soname gate stricter.
@@ -374,20 +427,25 @@ pub fn check_catalog(
             Verdict {
                 gate: "line",
                 refusals: line,
+                provisional: None,
             },
             Verdict {
                 gate: "abi",
                 refusals: abi,
+                provisional: None,
             },
             Verdict {
                 gate: "sonames",
                 refusals: sonames,
+                provisional: None,
             },
         ],
     }
 }
 
-/// Resolves `recorded`'s constraints against `catalog` for `platform` and runs the catalog gates.
+/// Resolves `recorded`'s constraints against `catalog` for `platform` and runs the catalog gates,
+/// counting only the layers kept byte for byte as providing sonames: the runtime steps have not
+/// been re-run yet.
 pub fn check(
     store: &Store,
     catalog: &CatalogCtx,
@@ -399,6 +457,47 @@ pub fn check(
     let kept = kept_sonames(store, recorded)?;
     let check = check_catalog(&catalog.verified.index, recorded, &new, &kept);
     Ok((new, check))
+}
+
+/// The catalog of a catalog image's rebase: it must be loaded, and be the index `pin` names when
+/// one is given.
+fn loaded<'c>(ctx: &BuildCtx<'c>, pin: Option<&str>) -> Result<&'c CatalogCtx, BuildError> {
+    let catalog = ctx
+        .catalog
+        .ok_or_else(|| BuildError::Infra("the catalog was not loaded".into()))?;
+    if let Some(pin) = pin.filter(|p| *p != catalog.verified.digest) {
+        return Err(BuildError::Infra(format!(
+            "the catalog loaded is the index {}, not the pinned {pin}",
+            catalog.verified.digest
+        )));
+    }
+    Ok(catalog)
+}
+
+/// `potter rebase --dry-run`: resolves a catalog image's constraints again and runs the catalog
+/// gates, writing nothing. No runtime step runs, so the soname verdict of an image with runtime
+/// steps counts none of their layers and is marked [`NOT_RE_RUN`].
+pub fn dry_run(ctx: &BuildCtx, req: &Request) -> Result<DryRun, BuildError> {
+    let recorded = recorded(ctx.store, req.image)?;
+    let Some(c) = &recorded.catalog else {
+        return Err(BuildError::Plan(format!(
+            "{}: --dry-run checks images on a catalog base, and this one records none",
+            req.image
+        )));
+    };
+    let catalog = loaded(ctx, req.catalog_index)?;
+    let (new, mut check) = check(ctx.store, catalog, c, &ctx.platform)?;
+    if !c.runtime.is_empty() {
+        for v in check.verdicts.iter_mut().filter(|v| v.gate == "sonames") {
+            v.provisional = Some(NOT_RE_RUN);
+        }
+    }
+    Ok(DryRun {
+        digest: recorded.digest,
+        index: new.index_digest,
+        replaced: check.replaced,
+        verdicts: check.verdicts,
+    })
 }
 
 /// The run chain to re-run: the recorded one on `base` when given, else on its own reference
@@ -451,7 +550,6 @@ pub fn rebase_onto(
         cached: 0,
         replaced: Vec::new(),
         verdicts: Vec::new(),
-        dry_run: false,
     };
     if out.unchanged {
         if let Some(t) = tag {
@@ -490,53 +588,22 @@ pub fn rebase_onto(
 pub fn rebase(ctx: &mut BuildCtx, req: &Request) -> Result<Rebased, BuildError> {
     let recorded = recorded(ctx.store, req.image)?;
     let chain = rebase_chain(&recorded, req.base)?;
+    // The line and ABI gates refuse before any step runs. The soname gate waits for the runtime
+    // steps, whose new layers are part of the new run base.
     let catalog = match &recorded.catalog {
         Some(c) => {
-            let catalog = ctx
-                .catalog
-                .ok_or_else(|| BuildError::Infra("the catalog was not loaded".into()))?;
-            if let Some(pin) = req.catalog_index.filter(|p| *p != catalog.verified.digest) {
-                return Err(BuildError::Infra(format!(
-                    "the catalog loaded is the index {}, not the pinned {pin}",
-                    catalog.verified.digest
-                )));
-            }
-            Some(check(ctx.store, catalog, c, &ctx.platform)?)
-        }
-        None if req.dry_run => {
-            return Err(BuildError::Plan(format!(
-                "{}: --dry-run checks images on a catalog base, and this one records none",
-                req.image
-            )));
-        }
-        None => None,
-    };
-    let (replaced, verdicts) = match catalog {
-        Some((new, check)) => {
-            if req.dry_run {
-                return Ok(Rebased {
-                    digest: recorded.digest.clone(),
-                    tag: None,
-                    old_base: recorded.base.clone(),
-                    new_base: recorded.base.clone(),
-                    base_ref: format!("potter-catalog@{}", new.index_digest),
-                    base_digest: recorded.base.clone(),
-                    unchanged: check.replaced.is_empty(),
-                    reused: recorded.app_layers,
-                    changed: 0,
-                    executed: 0,
-                    cached: 0,
-                    replaced: check.replaced,
-                    verdicts: check.verdicts,
-                    dry_run: true,
-                });
-            }
-            if let Some(refused) = check.refused() {
+            let catalog = loaded(ctx, req.catalog_index)?;
+            let (new, check) = check(ctx.store, catalog, c, &ctx.platform)?;
+            let early = CatalogCheck {
+                replaced: Vec::new(),
+                verdicts: check.verdicts.into_iter().filter(|v| v.gate != "sonames").collect(),
+            };
+            if let Some(refused) = early.refused() {
                 return Err(refused);
             }
-            (check.replaced, check.verdicts)
+            Some((c, catalog, new))
         }
-        None => (Vec::new(), Vec::new()),
+        None => None,
     };
     let tag = match req.tag {
         Some(t) => Some(t),
@@ -551,6 +618,24 @@ pub fn rebase(ctx: &mut BuildCtx, req: &Request) -> Result<Rebased, BuildError> 
     std::fs::create_dir_all(ctx.home.runs()).map_err(io("creating the runs directory"))?;
     let empty = tempfile::tempdir_in(ctx.home.runs()).map_err(io("creating an empty source root"))?;
     let run = run_steps(ctx, "rebase", &chain, empty.path(), crate::stopgap::Role::Run)?;
+    // Nothing is tagged yet. The soname gate counts the layers kept byte for byte and the new
+    // runtime steps' layers, never the old ones the rebase drops.
+    let (replaced, verdicts) = match catalog {
+        Some((c, catalog, new)) => {
+            let runtime: Vec<Descriptor> = run.layers[run.base.layers().len()..]
+                .iter()
+                .map(|l| l.descriptor.clone())
+                .collect();
+            let mut kept = kept_sonames(ctx.store, c)?;
+            kept.extend(provided_sonames(ctx.store, &runtime)?);
+            let check = check_catalog(&catalog.verified.index, c, &new, &kept);
+            if let Some(refused) = check.refused() {
+                return Err(refused);
+            }
+            (check.replaced, check.verdicts)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
     let run_base = RunBase::of(ctx.store, &run).map_err(BuildError::Infra)?;
     let mut out = rebase_onto(ctx.store, &recorded, &run_base, tag)?;
     out.executed = run.executed;

@@ -14,7 +14,7 @@ use potter_exec::assemble::{
     ANN_CATALOG_CONSTRAINTS, ANN_CATALOG_INDEX, ANN_CATALOG_LAYERS, ANN_CHAIN, ANN_SONAMES_NEEDED,
 };
 use potter_exec::rebase::{
-    RecordedCatalog, check_catalog, kept_sonames, new_chain, rebase_chain, rebase_onto, recorded,
+    RecordedCatalog, check_catalog, kept_sonames, new_chain, provided_sonames, rebase_chain, rebase_onto, recorded,
 };
 use potter_plan::{Base, CatalogRef, Chain};
 
@@ -284,6 +284,7 @@ fn on(old: &[Entry], needed: Option<&[&str]>) -> RecordedCatalog {
         constraints: old.iter().map(|e| format!("{}@{}", e.name, e.line)).collect(),
         index: d(0xdd),
         chain: vec![],
+        runtime: vec![],
         sonames_needed: needed.map(|n| n.iter().map(|s| s.to_string()).collect()),
     }
 }
@@ -566,4 +567,142 @@ fn pre_p3_stopgap_image_still_rebases() {
     assert!(!r.unchanged);
     assert!(r.replaced.is_empty() && r.verdicts.is_empty());
     assert_eq!(rebase_chain(&rec, Some("x:1")).unwrap_err().exit_code(), 2);
+}
+
+/// The catalog annotations of an image on `entries`, whose kept layers are `chain` (digests).
+fn catalog_annotations(entries: &[Entry], chain: &[String], needed: &[&str]) -> BTreeMap<String, String> {
+    let list = |v: Vec<String>| serde_json::to_string(&v).unwrap();
+    BTreeMap::from([
+        (
+            ANN_CATALOG_LAYERS.to_string(),
+            list(entries.iter().map(|e| e.digest.clone()).collect()),
+        ),
+        (
+            ANN_CATALOG_CONSTRAINTS.to_string(),
+            list(entries.iter().map(|e| format!("{}@{}", e.name, e.line)).collect()),
+        ),
+        (ANN_CATALOG_INDEX.to_string(), d(0xdd)),
+        (ANN_CHAIN.to_string(), list(chain.to_vec())),
+        (
+            ANN_SONAMES_NEEDED.to_string(),
+            list(needed.iter().map(|s| s.to_string()).collect()),
+        ),
+    ])
+}
+
+fn catalog_chain() -> Chain {
+    Chain {
+        base: Base::Catalog {
+            layers: vec![CatalogRef::new("os-min", None)],
+        },
+        steps: vec![],
+    }
+}
+
+#[test]
+fn a_soname_only_an_old_runtime_step_provides_is_refused() {
+    let (_home, store) = store();
+    let old = [entry(1, "os-min", "13", "debian-13", &["libc.so.6", "libssl.so.3"])];
+    // A runtime step installed the shared object into the run base; the app needs it.
+    let so = TarBuilder::new()
+        .dir("usr", &Opts::default().mode(0o755))
+        .file(
+            "usr/libpotter-fixture.so.1",
+            &fixture_so(),
+            &Opts::default().mode(0o755),
+        )
+        .finish();
+    let rb = run_base(
+        &store,
+        "potter-catalog@x",
+        &oci_base(&store, &base_tars(1, "v1"), &["PATH=/bin"]),
+        std::slice::from_ref(&so),
+    );
+    let app = steps(1, "a");
+    let chain: Vec<String> = sources(std::slice::from_ref(&so))
+        .into_iter()
+        .chain(sources(&app))
+        .collect();
+    let needed = ["libc.so.6", "libpotter-fixture.so.1"];
+    image_with(
+        &store,
+        &rb,
+        &app,
+        10,
+        "potter/app:latest",
+        &catalog_chain(),
+        catalog_annotations(&old, &chain, &needed),
+    );
+    let c = recorded(&store, "potter/app:latest").unwrap().catalog.unwrap();
+    assert_eq!(c.runtime.len(), 1, "the runtime step's layer");
+    assert_eq!(c.chain.len(), 1, "the app's layer");
+
+    // The rebase re-runs the runtime step: the old layer it drops proves nothing.
+    let kept = kept_sonames(&store, &c).unwrap();
+    assert!(!kept.contains("libpotter-fixture.so.1"), "{kept:?}");
+    let new = [entry(3, "os-min", "13", "debian-13", &["libc.so.6"])];
+    let check = check_catalog(&index(&old, &new), &c, &resolution(&new), &kept);
+    assert_eq!(
+        refusals(&check, "sonames"),
+        ["the app needs libpotter-fixture.so.1, which no layer of the new run base provides"]
+    );
+    assert_eq!(check.refused().unwrap().exit_code(), 2);
+    // A re-run step whose new layer still provides it passes.
+    let mut with_new = kept.clone();
+    with_new.extend(provided_sonames(&store, &c.runtime).unwrap());
+    assert!(
+        check_catalog(&index(&old, &new), &c, &resolution(&new), &with_new)
+            .refused()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_partial_catalog_record_is_not_taken_for_a_pre_p3_image() {
+    for key in [
+        ANN_CHAIN,
+        ANN_CATALOG_INDEX,
+        ANN_CATALOG_CONSTRAINTS,
+        ANN_SONAMES_NEEDED,
+    ] {
+        let (_home, store) = store();
+        let rb = run_base(&store, "x", &oci_base(&store, &base_tars(1, "v1"), &["PATH=/bin"]), &[]);
+        let extra = BTreeMap::from([(key.to_string(), "[]".to_string())]);
+        image_with(
+            &store,
+            &rb,
+            &steps(1, "a"),
+            10,
+            "potter/app:latest",
+            &catalog_chain(),
+            extra,
+        );
+        let err = recorded(&store, "potter/app:latest").unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{key}: {err}");
+        assert!(err.to_string().contains("not a potter catalog image"), "{err}");
+    }
+}
+
+#[test]
+fn an_unreadable_run_base_record_is_an_infrastructure_failure() {
+    let (_home, store) = store();
+    let old = [entry(1, "os-min", "13", "debian-13", &[])];
+    let rb = run_base(&store, "x", &oci_base(&store, &base_tars(1, "v1"), &["PATH=/bin"]), &[]);
+    let app = steps(1, "a");
+    image_with(
+        &store,
+        &rb,
+        &app,
+        10,
+        "potter/app:latest",
+        &catalog_chain(),
+        catalog_annotations(&old, &sources(&app), &[]),
+    );
+    // The run base's source manifest is gone.
+    let base = recorded(&store, "potter/app:latest").unwrap().base;
+    let loaded = kiln_image::load(&store, &base).unwrap();
+    std::fs::remove_file(store.blob_path(&loaded.entries[0].1.config.source.manifest_digest)).unwrap();
+    let err = recorded(&store, "potter/app:latest").unwrap_err();
+    assert_eq!(err.exit_code(), 4, "{err}");
+    assert!(err.to_string().contains("the run base"), "{err}");
 }

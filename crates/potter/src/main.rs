@@ -711,7 +711,9 @@ fn rebase(
     let chain = potter_exec::rebase::recorded(&store, image)
         .and_then(|r| potter_exec::rebase::rebase_chain(&r, base))
         .ok();
-    let catalog = match load_catalog(&store, &home, catalog_index, chain.iter().map(|c| &c.base), !dry_run) {
+    // No `prepare`: a rebase fetches the new layers only once the line and ABI gates pass, when
+    // its run chain builds the composite, and that is its first step anyway.
+    let catalog = match load_catalog(&store, &home, catalog_index, chain.iter().map(|c| &c.base), false) {
         Ok(c) => c,
         Err((e, code)) => return fail(&e, code),
     };
@@ -761,16 +763,18 @@ fn rebase(
         base,
         tag,
         catalog_index,
-        dry_run,
     };
+    if dry_run {
+        return match potter_exec::rebase::dry_run(&ctx, &req) {
+            Ok(d) => print_dry_run(image, &d, json),
+            Err(e) => fail(&e.to_string(), e.exit_code()),
+        };
+    }
     let r = match potter_exec::rebase::rebase(&mut ctx, &req) {
         Ok(r) => r,
         Err(e) => return fail(&e.to_string(), e.exit_code()),
     };
     let replaced: Vec<[&str; 2]> = r.replaced.iter().map(|(o, n)| [o.as_str(), n.as_str()]).collect();
-    if r.dry_run {
-        return print_dry_run(image, &r, json);
-    }
     if json {
         println!(
             "{}",
@@ -825,7 +829,7 @@ fn rebase(
 /// `potter rebase --dry-run`: the layers a rebase would replace and every gate's verdict; exit 2
 /// when a catalog gate refuses. kiln's gates need the new run base built, so a dry run cannot
 /// check them.
-fn print_dry_run(image: &str, r: &potter_exec::rebase::Rebased, json: bool) -> ExitCode {
+fn print_dry_run(image: &str, r: &potter_exec::rebase::DryRun, json: bool) -> ExitCode {
     const KILN: &str = "not checked: kiln's gates need the new run base built";
     let refused = r.verdicts.iter().any(|v| !v.refusals.is_empty());
     if json {
@@ -837,6 +841,7 @@ fn print_dry_run(image: &str, r: &potter_exec::rebase::Rebased, json: bool) -> E
                     "gate": v.gate,
                     "verdict": if v.refusals.is_empty() { "pass" } else { "refused" },
                     "reasons": v.refusals,
+                    "provisional": v.provisional,
                 })
             })
             .collect();
@@ -847,7 +852,7 @@ fn print_dry_run(image: &str, r: &potter_exec::rebase::Rebased, json: bool) -> E
             serde_json::json!({
                 "dry_run": true,
                 "digest": r.digest.to_string(),
-                "index": r.base_ref.trim_start_matches("potter-catalog@"),
+                "index": r.index,
                 "replaced": replaced,
                 "gates": gates,
             })
@@ -860,9 +865,13 @@ fn print_dry_run(image: &str, r: &potter_exec::rebase::Rebased, json: bool) -> E
             println!("{}: would replace {o} with {n}", sanitize(image));
         }
         for v in &r.verdicts {
+            let note = v
+                .provisional
+                .map(|p| format!(" (provisional: {p})"))
+                .unwrap_or_default();
             match v.refusals.as_slice() {
-                [] => println!("{}: pass", v.gate),
-                reasons => println!("{}: refused: {}", v.gate, sanitize(&reasons.join("; "))),
+                [] => println!("{}: pass{note}", v.gate),
+                reasons => println!("{}: refused{note}: {}", v.gate, sanitize(&reasons.join("; "))),
             }
         }
         println!("kiln: {KILN}");
