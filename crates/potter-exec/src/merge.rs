@@ -465,6 +465,17 @@ fn export_from<W: Write>(
     Ok((out, summary))
 }
 
+/// The size of `path` in the merged view of `layers`, when it is a regular file.
+pub fn file_size(layers: &[LayerOpen], path: &str) -> Result<Option<u64>, BuildError> {
+    Ok(match merged(layers)?.get(path.trim_matches('/')) {
+        Some(Node {
+            kind: Kind::File { size, .. },
+            ..
+        }) => Some(*size),
+        _ => None,
+    })
+}
+
 /// The content of `path` in the merged view of `layers`, when it is a regular file of at most
 /// `cap` bytes.
 pub fn read_file(layers: &[LayerOpen], path: &str, cap: u64) -> Result<Option<Vec<u8>>, BuildError> {

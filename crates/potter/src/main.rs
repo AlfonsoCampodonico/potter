@@ -1415,12 +1415,12 @@ fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
 
 /// `potter catalog build`: every recipe built with the namespace executor in the `catalog`
 /// tenant, checked, and written to `out` signed with `sign_key`. Exit 1 when a layer overlaps
-/// another or fails its smoke test, 2 for a recipe or usage error, 3 when `previous` does not
-/// verify, 4 for infrastructure.
+/// another or fails its smoke test, 2 for a recipe or usage error (a missing or unreadable
+/// `--sign-key` too), 3 when `previous` does not verify, 4 for infrastructure.
 fn catalog_build(catalog_dir: &Path, out: &Path, sign_key: &Path, previous: Option<&str>) -> Result<(), (String, u8)> {
     use potter_exec::chain::{Progress, StepState};
     let built = |e: potter_exec::BuildError| (e.to_string(), e.exit_code());
-    let pem = std::fs::read_to_string(sign_key).map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 4))?;
+    let pem = std::fs::read_to_string(sign_key).map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
     let key = potter_catalog::signing_key_from_pem(&pem)
         .map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
     let previous = previous
@@ -1448,7 +1448,9 @@ fn catalog_build(catalog_dir: &Path, out: &Path, sign_key: &Path, previous: Opti
             eprintln!("[{}] {}: {state}", sanitize(&target), sanitize(&step));
         }
         Progress::Warning(w) => eprintln!("warning: {}", sanitize(&w)),
-        Progress::Log { target, step, line } => eprintln!("[{target}/{step}] {line}"),
+        Progress::Log { target, step, line } => {
+            eprintln!("[{}/{}] {}", sanitize(&target), sanitize(&step), sanitize(&line))
+        }
     };
     let mut parts = potter_exec::catalog_build::Parts {
         store: &store,

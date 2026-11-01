@@ -26,9 +26,10 @@ use sha2::Digest as _;
 use crate::base::layer_reader;
 use crate::chain::{BuildCtx, CatalogCtx, LayerRef, Progress, catalog_arch, run_chain, run_steps};
 use crate::error::{BuildError, io};
-use crate::merge::{ExportSpec, LayerOpen, export_layer, read_file};
+use crate::merge::{ExportSpec, LayerOpen, export_layer, file_size, normalise, read_file};
 use crate::sandboxed::SandboxCtx;
 use crate::sonames::{Caps, provided};
+use crate::tarball::{Meta, TarWriter};
 use assign::{Outcome, assign};
 use recipe::{OS_MIN, Recipe};
 
@@ -132,33 +133,40 @@ pub fn build(parts: &mut Parts, req: &Request) -> Result<Report, BuildError> {
             Base::Oci { .. } => 0,
             _ => state.base.layers().len(),
         };
-        let layer = extract(parts.store, &state.layers[above..], work.path(), recipe.name())?;
+        let (under, own) = state.layers.split_at(above);
+        check_deletions(parts.store, under, own, recipe.name())?;
         if recipe.name() == OS_MIN {
-            os_abi = Some(read_os_abi(&layer.tar)?);
+            os_abi = Some(read_os_abi(parts.store, own)?);
         }
         let [os, libc] = os_abi.clone().expect("os-min builds first");
         let l = &recipe.layer;
-        let entry = Entry {
+        let mut entry = Entry {
             name: l.name.clone(),
             line: l.line.clone(),
             version: l.version.clone(),
             arch,
             kind: l.kind,
-            digest: layer.descriptor.digest.to_string(),
-            diff_id: layer.diff_id.to_string(),
-            size: layer.descriptor.size,
-            media_type: layer.descriptor.media_type.clone(),
+            digest: String::new(),
+            diff_id: String::new(),
+            size: 0,
+            media_type: String::new(),
             abi: l.abi.clone().into_iter().chain([os, libc]).collect(),
             requires: recipe.requires(),
             conflicts: l.conflicts.clone(),
             env: l.env.clone(),
-            provides_sonames: layer.sonames,
+            provides_sonames: Vec::new(),
             executor: EXECUTOR.into(),
             source: l.source.clone(),
             license: l.license.clone(),
             supersedes: None,
             fixes: l.fixes.clone(),
         };
+        let layer = extract(parts.store, own, work.path(), recipe.name(), &metadata(&entry))?;
+        entry.digest = layer.descriptor.digest.to_string();
+        entry.diff_id = layer.diff_id.to_string();
+        entry.size = layer.descriptor.size;
+        entry.media_type = layer.descriptor.media_type.clone();
+        entry.provides_sonames = layer.sonames;
         if let Some(twin) = built.iter().find(|b| b.entry.digest == entry.digest) {
             return Err(BuildError::Plan(format!(
                 "the recipes {} and {} build the same layer {}",
@@ -201,8 +209,6 @@ pub fn build(parts: &mut Parts, req: &Request) -> Result<Report, BuildError> {
         built.iter().map(|b| b.entry.clone()).collect(),
         req.created.clone(),
     )?;
-    let blobs = layout_blobs(parts, &assigned.index, &built, previous.as_ref())?;
-    let digest = write_signed(req.out, &assigned.index, req.sign_key, &blobs)?;
     let mut layers = Vec::with_capacity(built.len());
     for (b, (_, outcome)) in built.iter().zip(assigned.outcomes) {
         let entry = assigned
@@ -210,21 +216,26 @@ pub fn build(parts: &mut Parts, req: &Request) -> Result<Report, BuildError> {
             .by_digest(&b.entry.digest)
             .cloned()
             .expect("every built layer has an entry");
-        // A kept entry keeps its metadata too: a layer.toml change that leaves the bytes alone
-        // waits for the next change that does not.
-        let unchanged = |e: &Entry| Entry {
-            supersedes: None,
-            fixes: Vec::new(),
-            ..e.clone()
+        // The layer's bytes hold its metadata, so the same digest is the same entry.
+        let published = |e: &Entry| {
+            (
+                metadata(e),
+                e.diff_id.clone(),
+                e.size,
+                e.media_type.clone(),
+                e.provides_sonames.clone(),
+            )
         };
-        if outcome == Outcome::Kept && unchanged(&entry) != unchanged(&b.entry) {
-            (parts.progress)(Progress::Warning(format!(
-                "{} keeps its entry: its layer is unchanged, so what its layer.toml changes is not published",
-                b.entry.name
+        if outcome == Outcome::Kept && published(&entry) != published(&b.entry) {
+            return Err(BuildError::Infra(format!(
+                "internal error: {} {} has the digest of the previous entry but not its metadata",
+                b.entry.name, b.entry.digest
             )));
         }
         layers.push((entry, outcome));
     }
+    let blobs = layout_blobs(parts, &assigned.index, &built, previous.as_ref())?;
+    let digest = write_signed(req.out, &assigned.index, req.sign_key, &blobs)?;
     Ok(Report {
         index: assigned.index,
         digest,
@@ -404,10 +415,107 @@ impl<W: Write> Write for Hashing<W> {
     }
 }
 
-/// A built layer: the flattened tar, its zstd blob in the store, and what it holds.
+/// Where each layer carries its own metadata.
+pub const METADATA_DIR: &str = "usr/share/potter-catalog";
+
+/// The canonical JSON of what an entry publishes about its layer, which the layer holds at
+/// `/usr/share/potter-catalog/<name>.json`: a change to any of it changes the layer's digest.
+/// `fixes`, `supersedes` and `executor` describe the entry, not the layer, and stay out.
+pub fn metadata(e: &Entry) -> Vec<u8> {
+    let v = serde_json::json!({
+        "name": e.name,
+        "line": e.line,
+        "version": e.version,
+        "kind": e.kind,
+        "requires": e.requires,
+        "conflicts": e.conflicts,
+        "abi": e.abi,
+        "env": e.env,
+        "source": e.source,
+        "license": e.license,
+    });
+    potter_plan::canonical_json(&v)
+        .expect("metadata serializes to JSON without floats")
+        .into_bytes()
+}
+
+/// The base paths that `own` (the layers a recipe added) delete from `under` (the layers it
+/// built on), with whiteouts or opaque directories. A layer cannot carry deletions, so they
+/// would be lost: the recipe is refused instead.
+fn check_deletions(store: &Store, under: &[LayerRef], own: &[LayerRef], name: &str) -> Result<(), BuildError> {
+    if under.is_empty() {
+        return Ok(());
+    }
+    let what = || format!("reading the layers of {name}");
+    let paths = |l: &LayerRef| -> Result<Vec<String>, BuildError> {
+        let mut out = Vec::new();
+        for entry in tar::Archive::new(layer_reader(store, &l.descriptor)?)
+            .entries()
+            .map_err(io(what()))?
+        {
+            let entry = entry.map_err(io(what()))?;
+            if let Some(p) = normalise(&entry.path_bytes())? {
+                out.push(p);
+            }
+        }
+        Ok(out)
+    };
+    let mut base = BTreeSet::new();
+    for l in under {
+        base.extend(
+            paths(l)?
+                .into_iter()
+                .filter(|p| !p.rsplit('/').next().unwrap_or(p).starts_with(".wh.")),
+        );
+    }
+    let under_dir = |dir: &str| -> Vec<String> {
+        match dir.is_empty() {
+            true => base.iter().cloned().collect(),
+            false => {
+                let prefix = format!("{dir}/");
+                base.range(prefix.clone()..)
+                    .take_while(|p| p.starts_with(&prefix))
+                    .cloned()
+                    .collect()
+            }
+        }
+    };
+    let mut hidden = BTreeSet::new();
+    for l in own {
+        for p in paths(l)? {
+            let (dir, file) = p.rsplit_once('/').unwrap_or(("", p.as_str()));
+            if file == ".wh..wh..opq" {
+                hidden.extend(under_dir(dir));
+            } else if let Some(gone) = file.strip_prefix(".wh.") {
+                let target = if dir.is_empty() {
+                    gone.to_string()
+                } else {
+                    format!("{dir}/{gone}")
+                };
+                if base.contains(&target) {
+                    hidden.insert(target.clone());
+                }
+                hidden.extend(under_dir(&target));
+            }
+        }
+    }
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let mut shown: Vec<String> = hidden.iter().take(overlap::SHOWN).map(|p| format!("/{p}")).collect();
+    if hidden.len() > overlap::SHOWN {
+        shown.push(format!("and {} more", hidden.len() - overlap::SHOWN));
+    }
+    Err(BuildError::Plan(format!(
+        "the recipe {name} deletes {} path{} the layers it builds on hold, which its layer cannot carry: {}",
+        hidden.len(),
+        if hidden.len() == 1 { "" } else { "s" },
+        shown.join(", ")
+    )))
+}
+
+/// A built layer: its zstd blob in the store, and what it holds.
 struct Extracted {
-    /// The uncompressed tar, kept for reading `os-min`'s ABI.
-    tar: tempfile::NamedTempFile,
     descriptor: Descriptor,
     diff_id: Digest,
     files: BTreeSet<String>,
@@ -415,17 +523,42 @@ struct Extracted {
 }
 
 /// `layers` (bottom first) flattened into one deterministic layer, without the recipe's own
-/// `/app`, stored zstd-compressed.
-fn extract(store: &Store, layers: &[LayerRef], work: &Path, name: &str) -> Result<Extracted, BuildError> {
+/// `/app` and with `metadata` at `/usr/share/potter-catalog/<name>.json`, stored
+/// zstd-compressed.
+fn extract(
+    store: &Store,
+    layers: &[LayerRef],
+    work: &Path,
+    name: &str,
+    metadata: &[u8],
+) -> Result<Extracted, BuildError> {
     if layers.is_empty() {
         return Err(BuildError::Plan(format!(
             "the recipe {name} added nothing to its layer"
         )));
     }
-    let open: Vec<LayerOpen> = layers
+    let mut top = TarWriter::new(Vec::new());
+    let meta = Meta {
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+        mtime: 0,
+    };
+    top.file(
+        &format!("{METADATA_DIR}/{name}.json"),
+        &meta,
+        metadata.len() as u64,
+        &mut &metadata[..],
+    )
+    .map_err(io(format!("writing the metadata of {name}")))?;
+    let top = top.finish().map_err(io(format!("writing the metadata of {name}")))?;
+    let mut open: Vec<LayerOpen> = layers
         .iter()
         .map(|l| Box::new(move || layer_reader(store, &l.descriptor)) as LayerOpen)
         .collect();
+    open.push(Box::new(move || {
+        Ok(Box::new(io::Cursor::new(top.clone())) as Box<dyn io::Read + Send>)
+    }));
     // The recipe's sources are copied to /app for its steps; they are not the layer's.
     let everything = [Export {
         path: "/".into(),
@@ -480,7 +613,6 @@ fn extract(store: &Store, layers: &[LayerRef], work: &Path, name: &str) -> Resul
     let digest = store.commit(blob).map_err(|e| infra(&e))?;
     let size = store.blob_size(&digest).map_err(|e| infra(&e))?;
     Ok(Extracted {
-        tar,
         descriptor: Descriptor::new(OCI_LAYER_ZSTD, digest, size),
         diff_id,
         files,
@@ -488,15 +620,20 @@ fn extract(store: &Store, layers: &[LayerRef], work: &Path, name: &str) -> Resul
     })
 }
 
-/// `os` and `libc` from the `os-min` layer `tar`, read on the host.
-fn read_os_abi(tar: &tempfile::NamedTempFile) -> Result<[(String, String); 2], BuildError> {
-    let path = tar.path().to_path_buf();
-    let open: Vec<LayerOpen> = vec![Box::new(move || {
-        let f = std::fs::File::open(&path).map_err(io("reading the os-min layer"))?;
-        Ok(Box::new(f) as Box<dyn io::Read + Send>)
-    })];
+/// `os` and `libc` from the `os-min` chain's `layers`, read on the host.
+fn read_os_abi(store: &Store, layers: &[LayerRef]) -> Result<[(String, String); 2], BuildError> {
+    let open: Vec<LayerOpen> = layers
+        .iter()
+        .map(|l| Box::new(move || layer_reader(store, &l.descriptor)) as LayerOpen)
+        .collect();
     let text = |p: &str, cap: u64| -> Result<Option<String>, BuildError> {
-        Ok(read_file(&open, p, cap)?.map(|b| String::from_utf8_lossy(&b).into_owned()))
+        match file_size(&open, p)? {
+            None => Ok(None),
+            Some(n) if n > cap => Err(BuildError::Plan(format!(
+                "os-min's {p} is {n} bytes, over the {cap} the driver reads"
+            ))),
+            Some(_) => Ok(read_file(&open, p, cap)?.map(|b| String::from_utf8_lossy(&b).into_owned())),
+        }
     };
     let release = match text("/etc/os-release", 1 << 20)? {
         Some(t) => t,
@@ -531,4 +668,74 @@ pub fn publish(layout: &Path, to: &Reference, auth: DockerConfig) -> Result<Veri
     }
     potter_catalog::push(layout, to, auth)?;
     Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use potter_catalog::{Arch, Kind};
+
+    use super::*;
+
+    fn entry() -> Entry {
+        Entry {
+            name: "hello".into(),
+            line: "1".into(),
+            version: "1.0.0".into(),
+            arch: Arch::X86_64,
+            kind: Kind::Tool,
+            digest: "sha256:aa".into(),
+            diff_id: "sha256:bb".into(),
+            size: 1,
+            media_type: OCI_LAYER_ZSTD.into(),
+            abi: [("os".to_string(), "debian-13".to_string())].into(),
+            requires: vec![potter_plan::CatalogRef::new("os-min", None)],
+            conflicts: vec![],
+            env: Default::default(),
+            provides_sonames: vec![],
+            executor: "ns".into(),
+            source: "https://example.test".into(),
+            license: "MIT".into(),
+            supersedes: None,
+            fixes: vec![],
+        }
+    }
+
+    #[test]
+    fn metadata_is_what_the_entry_publishes_about_its_layer() {
+        let e = entry();
+        let m = metadata(&e);
+        assert_eq!(
+            String::from_utf8(m.clone()).unwrap(),
+            r#"{"abi":{"os":"debian-13"},"conflicts":[],"env":{},"kind":"tool","license":"MIT","line":"1","name":"hello","requires":[{"name":"os-min"}],"source":"https://example.test","version":"1.0.0"}"#
+        );
+        // What describes the entry rather than the layer is left out.
+        let other = Entry {
+            supersedes: Some("sha256:cc".into()),
+            fixes: vec!["CVE-1".into()],
+            executor: "vm".into(),
+            digest: "sha256:dd".into(),
+            ..e.clone()
+        };
+        assert_eq!(metadata(&other), m);
+        for changed in [
+            Entry {
+                conflicts: vec!["x".into()],
+                ..e.clone()
+            },
+            Entry {
+                abi: [("os".to_string(), "debian-14".to_string())].into(),
+                ..e.clone()
+            },
+            Entry {
+                env: [("PATH".to_string(), "/x".to_string())].into(),
+                ..e.clone()
+            },
+            Entry {
+                license: "GPL-2.0".into(),
+                ..e.clone()
+            },
+        ] {
+            assert_ne!(metadata(&changed), m);
+        }
+    }
 }

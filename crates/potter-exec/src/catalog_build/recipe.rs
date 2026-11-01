@@ -127,7 +127,19 @@ pub fn load(catalog_dir: &Path) -> Result<Vec<Recipe>, BuildError> {
     for entry in read_dir {
         let entry = entry.map_err(|e| BuildError::Infra(format!("{}: {e}", catalog_dir.display())))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || !entry.path().is_dir() {
+        if name.starts_with('.') {
+            continue;
+        }
+        let kind = entry
+            .file_type()
+            .map_err(|e| BuildError::Infra(format!("{}: {e}", entry.path().display())))?;
+        if kind.is_symlink() {
+            return Err(plan(format!(
+                "{} is a symlink: a recipe is a directory of the catalog itself",
+                entry.path().display()
+            )));
+        }
+        if !kind.is_dir() {
             continue;
         }
         dirs.push((name, entry.path()));
@@ -178,6 +190,9 @@ fn check(recipes: &[Recipe]) -> Result<(), BuildError> {
     for r in recipes {
         let name = r.name();
         let base = r.base_layers();
+        if base.contains(&name) || r.requires().iter().any(|c| c.name == name) {
+            return Err(plan(format!("the recipe {name} requires or builds on itself")));
+        }
         if name == OS_MIN {
             if !matches!(r.target.build.base, Base::Oci { .. }) || !r.layer.requires.is_empty() {
                 return Err(plan(format!(
@@ -224,7 +239,6 @@ pub fn order(recipes: Vec<Recipe>) -> Result<Vec<Recipe>, BuildError> {
                 .into_iter()
                 .map(str::to_string)
                 .chain(r.requires().into_iter().map(|c| c.name))
-                .filter(|d| d != r.name())
                 .collect();
             (r.name().to_string(), d)
         })
@@ -418,6 +432,30 @@ fixes = []
             matches!(&err, BuildError::Plan(m) if m.contains("requires b but does not build on it")),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn a_recipe_that_requires_itself_is_a_plan_error() {
+        let dir = tempfile::tempdir().unwrap();
+        recipe(dir.path(), "os-min", "oci = \"example.test/debian:13\"", &[], "");
+        recipe(dir.path(), "a", "catalog = [\"os-min\", \"a\"]", &["os-min", "a"], "");
+        let err = load(dir.path()).unwrap_err();
+        assert!(
+            matches!(&err, BuildError::Plan(m) if m.contains("a requires or builds on itself")),
+            "{err:?}"
+        );
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn a_symlinked_recipe_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        recipe(dir.path(), "os-min", "oci = \"example.test/debian:13\"", &[], "");
+        recipe(elsewhere.path(), "a", "catalog = [\"os-min\"]", &["os-min"], "");
+        std::os::unix::fs::symlink(elsewhere.path().join("a"), dir.path().join("a")).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(&err, BuildError::Plan(m) if m.contains("symlink")), "{err:?}");
     }
 
     #[test]

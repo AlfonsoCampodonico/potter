@@ -249,13 +249,26 @@ fn layer_holds_only_files_above_base() {
     let index = index(&out);
     let hello = layer_paths(&out, current(&index, "hello"));
     let files: Vec<&str> = hello.iter().filter(|(_, f)| *f).map(|(p, _)| p.as_str()).collect();
-    assert_eq!(files, ["usr/local/bin/hello"], "{hello:?}");
+    assert_eq!(
+        files,
+        ["usr/local/bin/hello", "usr/share/potter-catalog/hello.json"],
+        "{hello:?}"
+    );
     // Nothing of os-min and none of the recipe's /app. The empty etc is where the sandbox
     // mounted resolv.conf for the networked step: every networked step's diff has it.
     let paths: Vec<&str> = hello.iter().map(|(p, _)| p.as_str()).collect();
     assert_eq!(
         paths,
-        ["etc", "usr", "usr/local", "usr/local/bin", "usr/local/bin/hello"],
+        [
+            "etc",
+            "usr",
+            "usr/local",
+            "usr/local/bin",
+            "usr/local/bin/hello",
+            "usr/share",
+            "usr/share/potter-catalog",
+            "usr/share/potter-catalog/hello.json"
+        ],
         "{hello:?}"
     );
     // os-min is its whole root, flattened: the busybox base and what its recipe added.
@@ -349,6 +362,11 @@ fn a_recipe_error_exits_2_before_anything_builds() {
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("surprise"), "{stderr}");
     assert!(!stderr.contains(": running"), "{stderr}");
+    // A --sign-key that is not there is a usage error too.
+    let gone = (dir.path().join("nope.key"), keys.1.clone());
+    let (code, _, stderr) = build(&ctx, &cat, &out, &gone, None);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--sign-key"), "{stderr}");
 }
 
 #[test]
@@ -384,12 +402,8 @@ fn unchanged_layer_keeps_entry_changed_supersedes() {
     edit(&cat, "hello", "potter.toml", "echo hello\\\\n", "echo hello again\\\\n");
     edit(&cat, "hello", "layer.toml", "= hello\"", "= \\\"hello again\\\"\"");
     edit(&cat, "hello", "layer.toml", "1.0.0", "1.0.1");
-    // os-min's license corrected, its bytes the same: the entry stays as it was, with a warning.
-    edit(&cat, "os-min", "layer.toml", "GPL-2.0", "GPL-2.0-only");
     let (code, stdout, stderr) = build(&ctx, &cat, &v2, &keys, Some(&v1));
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("warning: os-min keeps its entry"), "{stderr}");
-    assert!(!stderr.contains("warning: hello"), "{stderr}");
     let second = index(&v2);
     assert_eq!(second.serial, 2);
     let (old_os, old_hello) = (current(&first, "os-min"), current(&first, "hello"));
@@ -519,4 +533,106 @@ fn publish_refuses_unsigned_layout() {
         !other.has_blob(&kiln_store::Digest::parse(&e.digest).unwrap()),
         "nothing was pushed"
     );
+}
+
+/// Every published piece of an entry's metadata is in its layer's bytes, at
+/// /usr/share/potter-catalog/<name>.json: a change to it is a new digest and a superseding entry.
+#[test]
+fn metadata_changes_supersede() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _base, base) = support::serve_busybox();
+    let dir = tempfile::tempdir().unwrap();
+    let (cat, keys) = (catalog(dir.path(), &base), key(dir.path()));
+    let (v1, v2, v3) = (dir.path().join("v1"), dir.path().join("v2"), dir.path().join("v3"));
+    let (code, _, stderr) = build(&ctx, &cat, &v1, &keys, None);
+    assert_eq!(code, 0, "{stderr}");
+    let first = index(&v1);
+    let meta: serde_json::Value = {
+        let e = current(&first, "hello");
+        let mut tar = Vec::new();
+        zstd::Decoder::new(blob(&v1, &e.digest).as_slice())
+            .unwrap()
+            .read_to_end(&mut tar)
+            .unwrap();
+        let mut a = tar::Archive::new(tar.as_slice());
+        let mut f = a
+            .entries()
+            .unwrap()
+            .map(|en| en.unwrap())
+            .find(|en| en.path().unwrap().to_str() == Some("usr/share/potter-catalog/hello.json"))
+            .expect("the layer holds its metadata");
+        let mut text = String::new();
+        f.read_to_string(&mut text).unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    assert_eq!(meta["name"], "hello");
+    assert_eq!(meta["abi"]["os"], "debian-13");
+    assert_eq!(meta["requires"], serde_json::json!([{"name": "os-min"}]));
+    assert!(meta.get("fixes").is_none() && meta.get("executor").is_none(), "{meta}");
+
+    // A conflicts-only change: hello supersedes, os-min is kept.
+    edit(
+        &cat,
+        "hello",
+        "layer.toml",
+        "requires = [",
+        "conflicts = [\"goodbye\"]\nrequires = [",
+    );
+    let (code, stdout, stderr) = build(&ctx, &cat, &v2, &keys, Some(&v1));
+    assert_eq!(code, 0, "{stderr}");
+    let second = index(&v2);
+    let hello = current(&second, "hello");
+    assert_eq!(hello.conflicts, ["goodbye"]);
+    assert_eq!(
+        hello.supersedes.as_deref(),
+        Some(current(&first, "hello").digest.as_str())
+    );
+    assert_eq!(current(&second, "os-min"), current(&first, "os-min"));
+    assert!(stdout.contains(" kept") && stdout.contains(" supersedes "), "{stdout}");
+
+    // os-min's ABI changes: os-min and every layer on it supersede.
+    edit(
+        &cat,
+        "os-min",
+        "potter.toml",
+        "VERSION_ID=\\\"13\\\"",
+        "VERSION_ID=\\\"14\\\"",
+    );
+    let (code, stdout, stderr) = build(&ctx, &cat, &v3, &keys, Some(&v2));
+    assert_eq!(code, 0, "{stderr}");
+    let third = index(&v3);
+    for name in ["os-min", "hello"] {
+        let e = current(&third, name);
+        assert_eq!(e.abi["os"], "debian-14", "{name}");
+        assert_eq!(
+            e.supersedes.as_deref(),
+            Some(current(&second, name).digest.as_str()),
+            "{name}"
+        );
+    }
+    assert!(!stdout.contains(" kept"), "{stdout}");
+}
+
+/// A layer cannot delete what the layers under it hold: a step that does is refused.
+#[test]
+fn deleting_a_base_file_is_refused() {
+    let Some(ctx) = Ctx::new() else { return };
+    let (_reg, _base, base) = support::serve_busybox();
+    let dir = tempfile::tempdir().unwrap();
+    let (cat, out, keys) = (catalog(dir.path(), &base), dir.path().join("out"), key(dir.path()));
+    edit(
+        &cat,
+        "hello",
+        "potter.toml",
+        "755 /usr/local/bin/hello\"",
+        "755 /usr/local/bin/hello && rm /etc/motd\"",
+    );
+    let (code, _, stderr) = build(&ctx, &cat, &out, &keys, None);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("hello deletes 1 path the layers it builds on hold"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("/etc/motd"), "{stderr}");
+    assert!(!out.join("index.json").exists());
 }
