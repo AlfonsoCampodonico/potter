@@ -176,3 +176,57 @@ fn override_env_prints_note() {
     assert_eq!(code, 0);
     assert!(err.contains("note: using the catalog at oci-layout:"), "{err}");
 }
+
+#[test]
+fn verify_rehashes_a_corrupt_stored_layer() {
+    let c = catalog();
+    let (code, _, err) = potter(&c, &["catalog", "verify"]);
+    assert_eq!(code, 0, "{err}");
+    let hex = c.current("go").digest.strip_prefix("sha256:").unwrap().to_string();
+    let stored = c.dir.path().join("home/kiln").join("blobs/sha256").join(&hex);
+    assert!(stored.is_file(), "{}", stored.display());
+    let mut bytes = std::fs::read(&stored).unwrap();
+    bytes[0] ^= 0xff;
+    std::fs::write(&stored, bytes).unwrap();
+    let (code, _, err) = potter(&c, &["catalog", "verify"]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("hashes to"), "{err}");
+}
+
+#[test]
+fn control_characters_in_errors_are_escaped() {
+    let c = catalog();
+    let (code, _, err) = potter(&c, &["catalog", "resolve", "go\u{1b}[31m@9"]);
+    assert_eq!(code, 2);
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+    assert!(err.contains("\\u{1b}[31m"), "{err:?}");
+    let (code, _, err) = potter(&c, &["catalog", "affected", "sha256:\u{7}"]);
+    assert_eq!(code, 2);
+    assert!(!err.contains('\u{7}') && err.contains("\\u{7}"), "{err:?}");
+}
+
+#[test]
+fn unreachable_catalog_exits_4() {
+    let c = catalog();
+    let missing = c.dir.path().join("nowhere");
+    let home = c.dir.path().join("home");
+    let out = Command::cargo_bin("potter")
+        .unwrap()
+        .args(["catalog", "ls"])
+        .env("KILN_HOME", home.join("kiln"))
+        .env("POTTER_HOME", home.join("potter"))
+        .env("POTTER_CATALOG", format!("oci-layout:{}", missing.display()))
+        .env("POTTER_CATALOG_KEY", &c.key)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn affected_advisory_without_match_prints_header_only() {
+    let c = catalog();
+    let (code, out, err) = potter(&c, &["catalog", "affected", "CVE-0000-0"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.starts_with("NAME"));
+}

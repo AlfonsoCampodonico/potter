@@ -173,10 +173,10 @@ enum Cmd {
 enum CatalogCmd {
     /// List the catalog's current layers
     Ls {
-        /// x86_64 or aarch64 (default: this machine's)
+        /// x86_64 or aarch64 (default: this machine's); ignored with --all
         #[arg(long)]
         arch: Option<String>,
-        /// Every architecture, and superseded entries too
+        /// List every architecture and the superseded entries too, ignoring --arch
         #[arg(long)]
         all: bool,
         #[arg(long)]
@@ -1224,11 +1224,7 @@ fn catalog_arch(arch: Option<&str>) -> Result<potter_catalog::Arch, (String, u8)
         Some("x86_64") => Ok(Arch::X86_64),
         Some("aarch64") => Ok(Arch::Aarch64),
         Some(other) => Err((format!("--arch {other:?} is neither x86_64 nor aarch64"), 2)),
-        None => match kiln_oci::Platform::host().architecture.as_str() {
-            "amd64" | "x86_64" => Ok(Arch::X86_64),
-            "arm64" | "aarch64" => Ok(Arch::Aarch64),
-            other => Err((format!("the catalog has no layers for the architecture {other}"), 2)),
-        },
+        None => potter_exec::chain::catalog_arch(&kiln_oci::Platform::host()).map_err(|e| (e.to_string(), 2)),
     }
 }
 
@@ -1321,7 +1317,18 @@ fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
         CatalogCmd::Verify { .. } => {
             let mut n = 0;
             for e in index.current() {
-                fetch_layer(&verified, e, &store, auth()).map_err(catalog_err)?;
+                let descriptor = fetch_layer(&verified, e, &store, auth()).map_err(catalog_err)?;
+                // fetch_layer trusts a blob already in the store: hash it again.
+                let hostile = |m: String| (format!("catalog layer {} {}: {m}", e.name, e.digest), 3);
+                let file = store
+                    .open_blob(&descriptor.digest)
+                    .map_err(|err| hostile(err.to_string()))?;
+                let (actual, _) = kiln_store::HashingReader::new(file)
+                    .finish_to_eof()
+                    .map_err(|err| hostile(err.to_string()))?;
+                if actual != descriptor.digest {
+                    return Err(hostile(format!("the stored blob hashes to {actual}")));
+                }
                 n += 1;
             }
             println!("ok {n} layers");
