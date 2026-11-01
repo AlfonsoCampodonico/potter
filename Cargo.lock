@@ -1381,6 +1381,7 @@ dependencies = [
  "kiln-registry",
  "kiln-store",
  "potter-plan",
+ "proptest",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
