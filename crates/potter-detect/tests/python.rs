@@ -8,7 +8,7 @@ fn django_with_requirements() {
     let d = detect("python-django");
     let t = &d.target;
     assert_eq!(t.provider, "python");
-    assert_eq!(layers(&t.build.base), ["os-min", "python@3.13"]);
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "python@3.15"]);
     assert_eq!(step_names(t), ["deps-inputs", "deps", "source", "collectstatic"]);
     assert_eq!(includes(t, "deps-inputs"), ["requirements.txt"]);
     assert_eq!(
@@ -25,7 +25,7 @@ fn django_with_requirements() {
     );
     assert_eq!(t.image.config.port, Some(8000));
     assert_eq!(t.image.config.env["VIRTUAL_ENV"], "/app/.venv");
-    assert_eq!(layers(&t.image.base), ["os-min", "python@3.13"]);
+    assert_eq!(layers(&t.image.base), ["os-min", "python@3.15"]);
     potter_plan::validate(&potter_plan::Plan::new(vec![t.clone()])).unwrap();
 }
 
@@ -64,7 +64,7 @@ fn flask_in_a_package() {
 fn uv_project_with_native_deps() {
     let d = detect("python-uv");
     let t = &d.target;
-    assert_eq!(layers(&t.build.base), ["os-min", "python@3.12", "uv"]);
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "python@3.15", "uv"]);
     assert_eq!(
         step_names(t),
         ["apt-detected", "deps-inputs", "deps", "source", "project"]
@@ -77,14 +77,17 @@ fn uv_project_with_native_deps() {
         process(t, "web"),
         "/app/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000"
     );
-    assert_eq!(decision(&d, "runtime.python").value, "3.12");
+    assert_eq!(decision(&d, "runtime.python").value, "3.15");
 }
 
 #[test]
 fn poetry_project() {
     let d = detect("python-poetry");
     let t = &d.target;
-    assert_eq!(layers(&t.build.base), ["os-min", "python@3.14", "poetry"]);
+    assert_eq!(
+        layers(&t.build.base),
+        ["os-min", "build-tools", "python@3.15", "poetry"]
+    );
     assert_eq!(
         command(t, "deps"),
         "poetry install --only main --no-root --no-interaction"
@@ -153,7 +156,7 @@ fn version_sources() {
     let r = temp_repo(&[
         ("requirements.txt", "flask\ngunicorn\n"),
         ("app.py", "app = Flask(__name__)\n"),
-        ("runtime.txt", "python-3.12.7\n"),
+        ("runtime.txt", "python-3.15.0\n"),
     ]);
     assert_eq!(
         decision(
@@ -161,7 +164,7 @@ fn version_sources() {
             "runtime.python"
         )
         .value,
-        "3.12"
+        "3.15"
     );
     let r = temp_repo(&[
         ("requirements.txt", "flask\ngunicorn\n"),
@@ -169,7 +172,10 @@ fn version_sources() {
         (".python-version", "3.10\n"),
     ]);
     let e = detect_at(r.path(), &DetectOptions::default()).unwrap_err();
-    assert!(e.to_string().contains("available: 3.12, 3.13, 3.14"), "{e}");
+    assert_eq!(
+        e.to_string(),
+        "runtime.python: 3.10 from .python-version is not in the catalog; the catalog has python 3.15"
+    );
 }
 
 #[test]
@@ -216,4 +222,26 @@ fn symlinked_requirements_is_named() {
     .unwrap();
     let e = detect_at(r.path(), &DetectOptions::default()).unwrap_err();
     assert!(e.to_string().contains("requirements.txt is a symlink"), "{e}");
+}
+
+#[test]
+fn python_312_version_file_is_refused() {
+    let r = temp_repo(&[
+        ("requirements.txt", "flask\ngunicorn\n"),
+        ("app.py", "app = Flask(__name__)\n"),
+        (".python-version", "3.12\n"),
+    ]);
+    let msg = detect_at(r.path(), &DetectOptions::default()).unwrap_err().to_string();
+    assert_eq!(
+        msg,
+        "runtime.python: 3.12 from .python-version is not in the catalog; the catalog has python 3.15"
+    );
+}
+
+#[test]
+fn python_build_chain_has_build_tools_and_run_base_does_not() {
+    let t = detect("python-flask").target;
+    let build = layers(&t.build.base);
+    assert_eq!(&build[..3], ["os-min", "build-tools", "python@3.15"]);
+    assert_eq!(layers(&t.image.base), ["os-min", "python@3.15"]);
 }

@@ -17,6 +17,9 @@ expression: "render(\"rust-axum\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "rust",
               "version": "1.99"
             }

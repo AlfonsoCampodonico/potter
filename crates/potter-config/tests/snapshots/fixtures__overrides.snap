@@ -54,7 +54,7 @@ expression: "render(\"overrides\")"
             },
             {
               "name": "node",
-              "version": "22"
+              "version": "26"
             }
           ]
         },
@@ -359,7 +359,7 @@ app runtime.extensions = redis [detected: Laravel default extension]
 app php.docroot = public [detected: public/ exists]
 app port = 8080 [default]
 app node.package_manager = npm [detected: package-lock.json is present]
-app runtime.node = 22 [default]
+app runtime.node = 26 [default]
 app process.worker = php artisan queue:work [detected: Laravel queue worker]
 app steps.assets.command = npm run build:prod [potter.toml target.app.steps.assets.run]
 app steps.assets.inputs = resources/** vite.config.js package.json [potter.toml target.app.steps.assets.inputs]

@@ -86,10 +86,12 @@ pub enum DetectError {
         source_desc: String,
         reason: String,
     },
-    #[error("no available {runtime} version satisfies {source_desc} (available: {available})")]
+    #[error("{field}: {constraint}{} is not in the catalog; the catalog has {runtime} {available}", from_source(.source_desc))]
     Unsatisfiable {
-        runtime: &'static str,
+        field: String,
+        constraint: String,
         source_desc: String,
+        runtime: &'static str,
         available: String,
     },
     #[error("{provider}: no web process found: {hint}")]
@@ -118,4 +120,13 @@ fn no_provider(candidates: &[String]) -> String {
         ));
     }
     s
+}
+
+/// ` from <source>`, or nothing when the constraint's own text already says where it came from.
+fn from_source(source: &str) -> String {
+    if source.is_empty() {
+        String::new()
+    } else {
+        format!(" from {source}")
+    }
 }

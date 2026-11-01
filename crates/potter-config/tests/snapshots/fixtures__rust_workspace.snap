@@ -17,6 +17,9 @@ expression: "render(\"rust-workspace\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "rust",
               "version": "1.99"
             }

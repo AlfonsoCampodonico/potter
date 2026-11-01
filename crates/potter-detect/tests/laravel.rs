@@ -31,7 +31,7 @@ fn laravel_with_two_lockfiles_uses_npm() {
     assert!(command(t, "autoload").ends_with("--no-scripts"));
     assert_eq!(command(t, "discover"), "php artisan package:discover --ansi");
     let build = layers(&t.build.base);
-    assert_eq!(build.last().unwrap(), "node@22");
+    assert_eq!(build.last().unwrap(), "node@26");
     for ext in [
         "php-ext-bcmath@8.4",
         "php-ext-redis@8.4",
@@ -153,5 +153,33 @@ fn artisan_alone_is_not_laravel() {
     assert_eq!(
         detect_at(r.path(), &DetectOptions::default()).unwrap().target.provider,
         "php"
+    );
+}
+
+#[test]
+fn laravel_asset_build_uses_node_26() {
+    let t = detect("laravel").target;
+    let build = layers(&t.build.base);
+    assert!(build.contains(&"node@26".to_string()), "{build:?}");
+    assert!(!build.contains(&"build-tools".to_string()), "{build:?}");
+    assert!(!layers(&t.image.base).iter().any(|l| l.starts_with("node@")));
+}
+
+#[test]
+fn laravel_engines_node_22_is_refused() {
+    let r = temp_repo(&[
+        ("composer.json", r#"{"require":{"laravel/framework":"^12.0"}}"#),
+        ("composer.lock", r#"{"packages":[]}"#),
+        ("artisan", "<?php"),
+        (
+            "package.json",
+            r#"{"engines":{"node":">=22 <23"},"scripts":{"build":"vite build"}}"#,
+        ),
+        ("package-lock.json", "{}"),
+    ]);
+    let msg = detect_at(r.path(), &DetectOptions::default()).unwrap_err().to_string();
+    assert_eq!(
+        msg,
+        "runtime.node: >=22 <23 from package.json engines.node is not in the catalog; the catalog has node 26"
     );
 }

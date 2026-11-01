@@ -8,7 +8,7 @@ fn root_main_package() {
     let d = detect("go-api");
     let t = &d.target;
     assert_eq!(t.provider, "go");
-    assert_eq!(layers(&t.build.base), ["os-min", "go@1.27"]);
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "go@1.27"]);
     assert_eq!(step_names(t), ["deps-inputs", "deps", "source", "build"]);
     assert_eq!(includes(t, "deps-inputs"), ["go.mod"]);
     assert_eq!(command(t, "deps"), "go mod download");
@@ -40,7 +40,7 @@ fn cmd_directories() {
     );
     assert_eq!(process(&t, "web"), "/out/api");
     assert_eq!(process(&t, "worker"), "/out/worker");
-    assert_eq!(layers(&t.build.base), ["os-min", "go@1.25"]);
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "go@1.27"]);
 }
 
 #[test]
@@ -69,7 +69,10 @@ fn library_only_module_has_no_process() {
 fn too_new_go_is_unsatisfiable() {
     let r = temp_repo(&[("go.mod", "module x\n\ngo 1.30\n"), ("main.go", "package main\n")]);
     let e = detect_at(r.path(), &DetectOptions::default()).unwrap_err();
-    assert!(e.to_string().contains("available: 1.25, 1.26, 1.27"), "{e}");
+    assert_eq!(
+        e.to_string(),
+        "runtime.go: go.mod go 1.30 (minimum) is not in the catalog; the catalog has go 1.27"
+    );
 }
 
 #[test]
@@ -86,4 +89,36 @@ fn old_toolchain_falls_back_to_the_go_minimum() {
             .to_string()
             .contains("toolchain go1.24.4 isn't in the catalog")
     );
+}
+
+#[test]
+fn go_build_chain_has_build_tools() {
+    let t = detect("go-api").target;
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "go@1.27"]);
+}
+
+#[test]
+fn run_base_has_no_build_tools() {
+    for name in ["go-api", "go-cmd"] {
+        let t = detect(name).target;
+        assert!(!layers(&t.image.base).contains(&"build-tools".to_string()), "{name}");
+    }
+    for name in [
+        "rust-axum",
+        "bun",
+        "deno-serve",
+        "vite-static",
+        "python-flask",
+        "ruby-sinatra",
+    ] {
+        let t = detect(name).target;
+        assert!(
+            layers(&t.build.base).contains(&"build-tools".to_string()),
+            "{name} build"
+        );
+        assert!(
+            !layers(&t.image.base).contains(&"build-tools".to_string()),
+            "{name} run"
+        );
+    }
 }

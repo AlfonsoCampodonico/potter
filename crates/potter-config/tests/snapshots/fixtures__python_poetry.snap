@@ -17,8 +17,11 @@ expression: "render(\"python-poetry\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "python",
-              "version": "3.14"
+              "version": "3.15"
             },
             {
               "name": "poetry"
@@ -102,7 +105,7 @@ expression: "render(\"python-poetry\")"
             },
             {
               "name": "python",
-              "version": "3.14"
+              "version": "3.15"
             }
           ]
         },
@@ -147,6 +150,6 @@ expression: "render(\"python-poetry\")"
 # decisions
 app provider = python [detected: pyproject.toml]
 app python.package_manager = poetry [detected: poetry.lock is present]
-app runtime.python = 3.14 [detected: pyproject.toml tool.poetry.dependencies.python = ^3.11]
+app runtime.python = 3.15 [detected: pyproject.toml tool.poetry.dependencies.python = ^3.11]
 app port = 8000 [default]
 app process.web = /app/.venv/bin/gunicorn wsgi:app --bind 0.0.0.0:8000 [detected: wsgi.py defines `app`]

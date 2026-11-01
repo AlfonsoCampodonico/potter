@@ -8,7 +8,7 @@ fn nestjs() {
     let d = detect("nestjs");
     let t = &d.target;
     assert_eq!(t.provider, "node");
-    assert_eq!(layers(&t.build.base), ["os-min", "node@24"]);
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "node@26"]);
     assert_eq!(step_names(t), ["deps-inputs", "deps", "source", "build", "prune"]);
     assert_eq!(includes(t, "deps-inputs"), ["package.json", "package-lock.json"]);
     assert_eq!(command(t, "deps"), "npm ci --no-audit --no-fund");
@@ -18,7 +18,7 @@ fn nestjs() {
     assert_eq!(t.image.config.port, Some(3000));
     assert_eq!(t.image.config.env["PORT"], "3000");
     assert_eq!(t.image.config.env["NODE_ENV"], "production");
-    assert_eq!(decision(&d, "runtime.node").value, "24");
+    assert_eq!(decision(&d, "runtime.node").value, "26");
     potter_plan::validate(&potter_plan::Plan::new(vec![t.clone()])).unwrap();
 }
 
@@ -55,7 +55,7 @@ fn hono_and_vue_use_their_start_scripts() {
     assert_eq!(process(&detect("hono-node").target, "web"), "npm run start");
     let d = detect("vue-node");
     assert_eq!(process(&d.target, "web"), "npm run start");
-    assert_eq!(decision(&d, "runtime.node").value, "24");
+    assert_eq!(decision(&d, "runtime.node").value, "26");
 }
 
 #[test]
@@ -150,39 +150,29 @@ fn node_version_sources() {
         ("package.json", r#"{"engines":{"node":">=18"},"scripts":{"start":"x"}}"#),
         ("package-lock.json", "{}"),
     ];
-    let r = temp_repo(&[base[0], base[1], (".nvmrc", "v20.11.0 # pinned\r\n")]);
+    let node = |files: &[(&str, &str)], opts: &DetectOptions| {
+        let r = temp_repo(files);
+        detect_at(r.path(), opts)
+    };
+    let value = |d: potter_detect::Detection| decision(&d, "runtime.node").value.clone();
+    let none = DetectOptions::default();
     assert_eq!(
-        decision(&detect_at(r.path(), &DetectOptions::default()).unwrap(), "runtime.node").value,
-        "20"
+        value(node(&[base[0], base[1], (".nvmrc", "lts/*\n")], &none).unwrap()),
+        "26"
     );
-    let r = temp_repo(&[base[0], base[1], (".nvmrc", "lts/*\n")]);
-    assert_eq!(
-        decision(&detect_at(r.path(), &DetectOptions::default()).unwrap(), "runtime.node").value,
-        "24"
-    );
-    let r = temp_repo(&base);
-    assert_eq!(
-        decision(&detect_at(r.path(), &DetectOptions::default()).unwrap(), "runtime.node").value,
-        "24"
-    );
+    assert_eq!(value(node(&base, &none).unwrap()), "26");
     let opts = DetectOptions {
         runtime: RuntimeOverrides {
-            node: Some("22".into()),
+            node: Some("26".into()),
             ..Default::default()
         },
         ..Default::default()
     };
-    assert_eq!(
-        decision(&detect_at(r.path(), &opts).unwrap(), "runtime.node").value,
-        "22"
-    );
-    let r = temp_repo(&[base[0], base[1], (".nvmrc", "lts/iron\n")]);
-    assert!(
-        detect_at(r.path(), &DetectOptions::default())
-            .unwrap_err()
-            .to_string()
-            .contains(".nvmrc")
-    );
+    assert_eq!(value(node(&base, &opts).unwrap()), "26");
+    let e = node(&[base[0], base[1], (".nvmrc", "v20.11.0 # pinned\r\n")], &none).unwrap_err();
+    assert!(e.to_string().contains(".nvmrc"), "{e}");
+    let e = node(&[base[0], base[1], (".nvmrc", "lts/iron\n")], &none).unwrap_err();
+    assert!(e.to_string().contains(".nvmrc"), "{e}");
 }
 
 #[test]
@@ -194,4 +184,27 @@ fn bun_or_deno_files_hand_off() {
     )
     .unwrap();
     assert!(claims.iter().all(|c| c.provider != potter_detect::ProviderId::Node));
+}
+
+#[test]
+fn node_22_engine_is_refused_naming_catalog() {
+    let r = temp_repo(&[
+        (
+            "package.json",
+            r#"{"engines":{"node":">=22 <23"},"scripts":{"start":"node index.js"}}"#,
+        ),
+        ("package-lock.json", "{}"),
+    ]);
+    let msg = detect_at(r.path(), &DetectOptions::default()).unwrap_err().to_string();
+    assert_eq!(
+        msg,
+        "runtime.node: >=22 <23 from package.json engines.node is not in the catalog; the catalog has node 26"
+    );
+}
+
+#[test]
+fn node_build_chain_has_build_tools_and_run_base_does_not() {
+    let t = detect("nestjs").target;
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "node@26"]);
+    assert_eq!(layers(&t.image.base), ["os-min", "node@26"]);
 }

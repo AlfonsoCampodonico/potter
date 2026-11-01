@@ -160,7 +160,8 @@ case "$1" in
 esac
 "#;
 
-/// The busybox root as `os-min`, and the fake `go` over it at `go_line`.
+/// The busybox root as `os-min`, a `build-tools` stand-in (detected non-PHP build chains ask for
+/// one) and the fake `go` over it at `go_line`.
 pub fn go_catalog(go_line: &str) -> TestCatalog {
     use kiln_erofs::testtar::{Opts, TarBuilder};
     let dir = Opts::default().mode(0o755);
@@ -169,8 +170,18 @@ pub fn go_catalog(go_line: &str) -> TestCatalog {
         go.dir(d, &dir);
     }
     go.file("usr/local/go/bin/go", FAKE_GO.as_bytes(), &Opts::default().mode(0o755));
+    let mut tools = TarBuilder::new();
+    for d in ["usr", "usr/share", "usr/share/build-tools"] {
+        tools.dir(d, &dir);
+    }
+    tools.file(
+        "usr/share/build-tools/README",
+        b"stand-in\n",
+        &Opts::default().mode(0o644),
+    );
     TestCatalog::new(vec![
         Layer::new("os-min", "13", Kind::Base, super::busybox_root()).env("PATH", "/bin"),
+        Layer::new("build-tools", "1", Kind::Tool, tools.finish()),
         Layer::new("go", go_line, Kind::Runtime, go.finish()).env("PATH", "/usr/local/go/bin"),
     ])
 }

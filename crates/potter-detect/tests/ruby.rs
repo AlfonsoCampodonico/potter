@@ -8,8 +8,8 @@ fn rails_with_propshaft_and_bootsnap() {
     let d = detect("ruby-rails");
     let t = &d.target;
     assert_eq!(t.provider, "ruby");
-    assert_eq!(decision(&d, "runtime.ruby").value, "3.3");
-    assert_eq!(layers(&t.build.base), ["os-min", "ruby@3.3"]);
+    assert_eq!(decision(&d, "runtime.ruby").value, "4.0");
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "ruby@4.0"]);
     assert_eq!(step_names(t), ["deps-inputs", "deps", "source", "bootsnap", "assets"]);
     assert_eq!(command(t, "deps"), "bundle install");
     assert_eq!(command(t, "assets"), "bin/rails assets:precompile");
@@ -24,7 +24,7 @@ fn rails_with_propshaft_and_bootsnap() {
 fn sinatra_with_pg() {
     let d = detect("ruby-sinatra");
     let t = &d.target;
-    assert_eq!(decision(&d, "runtime.ruby").value, "3.3");
+    assert_eq!(decision(&d, "runtime.ruby").value, "4.0");
     assert_eq!(step_names(t), ["apt-detected", "deps-inputs", "deps", "source"]);
     assert_eq!(process(t, "web"), "bundle exec rackup -o 0.0.0.0 -p 3000");
     assert!(matches!(&t.image.runtime_steps[0], potter_plan::Step::Apt { packages, .. } if packages == &["libpq5"]));
@@ -37,13 +37,13 @@ fn gemfile_ruby_requirement() {
     let r = temp_repo(&[
         (
             "Gemfile",
-            "source \"https://rubygems.org\"\nruby \"~> 3.4\"\ngem \"rack\"\n",
+            "source \"https://rubygems.org\"\nruby \"~> 4.0\"\ngem \"rack\"\n",
         ),
         ("Gemfile.lock", lock),
         ("config.ru", "run ->(_) { [200, {}, []] }\n"),
     ]);
     let d = detect_at(r.path(), &DetectOptions::default()).unwrap();
-    assert_eq!(decision(&d, "runtime.ruby").value, "3.4");
+    assert_eq!(decision(&d, "runtime.ruby").value, "4.0");
 }
 
 #[test]
@@ -86,4 +86,29 @@ fn missing_lockfile_and_no_process() {
         detect_at(r.path(), &DetectOptions::default()),
         Err(DetectError::NoProcess { .. })
     ));
+}
+
+#[test]
+fn ruby_34_gemfile_is_refused() {
+    let lock = "GEM\n  remote: https://rubygems.org/\n  specs:\n    rack (3.1.0)\n";
+    let r = temp_repo(&[
+        (
+            "Gemfile",
+            "source \"https://rubygems.org\"\nruby \"~> 3.4\"\ngem \"rack\"\n",
+        ),
+        ("Gemfile.lock", lock),
+        ("config.ru", "run ->(_) { [200, {}, []] }\n"),
+    ]);
+    let msg = detect_at(r.path(), &DetectOptions::default()).unwrap_err().to_string();
+    assert_eq!(
+        msg,
+        "runtime.ruby: ~> 3.4 from Gemfile ruby is not in the catalog; the catalog has ruby 4.0"
+    );
+}
+
+#[test]
+fn ruby_build_chain_has_build_tools_and_run_base_does_not() {
+    let t = detect("ruby-rails").target;
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "ruby@4.0"]);
+    assert_eq!(layers(&t.image.base), ["os-min", "ruby@4.0"]);
 }

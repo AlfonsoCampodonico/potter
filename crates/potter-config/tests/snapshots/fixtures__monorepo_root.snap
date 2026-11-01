@@ -17,6 +17,9 @@ expression: "render(\"monorepo-root\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "go",
               "version": "1.27"
             }
@@ -151,8 +154,11 @@ expression: "render(\"monorepo-root\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "node",
-              "version": "22"
+              "version": "26"
             }
           ]
         },
@@ -249,7 +255,7 @@ expression: "render(\"monorepo-root\")"
             },
             {
               "name": "node",
-              "version": "22"
+              "version": "26"
             }
           ]
         },
@@ -297,6 +303,6 @@ backend port = 8080 [default]
 frontend target = frontend [detected: frontend/ has a manifest and the root has none]
 frontend provider = node [detected: package.json]
 frontend node.package_manager = npm [detected: package-lock.json is present]
-frontend runtime.node = 22 [default]
+frontend runtime.node = 26 [default]
 frontend port = 3000 [default]
 frontend process.web = start script [detected: package.json scripts.start]

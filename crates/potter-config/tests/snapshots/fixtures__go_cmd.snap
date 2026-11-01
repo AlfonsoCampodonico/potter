@@ -17,8 +17,11 @@ expression: "render(\"go-cmd\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "go",
-              "version": "1.25"
+              "version": "1.27"
             }
           ]
         },
@@ -151,6 +154,6 @@ expression: "render(\"go-cmd\")"
 
 # decisions
 app provider = go [detected: go.mod]
-app runtime.go = 1.25 [detected: go.mod toolchain go1.25.3]
+app runtime.go = 1.27 [detected: go.mod toolchain go1.25.3 isn't in the catalog; go 1.25 (minimum)]
 app process.web = /out/api [detected: ./cmd/api is package main]
 app port = 8080 [default]

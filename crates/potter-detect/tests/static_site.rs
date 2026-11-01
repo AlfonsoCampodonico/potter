@@ -8,7 +8,7 @@ fn vite_static_site() {
     let d = detect("vite-static");
     let t = &d.target;
     assert_eq!(t.provider, "static");
-    assert_eq!(layers(&t.build.base), ["os-min", "node@22"]);
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "node@26"]);
     assert_eq!(step_names(t), ["deps-inputs", "deps", "source", "build"]);
     assert_eq!(layers(&t.image.base), ["os-min", "static-server"]);
     assert_eq!(t.image.export[0].path, "/app/build");

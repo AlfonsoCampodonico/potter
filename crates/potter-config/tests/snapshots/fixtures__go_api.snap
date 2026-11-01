@@ -17,6 +17,9 @@ expression: "render(\"go-api\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "go",
               "version": "1.27"
             }

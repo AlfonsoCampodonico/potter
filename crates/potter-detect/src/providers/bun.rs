@@ -85,8 +85,13 @@ impl Provider for BunProvider {
         config.port = Some(port);
         config.env.insert("PORT".into(), port.to_string());
         config.env.insert("NODE_ENV".into(), "production".into());
-        let layers = vec![cref("os-min", None), cref("bun", Some(bun.version))];
-        let mut image = empty_image(layers.clone(), config);
+        let run_layers = vec![cref("os-min", None), cref("bun", Some(bun.version))];
+        let build_layers = vec![
+            cref("os-min", None),
+            cref("build-tools", None),
+            cref("bun", Some(bun.version)),
+        ];
+        let mut image = empty_image(run_layers, config);
         image.export = vec![export("/app", "/app")];
         image.processes.insert(
             "web".into(),
@@ -97,7 +102,7 @@ impl Provider for BunProvider {
             },
         );
         Ok(Detection {
-            target: new_target(target, ProviderId::Bun, layers, steps, image),
+            target: new_target(target, ProviderId::Bun, build_layers, steps, image),
             decisions: d,
         })
     }

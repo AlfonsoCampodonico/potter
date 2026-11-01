@@ -50,7 +50,7 @@ expression: "render(\"laravel-horizon-pnpm\")"
             },
             {
               "name": "node",
-              "version": "22"
+              "version": "26"
             }
           ]
         },
@@ -318,5 +318,5 @@ app runtime.extensions = redis [detected: Laravel default extension]
 app php.docroot = public [detected: public/ exists]
 app port = 8080 [default]
 app node.package_manager = pnpm [detected: package.json packageManager = pnpm@9.15.0]
-app runtime.node = 22 [default]
+app runtime.node = 26 [default]
 app process.worker = php artisan horizon [detected: composer.json requires laravel/horizon]
