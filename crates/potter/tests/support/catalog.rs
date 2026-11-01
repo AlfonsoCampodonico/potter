@@ -25,6 +25,8 @@ pub struct Layer {
     pub provides_sonames: Vec<String>,
     /// The entry this one replaces, which then drops out of the current entries.
     pub supersedes: Option<String>,
+    /// Advisory ids the layer fixes.
+    pub fixes: Vec<String>,
 }
 
 impl Layer {
@@ -39,7 +41,13 @@ impl Layer {
             abi: Vec::new(),
             provides_sonames: Vec::new(),
             supersedes: None,
+            fixes: Vec::new(),
         }
+    }
+
+    pub fn fixes(mut self, id: &str) -> Self {
+        self.fixes.push(id.into());
+        self
     }
 
     pub fn abi(mut self, key: &str, value: &str) -> Self {
@@ -142,7 +150,7 @@ impl TestCatalog {
                 source: "https://example.test".into(),
                 license: "MIT".into(),
                 supersedes: l.supersedes,
-                fixes: vec![],
+                fixes: l.fixes,
             });
         }
         self.index.serial = serial;

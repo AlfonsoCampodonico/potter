@@ -122,6 +122,11 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Inspect the signed runtime catalog
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCmd,
+    },
     /// Check a pushed image's SBOM, provenance and signature against a public key (spec §17)
     Verify {
         /// The image: <registry>/<repository>[:tag|@digest]
@@ -161,6 +166,45 @@ enum Cmd {
         /// A mount point left out when empty
         #[arg(long = "skip")]
         skip: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CatalogCmd {
+    /// List the catalog's current layers
+    Ls {
+        /// x86_64 or aarch64 (default: this machine's)
+        #[arg(long)]
+        arch: Option<String>,
+        /// Every architecture, and superseded entries too
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the layers, bottom first, and the composite key that constraints resolve to
+    Resolve {
+        /// name or name@line
+        #[arg(required = true)]
+        constraints: Vec<String>,
+        /// x86_64 or aarch64 (default: this machine's)
+        #[arg(long)]
+        arch: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify the index and fetch and re-hash every current layer
+    Verify {
+        /// Verify the index sha256:<hex> instead of the catalog's current one
+        #[arg(long)]
+        catalog_index: Option<String>,
+    },
+    /// List the entries a security advisory id fixes, or the entries around a layer digest
+    Affected {
+        /// An advisory id or sha256:<digest>
+        what: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -229,6 +273,7 @@ fn main() -> ExitCode {
             max_layers,
         } => plan(&path, target.as_deref(), json, explain, max_layers),
         Cmd::Detect { path } => detect(&path),
+        Cmd::Catalog { command } => catalog(command),
         Cmd::Rebase {
             image,
             base,
@@ -1171,4 +1216,158 @@ fn detect(path: &Path) -> ExitCode {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => fail(&e.to_string(), 2),
     }
+}
+
+fn catalog_arch(arch: Option<&str>) -> Result<potter_catalog::Arch, (String, u8)> {
+    use potter_catalog::Arch;
+    match arch {
+        Some("x86_64") => Ok(Arch::X86_64),
+        Some("aarch64") => Ok(Arch::Aarch64),
+        Some(other) => Err((format!("--arch {other:?} is neither x86_64 nor aarch64"), 2)),
+        None => match kiln_oci::Platform::host().architecture.as_str() {
+            "amd64" | "x86_64" => Ok(Arch::X86_64),
+            "arm64" | "aarch64" => Ok(Arch::Aarch64),
+            other => Err((format!("the catalog has no layers for the architecture {other}"), 2)),
+        },
+    }
+}
+
+fn catalog(command: CatalogCmd) -> ExitCode {
+    match run_catalog(command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err((e, code)) => fail(&e, code),
+    }
+}
+
+fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
+    use potter_catalog::{Entry, fetch_layer};
+    let catalog_err = |e: potter_catalog::CatalogError| (e.to_string(), e.exit_code());
+    let pin = match &command {
+        CatalogCmd::Verify { catalog_index } => catalog_index.as_deref(),
+        _ => None,
+    };
+    // Reject a bad --arch before touching the catalog.
+    let arch = match &command {
+        CatalogCmd::Ls { arch, .. } | CatalogCmd::Resolve { arch, .. } => Some(catalog_arch(arch.as_deref())?),
+        _ => None,
+    };
+    let (store, home, _) = open_homes().map_err(|e| (e, 4))?;
+    let auth = kiln_registry::DockerConfig::from_env;
+    let location = potter_catalog::Location::from_env().map_err(catalog_err)?;
+    let verified = potter_catalog::load(&location, pin, home.root(), &store, auth()).map_err(catalog_err)?;
+    let index = &verified.index;
+    let print = |s: String| print!("{}", sanitize(&s));
+    let to_json = |v: serde_json::Value| format!("{}\n", serde_json::to_string_pretty(&v).expect("json"));
+    match command {
+        CatalogCmd::Ls { all, json, .. } => {
+            let arch = arch.expect("ls has an arch");
+            let successor = |e: &Entry| {
+                index
+                    .entries
+                    .iter()
+                    .find(|n| n.supersedes.as_deref() == Some(&e.digest))
+            };
+            let rows: Vec<(&Entry, Option<&Entry>)> = match all {
+                true => index.entries.iter().map(|e| (e, successor(e))).collect(),
+                false => index.current().filter(|e| e.arch == arch).map(|e| (e, None)).collect(),
+            };
+            if json {
+                let v: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|(e, by)| {
+                        let mut v = serde_json::to_value(e).expect("json");
+                        v["superseded_by"] = by.map_or(serde_json::Value::Null, |n| n.digest.clone().into());
+                        v
+                    })
+                    .collect();
+                print(to_json(v.into()));
+            } else {
+                let rows: Vec<_> = rows
+                    .into_iter()
+                    .map(|(e, by)| {
+                        (
+                            e,
+                            by.map(|n| format!("superseded by {}", render::short_digest(&n.digest))),
+                        )
+                    })
+                    .collect();
+                print(render::catalog_table(&rows));
+            }
+        }
+        CatalogCmd::Resolve { constraints, json, .. } => {
+            let refs = constraints
+                .iter()
+                .map(|c| match c.split_once('@') {
+                    Some((n, l)) if !n.is_empty() && !l.is_empty() => Ok(potter_plan::CatalogRef::new(n, Some(l))),
+                    None if !c.is_empty() => Ok(potter_plan::CatalogRef::new(c, None)),
+                    _ => Err((format!("constraint {c:?} is not name or name@line"), 2)),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let r =
+                potter_catalog::resolve(&verified, &refs, arch.expect("resolve has an arch")).map_err(catalog_err)?;
+            if json {
+                print(to_json(serde_json::json!({
+                    "entries": r.entries,
+                    "constraints": r.constraints,
+                    "index_digest": r.index_digest,
+                    "key": r.composite_key(),
+                })));
+            } else {
+                let rows: Vec<_> = r.entries.iter().map(|e| (e, None)).collect();
+                print(render::catalog_table(&rows));
+                print(format!("key {}\n", r.composite_key()));
+            }
+        }
+        CatalogCmd::Verify { .. } => {
+            let mut n = 0;
+            for e in index.current() {
+                fetch_layer(&verified, e, &store, auth()).map_err(catalog_err)?;
+                n += 1;
+            }
+            println!("ok {n} layers");
+        }
+        CatalogCmd::Affected { what, json } => {
+            let mut rows: Vec<(&Entry, Option<String>)> = Vec::new();
+            if what.starts_with("sha256:") {
+                let target = index
+                    .by_digest(&what)
+                    .ok_or_else(|| (format!("the catalog has no entry with digest {what}"), 2))?;
+                let mut seen = std::collections::BTreeSet::from([target.digest.as_str()]);
+                let mut at = target;
+                while let Some(older) = at.supersedes.as_deref().and_then(|d| index.by_digest(d)) {
+                    if !seen.insert(older.digest.as_str()) {
+                        break;
+                    }
+                    rows.push((older, Some("superseded".into())));
+                    at = older;
+                }
+                let mut frontier = vec![target.digest.as_str()];
+                while let Some(d) = frontier.pop() {
+                    for newer in index.entries.iter().filter(|e| e.supersedes.as_deref() == Some(d)) {
+                        if seen.insert(newer.digest.as_str()) {
+                            rows.push((newer, Some("supersedes".into())));
+                            frontier.push(newer.digest.as_str());
+                        }
+                    }
+                }
+            } else {
+                rows = index
+                    .entries
+                    .iter()
+                    .filter(|e| e.fixes.contains(&what))
+                    .map(|e| (e, None))
+                    .collect();
+            }
+            if json {
+                print(to_json(
+                    rows.iter()
+                        .map(|(e, _)| serde_json::to_value(e).expect("json"))
+                        .collect(),
+                ));
+            } else {
+                print(render::catalog_table(&rows));
+            }
+        }
+    }
+    Ok(())
 }
