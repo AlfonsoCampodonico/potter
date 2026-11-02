@@ -1,6 +1,10 @@
 # rust: rustup (rustup-init pinned by SHA-256) installing the 1.99.0 toolchain with the minimal
-# profile into /usr/local/rustup, with the proxies in /usr/local/cargo/bin. The channel manifest
-# rustup installs from is checked against its pinned SHA-256 first.
+# profile into /usr/local/rustup, with the proxies in /usr/local/cargo/bin. What binds the
+# install is the pinned rustup-init and the pinned toolchain version: rustup-init fetches the
+# channel manifest itself and checks every component against it, along rustup's own hash chain.
+# The manifest download below is a tripwire only (the 1.99.0 manifest re-issued fails the build);
+# rustup-init never reads that copy. The toolchain stays root-owned and not world-writable:
+# builds set their own CARGO_HOME.
 [target.rust]
 provider = "none"
 
@@ -10,6 +14,7 @@ catalog = ["os-min"]
 [target.rust.steps.install]
 run = '''
 set -eu
+umask 022
 rustup=1.29.2
 toolchain=1.99.0
 manifest=ce6dddc886364f8d786514771212cebe9b731ba82d6b859951c6b0ccc516b6a2
@@ -27,7 +32,9 @@ chmod 755 /tmp/rustup-init
 export RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$toolchain" --default-host "$triple"
 rm -rf /tmp/rustup-init /tmp/channel.toml /usr/local/rustup/downloads /usr/local/rustup/tmp
-chmod -R a+w /usr/local/rustup /usr/local/cargo
+# rustup lists the installed components in the order their installs finished, which varies from
+# run to run: sorted, the layer is the same bytes every time (rustup reads the list as a set).
+for c in /usr/local/rustup/toolchains/*/lib/rustlib/components; do LC_ALL=C sort -o "$c" "$c"; done
 '''
 
 [target.rust.process.cargo]

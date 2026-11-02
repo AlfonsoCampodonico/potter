@@ -6,6 +6,11 @@ use potter_plan::Step;
 /// The archive the snapshot is taken from.
 const SNAPSHOT: &str = "http://snapshot.debian.org/archive";
 
+/// What an apt run leaves behind that differs on every run: dpkg's and apt's logs (timestamps)
+/// and ldconfig's cache (inode numbers and mtimes). Removed, so the same step on the same
+/// snapshot makes the same layer bytes.
+const UNREPRODUCIBLE: &str = "/var/log/apt /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache";
+
 /// `step` as a `Run` step when it is an `Apt` one; any other step unchanged. The plan validated
 /// the package names and the snapshot, so both go into the script as they are.
 pub fn lower(step: &Step) -> Step {
@@ -35,7 +40,7 @@ pub fn lower(step: &Step) -> Step {
          cat > /etc/apt/sources.list.d/debian.sources <<'POTTER' &&\n{sources}POTTER\n\
          apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3 update && \
          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends {} && \
-         rm -rf /var/lib/apt/lists/*",
+         rm -rf /var/lib/apt/lists/* {UNREPRODUCIBLE}",
         packages.join(" ")
     );
     crate::stopgap::install(name, script)
@@ -83,7 +88,13 @@ mod tests {
         assert_eq!((workdir.as_str(), user.as_str()), ("/", "0:0"));
         assert!(env.is_empty(), "the snapshot is in the script: {env:?}");
         assert!(script.contains("--no-install-recommends curl libpq5"), "{script}");
-        assert!(script.ends_with("rm -rf /var/lib/apt/lists/*"), "{script}");
+        assert!(
+            script.ends_with(
+                "rm -rf /var/lib/apt/lists/* /var/log/apt /var/log/dpkg.log /var/log/alternatives.log \
+                 /var/cache/ldconfig/aux-cache"
+            ),
+            "{script}"
+        );
         // Only the snapshot's sources are left, and a flaky mirror is retried.
         assert!(
             script.starts_with(
