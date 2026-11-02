@@ -15,16 +15,17 @@ image was made. Detection only parses files; it never runs your code.
 | Detection and planning (`potter detect`, `potter plan`) | Works on Linux and macOS. 10 providers: `php`, `laravel`, `node`, `bun`, `deno`, `static`, `python`, `ruby`, `go`, `rust` |
 | `potter.toml` overrides, explicit plans, zero-config monorepo targets | Works |
 | `potter build --executor ns` (rootless Linux namespaces) | Works, Linux only |
-| Detected targets (catalog bases) | Built through a stopgap: catalog bases are lowered onto upstream Debian trixie images plus install steps (`potter-exec/src/stopgap.rs`) until the signed catalog exists |
+| Detected targets (catalog bases) | Node, Bun, Deno, Python, Ruby, Go, Rust and static targets build on potter's signed runtime catalog, one line per runtime ([docs/catalog.md](docs/catalog.md)). PHP and Laravel targets are still lowered onto upstream Debian trixie images plus install steps (`potter-exec/src/stopgap.rs`) |
 | Remote cache, target graph and `copy`, `--affected`, build secrets, `--progress json` | Works |
 | Layer budget and composite base | Works for every executor |
 | `potter rebase` (a patched base without a rebuild) | Works, Linux only (runtime steps re-run with `--executor ns`). Local store only: a rebased image isn't pushed with attestations yet |
 | `--output registry=`, SBOM, provenance, signing, `potter verify` | Works. KMS keys (`kms://`) are refused; there is no transparency log or keyless signing |
 | `--executor vm` (one microVM per target chain) | Experimental: implemented against a backend trait and tested with a scripted VM. The CLI refuses it (exit 4) until kiln's build mode lands |
 | PHP web images (nginx + php-fpm as kiln-init `services`) | Planned and refused at build time (exit 2) until kiln-init starts services. Laravel with Octane on Swoole has no services and is not affected |
-| Catalog layers the stopgap cannot map (for example Octane's RoadRunner and FrankenPHP servers, several primary runtimes in one base) | Refused, naming the catalog milestone (P3) |
+| PHP layers the stopgap cannot map (for example Octane's RoadRunner and FrankenPHP servers) | Refused, naming the catalog milestone (P3) |
 | Stage bases and the Dockerfile frontend | Not implemented (P5) |
-| Signed runtime catalog (P3), build daemon (P7) | Not started |
+| `potter catalog ls`, `resolve`, `verify`, `affected` | Works. The catalog is built and published by CI (`.github/workflows/catalog.yml`) |
+| PHP in the catalog, build daemon (P7) | Not started |
 
 `potter build` refuses unsupported parts of a plan by name, with the milestone that ships them
 (exit 2).

@@ -3,6 +3,8 @@
 
 mod support;
 
+use std::path::{Path, PathBuf};
+
 use assert_cmd::Command;
 use kiln_erofs::testtar::{Opts, TarBuilder};
 use potter_catalog::Kind;
@@ -229,4 +231,213 @@ fn affected_advisory_without_match_prints_header_only() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(out.lines().count(), 1, "{out}");
     assert!(out.starts_with("NAME"));
+}
+
+/// One signed layout per call: the index and the tar of every entry it lists.
+struct Layouts {
+    dir: tempfile::TempDir,
+    tars: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+impl Layouts {
+    fn new() -> Self {
+        Layouts {
+            dir: tempfile::tempdir().unwrap(),
+            tars: Default::default(),
+        }
+    }
+
+    /// A key pair under `name`: (private PEM path, public PEM path).
+    fn key(&self, name: &str) -> (PathBuf, PathBuf) {
+        let (private, public) = potter_catalog::generate_pem();
+        let (k, p) = (
+            self.dir.path().join(format!("{name}.key")),
+            self.dir.path().join(format!("{name}.pub")),
+        );
+        std::fs::write(&k, private).unwrap();
+        std::fs::write(&p, public).unwrap();
+        (k, p)
+    }
+
+    fn entry(&mut self, name: &str, arch: potter_catalog::Arch, marker: &str) -> potter_catalog::Entry {
+        let tar = tar(marker);
+        let digest = kiln_store::Digest::of(&tar).to_string();
+        let e = potter_catalog::Entry {
+            name: name.into(),
+            line: "1".into(),
+            version: "1.0".into(),
+            arch,
+            kind: Kind::Runtime,
+            digest: digest.clone(),
+            diff_id: digest.clone(),
+            size: tar.len() as u64,
+            media_type: kiln_oci::media::OCI_LAYER_TAR.into(),
+            abi: Default::default(),
+            requires: vec![],
+            conflicts: vec![],
+            env: Default::default(),
+            provides_sonames: vec![],
+            executor: "ns".into(),
+            source: "https://example.test".into(),
+            license: "MIT".into(),
+            supersedes: None,
+            fixes: vec![],
+        };
+        self.tars.insert(digest, tar);
+        e
+    }
+
+    /// Writes `entries` at `serial` to the layout `name`, signed with `key`, holding every
+    /// current entry's layer.
+    fn write(&self, name: &str, serial: u64, entries: Vec<potter_catalog::Entry>, key: &Path) -> PathBuf {
+        use sha2::Digest as _;
+        let index = potter_catalog::Index {
+            schema: potter_catalog::SCHEMA.into(),
+            serial,
+            created: "2026-11-01T00:00:00Z".into(),
+            entries,
+        };
+        let blobs = self.dir.path().join("tars");
+        std::fs::create_dir_all(&blobs).unwrap();
+        let layers: Vec<_> = index
+            .current()
+            .map(|e| {
+                let path = blobs.join(&e.digest[7..]);
+                std::fs::write(&path, &self.tars[&e.digest]).unwrap();
+                let d = kiln_store::Digest::parse(&e.digest).unwrap();
+                (kiln_oci::Descriptor::new(&e.media_type, d, e.size), path)
+            })
+            .collect();
+        let blob = index.canonical();
+        let sha: [u8; 32] = sha2::Sha256::digest(&blob).into();
+        let signing = potter_catalog::signing_key_from_pem(&std::fs::read_to_string(key).unwrap()).unwrap();
+        let (id, sig) = potter_catalog::sign(&sha, &signing);
+        let dir = self.dir.path().join(name);
+        potter_catalog::write_layout(&dir, &blob, &id, &sig, &layers).unwrap();
+        dir
+    }
+}
+
+/// The index a layout's `index` tag names, unverified.
+fn layout_index(dir: &Path) -> potter_catalog::Index {
+    let blob = |d: &str| std::fs::read(dir.join("blobs/sha256").join(&d[7..])).unwrap();
+    let top: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("index.json")).unwrap()).unwrap();
+    let m = top["manifests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["annotations"]["org.opencontainers.image.ref.name"] == potter_catalog::INDEX_TAG)
+        .unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&blob(m["digest"].as_str().unwrap())).unwrap();
+    potter_catalog::Index::parse(&blob(manifest["layers"][0]["digest"].as_str().unwrap())).unwrap()
+}
+
+fn potter_env(home: &Path, args: &[&str], env: &[(&str, &Path)]) -> (i32, String, String) {
+    let out = Command::cargo_bin("potter")
+        .unwrap()
+        .args(args)
+        .env("KILN_HOME", home.join("kiln"))
+        .env("POTTER_HOME", home.join("potter"))
+        .env_remove("POTTER_CATALOG")
+        .env_remove("POTTER_CATALOG_KEY")
+        .envs(env.iter().map(|(k, v)| (*k, v.as_os_str())))
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `potter catalog build --merge`: the two architectures' layouts of one run, each built on the
+/// same previous catalog, become one index one serial above it, signed once, holding both
+/// architectures' new entries and every current layer.
+#[test]
+fn merge_makes_one_index_from_both_architectures() {
+    use potter_catalog::Arch;
+    let mut l = Layouts::new();
+    let (catalog_key, catalog_pub) = l.key("catalog");
+    let old_go = l.entry("go", Arch::X86_64, "go-x86-old");
+    let arm_go = l.entry("go", Arch::Aarch64, "go-arm");
+    let previous = vec![old_go.clone(), arm_go.clone()];
+    let prev_dir = l.write("previous", 4, previous.clone(), &catalog_key);
+
+    // x86_64 rebuilt go; aarch64 added node. Each build signed with a throwaway key.
+    let mut new_go = l.entry("go", Arch::X86_64, "go-x86-new");
+    new_go.supersedes = Some(old_go.digest.clone());
+    let node = l.entry("node", Arch::Aarch64, "node-arm");
+    let (x86_key, x86_pub) = l.key("x86");
+    let (arm_key, arm_pub) = l.key("arm");
+    let x86 = l.write("x86", 5, [previous.clone(), vec![new_go.clone()]].concat(), &x86_key);
+    let arm = l.write("arm", 5, [previous.clone(), vec![node.clone()]].concat(), &arm_key);
+
+    let home = l.dir.path().join("home");
+    let out = l.dir.path().join("merged");
+    let previous_ref = format!("oci-layout:{}", prev_dir.display());
+    let args = |layouts: &[&Path], keys: &[&Path]| {
+        let mut a: Vec<String> = ["catalog", "build", "--out", out.to_str().unwrap()]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        a.extend(["--sign-key".into(), catalog_key.display().to_string()]);
+        a.extend(["--previous".into(), previous_ref.clone()]);
+        for d in layouts {
+            a.extend(["--merge".into(), d.display().to_string()]);
+        }
+        for k in keys {
+            a.extend(["--merge-key".into(), k.display().to_string()]);
+        }
+        a
+    };
+    let trust = [("POTTER_CATALOG_KEY", catalog_pub.as_path())];
+    let run = |a: Vec<String>| potter_env(&home, &a.iter().map(String::as_str).collect::<Vec<_>>(), &trust);
+
+    let (code, stdout, stderr) = run(args(&[&x86, &arm], &[&x86_pub, &arm_pub]));
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("serial 5"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("go 1.0 {} supersedes {}", new_go.digest, old_go.digest)),
+        "{stdout}"
+    );
+    assert!(stdout.contains(&format!("node 1.0 {} new", node.digest)), "{stdout}");
+
+    let merged = layout_index(&out);
+    assert_eq!(merged.serial, 5, "one bump for both architectures");
+    assert_eq!(
+        merged.entries,
+        [previous.clone(), vec![new_go.clone(), node.clone()]].concat()
+    );
+    let current: Vec<(Arch, &str)> = merged.current().map(|e| (e.arch, e.name.as_str())).collect();
+    assert_eq!(
+        current,
+        [(Arch::Aarch64, "go"), (Arch::X86_64, "go"), (Arch::Aarch64, "node")]
+    );
+
+    // It verifies under the catalog key, and holds every current layer.
+    let at = [
+        ("POTTER_CATALOG", PathBuf::from(format!("oci-layout:{}", out.display()))),
+        ("POTTER_CATALOG_KEY", catalog_pub.clone()),
+    ];
+    let at: Vec<(&str, &Path)> = at.iter().map(|(k, v)| (*k, v.as_path())).collect();
+    let (code, stdout, stderr) = potter_env(&l.dir.path().join("home2"), &["catalog", "verify"], &at);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "ok 3 layers");
+
+    // A layout whose key is not given does not verify (exit 3); two layouts of one arch, or one
+    // built on another catalog, are refused (exit 2).
+    let (code, _, stderr) = run(args(&[&x86, &arm], &[&x86_pub]));
+    assert_eq!(code, 3, "{stderr}");
+    let (code, _, stderr) = run(args(&[&x86, &x86], &[&x86_pub]));
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("both add x86_64"), "{stderr}");
+    let stale = l.write("stale", 4, previous[..1].to_vec(), &arm_key);
+    let (code, _, stderr) = run(args(&[&x86, &stale], &[&x86_pub, &arm_pub]));
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("serial 4, not 5"), "{stderr}");
+    // --merge and a catalog directory are one or the other.
+    let mut both = args(&[&x86], &[&x86_pub]);
+    both.push("catalog".into());
+    let (code, _, _) = run(both);
+    assert_eq!(code, 2);
 }

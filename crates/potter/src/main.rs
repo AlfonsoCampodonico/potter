@@ -210,7 +210,8 @@ enum CatalogCmd {
     #[command(hide = true)]
     Build {
         /// One <name>/potter.toml and <name>/layer.toml per layer
-        catalog_dir: PathBuf,
+        #[arg(required_unless_present = "merge")]
+        catalog_dir: Option<PathBuf>,
         /// The OCI layout to write
         #[arg(long)]
         out: PathBuf,
@@ -220,6 +221,13 @@ enum CatalogCmd {
         /// The catalog this one follows, verified first: <registry ref> or oci-layout:<dir>
         #[arg(long)]
         previous: Option<String>,
+        /// Build nothing: merge these layouts, one per architecture and each built with the same
+        /// --previous, into one index one serial above it (repeatable)
+        #[arg(long, value_name = "LAYOUT", conflicts_with = "catalog_dir")]
+        merge: Vec<PathBuf>,
+        /// The ed25519 public key (PEM) a --merge layout is signed with (repeatable)
+        #[arg(long, value_name = "PEM", requires = "merge")]
+        merge_key: Vec<PathBuf>,
     },
     /// Verify a catalog layout with the trusted keys, then push its layers and its index
     #[command(hide = true)]
@@ -1267,7 +1275,14 @@ fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
             out,
             sign_key,
             previous,
-        } => return catalog_build(&catalog_dir, &out, &sign_key, previous.as_deref()),
+            merge,
+            merge_key,
+        } => {
+            return match catalog_dir {
+                Some(dir) => catalog_build(&dir, &out, &sign_key, previous.as_deref()),
+                None => catalog_merge(&merge, &merge_key, &out, &sign_key, previous.as_deref()),
+            };
+        }
         CatalogCmd::Publish { layout, registry_ref } => return catalog_publish(&layout, &registry_ref),
         other => other,
     };
@@ -1420,13 +1435,7 @@ fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
 fn catalog_build(catalog_dir: &Path, out: &Path, sign_key: &Path, previous: Option<&str>) -> Result<(), (String, u8)> {
     use potter_exec::chain::{Progress, StepState};
     let built = |e: potter_exec::BuildError| (e.to_string(), e.exit_code());
-    let pem = std::fs::read_to_string(sign_key).map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
-    let key = potter_catalog::signing_key_from_pem(&pem)
-        .map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
-    let previous = previous
-        .map(potter_catalog::Location::parse)
-        .transpose()
-        .map_err(|e| (format!("--previous: {e}"), e.exit_code()))?;
+    let (key, previous) = build_args(sign_key, previous)?;
     if !cfg!(target_os = "linux") {
         return Err(("the namespace executor needs Linux".into(), 4));
     }
@@ -1468,6 +1477,60 @@ fn catalog_build(catalog_dir: &Path, out: &Path, sign_key: &Path, previous: Opti
         created: now_rfc3339(),
     };
     let report = potter_exec::catalog_build::build(&mut parts, &req).map_err(built)?;
+    print_report(&report, out);
+    Ok(())
+}
+
+/// `--sign-key` and `--previous` of `potter catalog build`, read and parsed.
+fn build_args(
+    sign_key: &Path,
+    previous: Option<&str>,
+) -> Result<(potter_catalog::SigningKey, Option<potter_catalog::Location>), (String, u8)> {
+    let pem = std::fs::read_to_string(sign_key).map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
+    let key = potter_catalog::signing_key_from_pem(&pem)
+        .map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
+    let previous = previous
+        .map(potter_catalog::Location::parse)
+        .transpose()
+        .map_err(|e| (format!("--previous: {e}"), e.exit_code()))?;
+    Ok((key, previous))
+}
+
+/// `potter catalog build --merge`: the per-architecture layouts as one index, signed with
+/// `sign_key`. Needs no sandbox. 2 when the layouts were not built on the same `previous` or
+/// overlap in architecture, 3 when one does not verify, 4 for infrastructure.
+fn catalog_merge(
+    layouts: &[PathBuf],
+    layout_keys: &[PathBuf],
+    out: &Path,
+    sign_key: &Path,
+    previous: Option<&str>,
+) -> Result<(), (String, u8)> {
+    let (key, previous) = build_args(sign_key, previous)?;
+    let layout_keys = layout_keys
+        .iter()
+        .map(|p| {
+            let pem = std::fs::read_to_string(p).map_err(|e| (format!("--merge-key {}: {e}", p.display()), 2))?;
+            potter_catalog::TrustedKey::from_pem(&pem).map_err(|e| (format!("--merge-key {}: {e}", p.display()), 2))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (store, home, _) = open_homes().map_err(|e| (e, 4))?;
+    let req = potter_exec::catalog_build::MergeRequest {
+        layouts,
+        layout_keys: &layout_keys,
+        out,
+        sign_key: &key,
+        previous: previous.as_ref(),
+        created: now_rfc3339(),
+    };
+    let report = potter_exec::catalog_build::merge(&store, home.root(), kiln_registry::DockerConfig::from_env(), &req)
+        .map_err(|e| (e.to_string(), e.exit_code()))?;
+    print_report(&report, out);
+    Ok(())
+}
+
+/// One line per layer of `report`, then the index written to `out`.
+fn print_report(report: &potter_exec::catalog_build::Report, out: &Path) {
     for (e, outcome) in &report.layers {
         use potter_exec::catalog_build::assign::Outcome;
         let what = match outcome {
@@ -1483,7 +1546,6 @@ fn catalog_build(catalog_dir: &Path, out: &Path, sign_key: &Path, previous: Opti
         report.index.serial,
         report.digest
     );
-    Ok(())
 }
 
 /// `potter catalog publish`: 3 when the layout does not verify under the trusted keys, 4 when

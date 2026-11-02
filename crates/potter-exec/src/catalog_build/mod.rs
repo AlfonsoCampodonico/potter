@@ -243,6 +243,71 @@ pub fn build(parts: &mut Parts, req: &Request) -> Result<Report, BuildError> {
     })
 }
 
+/// `potter catalog build --merge`: the per-architecture layouts of one run, each built with
+/// the same `previous`, as one index signed once.
+pub struct MergeRequest<'a> {
+    pub layouts: &'a [PathBuf],
+    /// The keys the layouts are signed with (the per-architecture builds' throwaway keys). They
+    /// show a layout is the one its build wrote; trust comes from `sign_key`'s signature alone.
+    pub layout_keys: &'a [TrustedKey],
+    pub out: &'a Path,
+    pub sign_key: &'a SigningKey,
+    pub previous: Option<&'a Location>,
+    pub created: String,
+}
+
+/// Merges `req.layouts` into one layout at `req.out`: the previous catalog's entries, then each
+/// layout's new ones, at one serial above the previous one, with every current layer's blob.
+/// `home` keeps the previous catalog's serial record; `store` receives the layers, each
+/// re-hashed on the way in.
+pub fn merge(store: &Store, home: &Path, auth: DockerConfig, req: &MergeRequest) -> Result<Report, BuildError> {
+    let previous = req
+        .previous
+        .map(|loc| potter_catalog::load(loc, None, home, store, auth.clone()))
+        .transpose()?;
+    // The layouts' serial records are of no use later: keep them out of `home`.
+    let scratch = tempfile::tempdir().map_err(io("creating a scratch home"))?;
+    let mut builds = Vec::with_capacity(req.layouts.len());
+    for (i, dir) in req.layouts.iter().enumerate() {
+        let v = potter_catalog::load_trusting(
+            &Location::Layout(dir.clone()),
+            None,
+            &scratch.path().join(i.to_string()),
+            store,
+            auth.clone(),
+            req.layout_keys,
+        )?;
+        builds.push(v);
+    }
+    let index = assign::merge(
+        previous.as_ref().map(|p| &p.index),
+        &builds.iter().map(|b| b.index.clone()).collect::<Vec<_>>(),
+        req.created.clone(),
+    )?;
+    let mut blobs = Vec::new();
+    for e in index.current() {
+        let from = builds
+            .iter()
+            .find(|b| b.index.by_digest(&e.digest).is_some())
+            .expect("every merged entry comes from a layout");
+        let d = fetch_layer(from, e, store, auth.clone())?;
+        blobs.push((d.clone(), store.blob_path(&d.digest)));
+    }
+    let digest = write_signed(req.out, &index, req.sign_key, &blobs)?;
+    let before = previous.as_ref().map_or(0, |p| p.index.entries.len());
+    let layers = index.entries[before..]
+        .iter()
+        .map(|e| {
+            let outcome = match &e.supersedes {
+                Some(old) => Outcome::Supersedes(old.clone()),
+                None => Outcome::New,
+            };
+            (e.clone(), outcome)
+        })
+        .collect();
+    Ok(Report { index, digest, layers })
+}
+
 /// Runs `recipe`'s smoke test: one `sh -c` step on the composite of its layer's closure and
 /// `smoke_with`, uncached and offline.
 fn smoke(

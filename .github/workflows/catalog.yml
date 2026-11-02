@@ -1,0 +1,148 @@
+# The runtime catalog (docs/catalog.md): every recipe under catalog/ built with the namespace
+# executor on both architectures, overlap-checked and smoke-tested.
+#
+# Pull requests: each architecture builds into a layout signed with a throwaway key, and the
+# end-to-end tests build projects on it. Nothing is published.
+#
+# Pushes to main that change catalog/, and manual runs: each architecture builds on the published
+# catalog (--previous); the publish job merges the two layouts into one index one serial above
+# it, signs it with the catalog key, and pushes it. Pins move only by hand: there is no schedule.
+name: catalog
+
+on:
+  pull_request:
+    paths:
+      - "catalog/**"
+      - "crates/potter-catalog/**"
+      - ".github/workflows/catalog.yml"
+  push:
+    branches: [main]
+    paths:
+      - "catalog/**"
+  workflow_dispatch:
+    inputs:
+      first:
+        description: "No catalog is published yet: build without --previous, as serial 1"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One publish at a time, so two runs never both claim the next serial. Pull requests cancel
+# their own older runs.
+concurrency:
+  group: catalog-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CATALOG: ghcr.io/alfonsocampodonico/potter-catalog
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - run: sudo apt-get update && sudo apt-get install -y uidmap busybox-static passt nftables
+      - name: A subordinate id range for the runner user
+        run: |
+          grep -q "^$USER:" /etc/subuid || echo "$USER:200000:65536" | sudo tee -a /etc/subuid
+          grep -q "^$USER:" /etc/subgid || echo "$USER:200000:65536" | sudo tee -a /etc/subgid
+      - name: vmkit's sandbox helper and its AppArmor profile
+        run: |
+          rev=$(grep -o 'vmkit", rev = "[0-9a-f]*' crates/potter-exec/Cargo.toml | grep -o '[0-9a-f]\{40\}')
+          git clone --quiet https://github.com/AlfonsoCampodonico/vmkit /tmp/vmkit
+          git -C /tmp/vmkit checkout --quiet "$rev"
+          cargo build --release --manifest-path /tmp/vmkit/Cargo.toml --bin vmkit-sandbox
+          sudo install -m 0755 /tmp/vmkit/target/release/vmkit-sandbox /usr/local/bin/vmkit-sandbox
+          /tmp/vmkit/scripts/install-apparmor.sh /usr/local/bin/vmkit-sandbox
+      - run: cargo build --release -p potter
+      # Signs this architecture's layout only. On a publish, the merged index is signed again
+      # with the catalog key; this key's public half travels with the layout so the merge can
+      # tell it is the layout this job wrote.
+      - name: A throwaway key for this build's layout
+        run: target/release/potter key generate --ed25519 "$RUNNER_TEMP/key"
+      - name: Build, overlap-check and smoke-test every layer
+        env:
+          VMKIT_SANDBOX: /usr/local/bin/vmkit-sandbox
+          EVENT: ${{ github.event_name }}
+          FIRST: ${{ inputs.first }}
+        run: |
+          previous=()
+          if [ "$EVENT" != pull_request ] && [ "$FIRST" != true ]; then
+            previous=(--previous "$CATALOG:index")
+          fi
+          target/release/potter catalog build catalog --out "$RUNNER_TEMP/layout" \
+            --sign-key "$RUNNER_TEMP/key/catalog.key" "${previous[@]}"
+      - name: The detector's tables against the recipes, and projects built on this catalog
+        if: github.event_name == 'pull_request'
+        env:
+          VMKIT_SANDBOX: /usr/local/bin/vmkit-sandbox
+          POTTER_REQUIRE_SANDBOX_TESTS: "1"
+          POTTER_TEST_CATALOG: "1"
+          POTTER_CATALOG: oci-layout:${{ runner.temp }}/layout
+          POTTER_CATALOG_KEY: ${{ runner.temp }}/key/catalog.pub
+        run: cargo test --release -p potter --test catalog_agreement --test catalog_e2e
+      - name: Hand the layout and its public key to the publish job
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: catalog-${{ runner.arch }}
+          path: |
+            ${{ runner.temp }}/layout
+            ${{ runner.temp }}/key/catalog.pub
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - run: cargo build --release -p potter
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: catalog-*
+          path: ${{ runner.temp }}/builds
+      - name: Merge both architectures into one index, one serial up, signed with the catalog key
+        env:
+          SIGNING_KEY: ${{ secrets.POTTER_CATALOG_KEY }}
+          FIRST: ${{ inputs.first }}
+        run: |
+          key="$RUNNER_TEMP/catalog-signing.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$SIGNING_KEY" > "$key")
+          args=()
+          for build in "$RUNNER_TEMP"/builds/*/; do
+            args+=(--merge "$build/layout" --merge-key "$build/key/catalog.pub")
+          done
+          if [ "${#args[@]}" -ne 8 ]; then
+            echo "want one layout per architecture, got: $(ls "$RUNNER_TEMP/builds")" >&2
+            exit 1
+          fi
+          if [ "$FIRST" != true ]; then
+            args+=(--previous "$CATALOG:index")
+          fi
+          target/release/potter catalog build --out "$RUNNER_TEMP/merged" --sign-key "$key" "${args[@]}"
+      - name: Push the layers, then the index
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          export DOCKER_CONFIG="$RUNNER_TEMP/docker"
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+          target/release/potter catalog publish "$RUNNER_TEMP/merged" "$CATALOG:index"

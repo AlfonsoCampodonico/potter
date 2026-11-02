@@ -17,7 +17,9 @@ checked in CI.
 
 - `targets[]`: `name`, `root` (relative to the repo), `provider`, `build` (a chain), and `image`.
 - `build.base`, one of:
-  - `{kind: "catalog", layers: [{name, version?}]}`;
+  - `{kind: "catalog", layers: [{name, version?}]}`: layers of the signed catalog by name and line,
+    resolved to digests at build time ([catalog.md](catalog.md)). A base that names a PHP-only layer
+    is lowered through the stopgap instead;
   - `{kind: "oci", reference, digest?}`;
   - `{kind: "stage", name}`.
 - `build.steps[]`, internally tagged by `kind`:
@@ -41,7 +43,7 @@ checked in CI.
 | Key | Meaning |
 |---|---|
 | `[target.<name>]` `root`, `provider`, `port` | Build root (relative); force a provider (`php`, `laravel`, `node`, `bun`, `deno`, `static`, `python`, `ruby`, `go`, `rust`, or `none` for an explicit plan); listen port. |
-| `[target.<name>.runtime]` `php`, `node`, `bun`, `deno`, `python`, `ruby`, `go`, `rust`, `extensions` | Version lines and extra PHP extensions. Always wins over detection. |
+| `[target.<name>.runtime]` `php`, `node`, `bun`, `deno`, `python`, `ruby`, `go`, `rust`, `extensions` | Version lines and extra PHP extensions. Always wins over detection; a line the catalog does not have is refused at plan time (exit 2). |
 | `[target.<name>.php]` `nginx_conf`, `fpm_pool`, `octane_server`, `port` | Replace the generated configs (repo-relative files); pick the Octane server; port alias. |
 | `[target.<name>.node]` `package_manager` | `npm`, `pnpm`, `yarn` or `bun`; its lockfile must exist. |
 | `[target.<name>.python]` `package_manager`; `[target.<name>.python.django]` `collectstatic` | `uv`, `poetry`, `pipenv` or `pip` (its lockfile must exist); turn Django's `collectstatic` step off. |
@@ -118,7 +120,7 @@ Every image manifest potter writes carries:
 - `dev.potter.run_chain`: the image's run base and runtime steps (canonical JSON), which `potter rebase` re-runs on a new base;
 - `dev.potter.max_layers`: the layer budget it was built with, which a rebase keeps.
 
-An image whose run base is a composite of catalog layers (spec §16) also carries the following. Images on OCI or stopgap bases carry none of them.
+An image whose run base is a composite of catalog layers (spec §16, [catalog.md](catalog.md)) also carries the following. Images on OCI or stopgap bases carry none of them.
 
 - `dev.potter.catalog.layers`: the catalog layer digests behind the run base, bottom first (JSON array);
 - `dev.potter.catalog.constraints`: one `name@line` per requested layer (JSON array);

@@ -16,8 +16,8 @@ potter rebase potter/app:latest --executor ns
 The run base is the bottom of the image that a rebase replaces:
 - **With `export`:** the image's run base and its `runtime_steps`. The export layer and the files
   layer sit above it.
-- **Without `export`:** the OCI base the build chain started from (after catalog lowering). Every
-  build step is above it.
+- **Without `export`:** the base the build chain started from: the composite of catalog layers, or
+  the OCI image a PHP base is lowered to by the stopgap. Every build step is above it.
 
 At build time potter converts the run base into a kiln image of its own (untagged) and converts the
 image with that base recorded (kiln's `BaseRecord`, the same record `kiln convert --base` writes). The
@@ -63,7 +63,9 @@ exit 1, the catalog gates' exit 2.
 
 An image on a catalog run base records its catalog layers, the constraints they resolved from
 (`name@line`), the index, the layers above its run base that a rebase keeps, and the sonames its
-ELF files need (see [plan-format.md](plan-format.md#image-annotations-spec-51-18)). A rebase:
+ELF files need (see [plan-format.md](plan-format.md#image-annotations-spec-51-18)). How the
+catalog supersedes a layer, and how advisories find affected images, is in [catalog.md](catalog.md).
+A rebase:
 
 1. Resolves the recorded constraints again, against the catalog's current index or the one
    `--catalog-index` pins. A layer some newer entry supersedes is replaced by it.

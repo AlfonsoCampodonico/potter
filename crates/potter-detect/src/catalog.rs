@@ -97,6 +97,10 @@ pub static RUST: Runtime = Runtime {
     default: "1.99",
 };
 
+/// Every runtime table above, for checks that walk them all (the catalog agreement test). A new
+/// table goes here too.
+pub static RUNTIMES: [&Runtime; 8] = [&PHP, &NODE, &BUN, &DENO, &PYTHON, &RUBY, &GO, &RUST];
+
 pub const COMPOSER_VERSION: &str = "2";
 
 /// Where a version requirement came from, for `--explain` and error messages.
