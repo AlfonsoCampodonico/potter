@@ -118,9 +118,35 @@ jobs:
           cat "$RUNNER_TEMP/again.txt"
           if grep -v -e ' kept$' -e '^wrote ' "$RUNNER_TEMP/again.txt"; then
             echo "these layers are not reproducible: their bytes differ from the first build" >&2
+            # Each differing layer, file by file (metadata and content hash), and both blobs kept
+            # for the artifact below.
+            list() {
+              zstd -dc "$1" | python3 -c 'import sys, tarfile, hashlib
+          with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as t:
+              for m in t:
+                  h = hashlib.sha256(t.extractfile(m).read()).hexdigest() if m.isfile() else "-"
+                  print(m.name, oct(m.mode), m.uid, m.gid, m.mtime, m.size, m.linkname or "-", h)'
+            }
+            mkdir -p "$RUNNER_TEMP/differs"
+            grep ' supersedes ' "$RUNNER_TEMP/again.txt" | while read -r name _ new _ old; do
+              cp "$RUNNER_TEMP/layout/blobs/sha256/${old#sha256:}" "$RUNNER_TEMP/differs/$name-first.tar.zst"
+              cp "$RUNNER_TEMP/again/blobs/sha256/${new#sha256:}" "$RUNNER_TEMP/differs/$name-again.tar.zst"
+              list "$RUNNER_TEMP/differs/$name-first.tar.zst" > "$RUNNER_TEMP/differs/$name-first.txt"
+              list "$RUNNER_TEMP/differs/$name-again.tar.zst" > "$RUNNER_TEMP/differs/$name-again.txt"
+              echo "--- $name: first build vs again"
+              diff "$RUNNER_TEMP/differs/$name-first.txt" "$RUNNER_TEMP/differs/$name-again.txt" | head -100 || true
+            done
             exit 1
           fi
           grep -q ' kept$' "$RUNNER_TEMP/again.txt"
+      - name: Keep the layers that differ
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: differs-${{ runner.arch }}
+          path: ${{ runner.temp }}/differs
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Hand the layout and its public key to the publish job
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
