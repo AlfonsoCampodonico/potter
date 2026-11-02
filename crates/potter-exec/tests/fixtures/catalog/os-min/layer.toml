@@ -1,0 +1,8 @@
+name = "os-min"
+line = "13"
+version = "13.0"
+kind = "base"
+env = { PATH = "/bin" }
+source = "https://example.test/os-min"
+license = "GPL-2.0"
+smoke = "test -f /etc/os-release && test -f /var/lib/dpkg/status"

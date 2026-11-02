@@ -117,7 +117,11 @@ impl Provider for GoProvider {
                     .insert(process, Process::new(&[&format!("/out/{name}")]));
             }
         }
-        let layers = vec![cref("os-min", None), cref("go", Some(go.version))];
+        let layers = vec![
+            cref("os-min", None),
+            cref("build-tools", None),
+            cref("go", Some(go.version)),
+        ];
         Ok(Detection {
             target: new_target(target, ProviderId::Go, layers, steps, image),
             decisions: d,

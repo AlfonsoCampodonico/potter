@@ -129,7 +129,7 @@ impl Provider for StaticProvider {
             "web".into(),
             Process::new(&["static-server", "--root", "/srv/www", "--listen", &listen]),
         );
-        let layers = vec![cref("os-min", None), runtime];
+        let layers = vec![cref("os-min", None), cref("build-tools", None), runtime];
         Ok(Detection {
             target: new_target(target, ProviderId::Static, layers, steps, image),
             decisions: d,

@@ -101,7 +101,11 @@ impl Provider for PythonProvider {
         let python = python_version(repo, opts, pyproject.as_ref(), &mut d)?;
         let deps = dependencies(repo, pm, pyproject.as_ref())?;
 
-        let mut build_layers = vec![cref("os-min", None), cref("python", Some(python.version))];
+        let mut build_layers = vec![
+            cref("os-min", None),
+            cref("build-tools", None),
+            cref("python", Some(python.version)),
+        ];
         if pm != Pm::Pip {
             build_layers.push(cref(pm.name(), None));
         }

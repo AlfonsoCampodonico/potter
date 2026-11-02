@@ -128,8 +128,13 @@ impl Provider for DenoProvider {
         config.port = Some(port);
         config.env.insert("PORT".into(), port.to_string());
         config.env.insert("DENO_DIR".into(), DENO_DIR.into());
-        let layers = vec![cref("os-min", None), cref("deno", Some(deno.version))];
-        let mut image = empty_image(layers.clone(), config);
+        let run_layers = vec![cref("os-min", None), cref("deno", Some(deno.version))];
+        let build_layers = vec![
+            cref("os-min", None),
+            cref("build-tools", None),
+            cref("deno", Some(deno.version)),
+        ];
+        let mut image = empty_image(run_layers, config);
         image.export = vec![export("/app", "/app")];
         image.processes.insert(
             "web".into(),
@@ -140,7 +145,7 @@ impl Provider for DenoProvider {
             },
         );
         Ok(Detection {
-            target: new_target(target, ProviderId::Deno, layers, steps, image),
+            target: new_target(target, ProviderId::Deno, build_layers, steps, image),
             decisions: d,
         })
     }

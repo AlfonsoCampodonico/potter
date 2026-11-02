@@ -103,8 +103,13 @@ impl Provider for NodeProvider {
             });
         };
 
-        let layers = vec![cref("os-min", None), cref("node", Some(node.version))];
-        let mut image = empty_image(layers.clone(), config);
+        let run_layers = vec![cref("os-min", None), cref("node", Some(node.version))];
+        let build_layers = vec![
+            cref("os-min", None),
+            cref("build-tools", None),
+            cref("node", Some(node.version)),
+        ];
+        let mut image = empty_image(run_layers, config);
         image.export = exports;
         image.processes.insert(
             "web".into(),
@@ -115,7 +120,7 @@ impl Provider for NodeProvider {
             },
         );
         Ok(Detection {
-            target: new_target(target, ProviderId::Node, layers, steps, image),
+            target: new_target(target, ProviderId::Node, build_layers, steps, image),
             decisions: d,
         })
     }

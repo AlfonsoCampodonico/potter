@@ -1,4 +1,4 @@
-//! Runtime version lines available until the real catalog (P3) replaces this table (spec §7).
+//! The catalog's version lines: one line per runtime (spec §7).
 
 use potter_plan::{Decision, Origin};
 
@@ -57,12 +57,8 @@ pub static PHP: Runtime = Runtime {
 
 pub static NODE: Runtime = Runtime {
     name: "node",
-    lines: &[
-        line("20", 20, None, true),
-        line("22", 22, None, true),
-        line("24", 24, None, true),
-    ],
-    default: "22",
+    lines: &[line("26", 26, None, true)],
+    default: "26",
 };
 
 pub static BUN: Runtime = Runtime {
@@ -79,43 +75,31 @@ pub static DENO: Runtime = Runtime {
 
 pub static PYTHON: Runtime = Runtime {
     name: "python",
-    lines: &[
-        line("3.12", 3, Some(12), false),
-        line("3.13", 3, Some(13), false),
-        line("3.14", 3, Some(14), false),
-    ],
-    default: "3.13",
+    lines: &[line("3.15", 3, Some(15), false)],
+    default: "3.15",
 };
 
 pub static RUBY: Runtime = Runtime {
     name: "ruby",
-    lines: &[
-        line("3.3", 3, Some(3), false),
-        line("3.4", 3, Some(4), false),
-        line("4.0", 4, Some(0), false),
-    ],
-    default: "3.4",
+    lines: &[line("4.0", 4, Some(0), false)],
+    default: "4.0",
 };
 
 pub static GO: Runtime = Runtime {
     name: "go",
-    lines: &[
-        line("1.25", 1, Some(25), false),
-        line("1.26", 1, Some(26), false),
-        line("1.27", 1, Some(27), false),
-    ],
+    lines: &[line("1.27", 1, Some(27), false)],
     default: "1.27",
 };
 
 pub static RUST: Runtime = Runtime {
     name: "rust",
-    lines: &[
-        line("1.97", 1, Some(97), false),
-        line("1.98", 1, Some(98), false),
-        line("1.99", 1, Some(99), false),
-    ],
+    lines: &[line("1.99", 1, Some(99), false)],
     default: "1.99",
 };
+
+/// Every runtime table above, for checks that walk them all (the catalog agreement test). A new
+/// table goes here too.
+pub static RUNTIMES: [&Runtime; 8] = [&PHP, &NODE, &BUN, &DENO, &PYTHON, &RUBY, &GO, &RUST];
 
 pub const COMPOSER_VERSION: &str = "2";
 
@@ -159,11 +143,21 @@ pub fn pick(
             });
             Ok(line)
         }
-        None => Err(DetectError::Unsatisfiable {
-            runtime: rt.name,
-            source_desc: src.desc,
-            available: rt.lines.iter().map(|l| l.version).collect::<Vec<_>>().join(", "),
-        }),
+        None => {
+            // `desc` reads `<source> = <constraint>` except for go.mod's directives, which keep
+            // their sentence form and stand in for both.
+            let (source, constraint) = match src.desc.split_once(" = ") {
+                Some((source, constraint)) => (source.to_string(), constraint.to_string()),
+                None => (String::new(), src.desc),
+            };
+            Err(DetectError::Unsatisfiable {
+                field: field.to_string(),
+                constraint,
+                source_desc: source,
+                runtime: rt.name,
+                available: rt.lines.iter().map(|l| l.version).collect::<Vec<_>>().join(", "),
+            })
+        }
     }
 }
 
@@ -211,7 +205,7 @@ mod tests {
             pick(&NODE, "runtime.node", src(parse_npm_range(">=20.11").unwrap()), &mut d)
                 .unwrap()
                 .version,
-            "24"
+            "26"
         );
         assert_eq!(d.len(), 3);
     }
@@ -219,7 +213,7 @@ mod tests {
     #[test]
     fn default_without_constraint() {
         let mut d = vec![];
-        assert_eq!(pick(&NODE, "runtime.node", None, &mut d).unwrap().version, "22");
+        assert_eq!(pick(&NODE, "runtime.node", None, &mut d).unwrap().version, "26");
         assert_eq!(d[0].origin, Origin::Default);
     }
 
@@ -233,8 +227,8 @@ mod tests {
             "1.27"
         );
         assert_eq!(pick(&RUST, "runtime.rust", None, &mut d).unwrap().version, "1.99");
-        assert_eq!(pick(&PYTHON, "runtime.python", None, &mut d).unwrap().version, "3.13");
-        assert_eq!(pick(&RUBY, "runtime.ruby", None, &mut d).unwrap().version, "3.4");
+        assert_eq!(pick(&PYTHON, "runtime.python", None, &mut d).unwrap().version, "3.15");
+        assert_eq!(pick(&RUBY, "runtime.ruby", None, &mut d).unwrap().version, "4.0");
         assert_eq!(
             pick(&RUBY, "runtime.ruby", src(parse_npm_range(">=4").unwrap()), &mut d)
                 .unwrap()
@@ -252,7 +246,7 @@ mod tests {
             set: crate::version::VersionSet::any(),
             lts_only: true,
         };
-        assert_eq!(pick(&NODE, "runtime.node", Some(s), &mut d).unwrap().version, "24");
+        assert_eq!(pick(&NODE, "runtime.node", Some(s), &mut d).unwrap().version, "26");
     }
 
     #[test]

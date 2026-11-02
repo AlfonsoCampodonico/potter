@@ -3,10 +3,13 @@
 #![forbid(unsafe_code)]
 
 pub mod affected;
+pub mod apt;
 pub mod assemble;
 pub mod attest;
 pub mod base;
+pub mod catalog_build;
 pub mod chain;
+pub mod composite;
 mod error;
 pub mod graph;
 pub mod ingest;
@@ -18,6 +21,7 @@ pub mod rebase;
 pub mod remote;
 pub mod sandboxed;
 pub mod seal;
+pub mod sonames;
 pub mod stopgap;
 pub mod tarball;
 #[cfg(test)]
@@ -25,4 +29,4 @@ mod testing;
 pub mod unpack;
 pub mod vm;
 
-pub use error::BuildError;
+pub use error::{BuildError, RefusedBy};

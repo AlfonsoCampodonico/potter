@@ -119,6 +119,27 @@ pub fn image(
     budget: u32,
     reference: &str,
 ) -> (Digest, LayerReport) {
+    let chain = Chain {
+        base: Base::Oci {
+            reference: run_base.name.clone(),
+            digest: None,
+        },
+        steps: vec![],
+    };
+    image_with(store, run_base, app, budget, reference, &chain, BTreeMap::new())
+}
+
+/// [`image`] recording `run_chain` and the `extra` annotations; `{app}` in an extra annotation
+/// stands for the JSON list of the app layers' digests.
+pub fn image_with(
+    store: &Store,
+    run_base: &RunBase,
+    app: &[Vec<u8>],
+    budget: u32,
+    reference: &str,
+    run_chain: &Chain,
+    extra: BTreeMap<String, String>,
+) -> (Digest, LayerReport) {
     let mut layers: Vec<LayerRef> = run_base
         .resolved
         .manifest
@@ -138,17 +159,16 @@ pub fn image(
         &plan_image(),
         layers.iter().map(|l| l.diff_id.clone()).collect(),
     );
-    let chain = Chain {
-        base: Base::Oci {
-            reference: run_base.name.clone(),
-            digest: None,
-        },
-        steps: vec![],
-    };
-    let annotations = BTreeMap::from([
-        (ANN_RUN_CHAIN.to_string(), potter_plan::canonical_json(&chain).unwrap()),
+    let app_digests: Vec<String> = sources(app);
+    let app_list = serde_json::to_string(&app_digests).unwrap();
+    let mut annotations = BTreeMap::from([
+        (
+            ANN_RUN_CHAIN.to_string(),
+            potter_plan::canonical_json(run_chain).unwrap(),
+        ),
         (ANN_MAX_LAYERS.to_string(), budget.to_string()),
     ]);
+    annotations.extend(extra.into_iter().map(|(k, v)| (k, v.replace("{app}", &app_list))));
     let resolved = commit(store, config, &layers, Some(annotations));
     let (digest, report) = convert_within_budget(store, resolved, reference, run_base, budget).unwrap();
     store.set_ref(reference, &digest).unwrap();

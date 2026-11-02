@@ -58,7 +58,7 @@ expression: "render(\"laravel\")"
             },
             {
               "name": "node",
-              "version": "22"
+              "version": "26"
             }
           ]
         },
@@ -341,5 +341,5 @@ app runtime.extensions = zip [detected: composer.lock: spatie/laravel-backup req
 app php.docroot = public [detected: public/ exists]
 app port = 8080 [default]
 app node.package_manager = npm [detected: several lockfiles (yarn.lock, package-lock.json); chose npm; set target.app.node.package_manager to change]
-app runtime.node = 22 [default]
+app runtime.node = 26 [default]
 app process.worker = php artisan queue:work [detected: Laravel queue worker]

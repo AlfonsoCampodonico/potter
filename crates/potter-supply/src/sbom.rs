@@ -14,10 +14,34 @@ pub struct SbomInput<'a> {
     pub created: &'a str,
     /// (reference, `sha256:<hex>` manifest digest) of each base image.
     pub bases: &'a [(String, String)],
-    /// (name, version) of each catalog or stopgap layer; `None` when nothing pins it.
-    pub catalog: &'a [(String, Option<String>)],
+    /// Each catalog or stopgap layer.
+    pub catalog: &'a [CatalogPackage],
     pub components: &'a [Component],
     pub potter_version: &'a str,
+}
+
+/// A catalog layer as the SBOM lists it: from the signed index for a resolved catalog layer,
+/// from the plan alone (name and pinned line, nothing else known) for a stopgap one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CatalogPackage {
+    pub name: String,
+    /// `None` when nothing pins it.
+    pub version: Option<String>,
+    /// Where the upstream source comes from.
+    pub source: Option<String>,
+    pub license: Option<String>,
+}
+
+impl CatalogPackage {
+    /// A stopgap layer: its name and pinned line, nothing else.
+    pub fn named(name: &str, version: Option<&str>) -> Self {
+        CatalogPackage {
+            name: name.into(),
+            version: version.map(Into::into),
+            source: None,
+            license: None,
+        }
+    }
 }
 
 const NOASSERTION: &str = "NOASSERTION";
@@ -42,9 +66,16 @@ pub fn spdx(input: &SbomInput) -> Value {
         p["primaryPackagePurpose"] = json!("CONTAINER");
         packages.push(p);
     }
-    for (i, (name, version)) in catalog.iter().enumerate() {
-        let version = version.as_deref().unwrap_or(NOASSERTION);
-        packages.push(package(&format!("SPDXRef-Catalog-{}", i + 1), name, version));
+    for (i, c) in catalog.iter().enumerate() {
+        let version = c.version.as_deref().unwrap_or(NOASSERTION);
+        let mut p = package(&format!("SPDXRef-Catalog-{}", i + 1), &c.name, version);
+        if let Some(source) = &c.source {
+            p["downloadLocation"] = json!(source);
+        }
+        if let Some(license) = &c.license {
+            p["licenseConcluded"] = json!(license);
+        }
+        packages.push(p);
     }
     for (i, c) in components.iter().enumerate() {
         let mut p = package(&format!("SPDXRef-Pkg-{}", i + 1), &c.name, &c.version);
@@ -115,7 +146,7 @@ mod tests {
 
     fn input<'a>(
         bases: &'a [(String, String)],
-        catalog: &'a [(String, Option<String>)],
+        catalog: &'a [CatalogPackage],
         components: &'a [Component],
     ) -> SbomInput<'a> {
         SbomInput {
@@ -165,8 +196,8 @@ mod tests {
     fn every_package_is_contained_and_unproven_fields_are_noassertion() {
         let bases = [("php:8.4-fpm-trixie".to_string(), "sha256:bbbb".to_string())];
         let catalog = [
-            ("nginx".to_string(), None),
-            ("php".to_string(), Some("8.4".to_string())),
+            CatalogPackage::named("nginx", None),
+            CatalogPackage::named("php", Some("8.4")),
         ];
         let components = [comp(Ecosystem::Composer, "laravel/framework", "v11.9.2")];
         let doc = spdx(&input(&bases, &catalog, &components));
@@ -221,7 +252,7 @@ mod tests {
             ("b".to_string(), "sha256:2".to_string()),
             ("a".to_string(), "sha256:1".to_string()),
         ];
-        let catalog = [("z".to_string(), None), ("a".to_string(), None)];
+        let catalog = [CatalogPackage::named("z", None), CatalogPackage::named("a", None)];
         let components = [
             comp(Ecosystem::Npm, "zod", "3.0.0"),
             comp(Ecosystem::Composer, "a/b", "1.0.0"),
@@ -239,5 +270,23 @@ mod tests {
         let doc = spdx(&input(&bases, &catalog, &components));
         assert_eq!(package(&doc, "SPDXRef-Base-1")["name"], "a");
         assert_eq!(package(&doc, "SPDXRef-Pkg-1")["name"], "a/b");
+    }
+
+    #[test]
+    fn sbom_lists_catalog_packages() {
+        let catalog = [CatalogPackage {
+            name: "go".into(),
+            version: Some("1.27.2".into()),
+            source: Some("https://go.dev/dl/go1.27.2.src.tar.gz".into()),
+            license: Some("BSD-3-Clause".into()),
+        }];
+        let doc = spdx(&input(&[], &catalog, &[]));
+        let go = package(&doc, "SPDXRef-Catalog-1");
+        assert_eq!(go["name"], "go");
+        assert_eq!(go["versionInfo"], "1.27.2");
+        assert_eq!(go["downloadLocation"], "https://go.dev/dl/go1.27.2.src.tar.gz");
+        assert_eq!(go["licenseConcluded"], "BSD-3-Clause");
+        assert_eq!(go["licenseDeclared"], NOASSERTION);
+        assert_eq!(go["copyrightText"], NOASSERTION);
     }
 }

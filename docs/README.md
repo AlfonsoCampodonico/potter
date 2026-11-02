@@ -8,6 +8,7 @@ Start with the [project README](../README.md) for what potter does, its status a
 |---|---|
 | [plan-format.md](plan-format.md) | The `potter.plan/v1` plan: canonical form and hashing, shape, `potter.toml` keys, cache keys, secrets in keys, remote cache entries, `--progress json` events, image annotations, attestations |
 | [layer-budget.md](layer-budget.md) | Why layers are a resource in a microVM, the device ceiling per VMM, the composite policy, measured costs and how to choose a budget |
+| [catalog.md](catalog.md) | The signed runtime catalog: contents, the index format, verification, locations and overrides, key rotation, bumping a pin, advisories, the maintainer commands, CI and setup |
 | [rebase.md](rebase.md) | `potter rebase`: what the run base is, what a build records for it, how a patched base replaces it, the refusals and what's not done yet |
 | [schema/potter.plan.v1.json](schema/potter.plan.v1.json) | JSON Schema of the plan, generated from the Rust types and checked in CI |
 
@@ -30,6 +31,7 @@ reference documents above are authoritative where they differ.
 | P1b: Python, Ruby, Go and Rust detectors, monorepo targets | [2026-10-06-potter-p1b-detectors.md](superpowers/plans/2026-10-06-potter-p1b-detectors.md) |
 | P2a: build engine and namespace executor | [2026-10-06-potter-p2a-engine.md](superpowers/plans/2026-10-06-potter-p2a-engine.md) |
 | P2b: stopgap catalog for detected targets | [2026-10-07-potter-p2b-stopgap.md](superpowers/plans/2026-10-07-potter-p2b-stopgap.md) |
+| P3: the signed runtime catalog, without PHP | [2026-10-31-potter-p3-catalog.md](superpowers/plans/2026-10-31-potter-p3-catalog.md) (design: [2026-10-31-potter-p3-catalog-design.md](superpowers/specs/2026-10-31-potter-p3-catalog-design.md)) |
 | P4a: VM executor (potter side) | [2026-10-11-potter-p4a-vm-executor.md](superpowers/plans/2026-10-11-potter-p4a-vm-executor.md) |
 | P6a: remote cache, target graph, `--affected`, secrets | [2026-10-11-potter-p6a-cache-graph.md](superpowers/plans/2026-10-11-potter-p6a-cache-graph.md) |
 | P6b: SBOM, provenance, signing, `potter verify` | [2026-10-11-potter-p6b-supply-chain.md](superpowers/plans/2026-10-11-potter-p6b-supply-chain.md) |

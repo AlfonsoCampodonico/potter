@@ -17,8 +17,11 @@ expression: "render(\"python-flask\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "python",
-              "version": "3.13"
+              "version": "3.15"
             }
           ]
         },
@@ -75,7 +78,7 @@ expression: "render(\"python-flask\")"
             },
             {
               "name": "python",
-              "version": "3.13"
+              "version": "3.15"
             }
           ]
         },
@@ -120,6 +123,6 @@ expression: "render(\"python-flask\")"
 # decisions
 app provider = python [detected: requirements.txt]
 app python.package_manager = pip [detected: requirements.txt is present]
-app runtime.python = 3.13 [default]
+app runtime.python = 3.15 [default]
 app port = 8000 [default]
 app process.web = /app/.venv/bin/gunicorn app.main:app --bind 0.0.0.0:8000 [detected: app/main.py defines `app`]

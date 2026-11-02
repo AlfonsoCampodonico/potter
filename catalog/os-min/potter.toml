@@ -1,0 +1,46 @@
+# os-min: debian:trixie-slim (the multi-arch index digest below), upgraded to one
+# snapshot.debian.org date, plus the shared libraries the runtimes link against (and libatomic1,
+# which node needs), flattened to one layer.
+#
+# The image's own apt sources are removed: an `apt` step on a catalog chain writes its own
+# snapshot sources, so os-min leaves nothing under /etc/apt/sources.list* for it to replace.
+# apt's and debconf's caches of package state (extended_states, the debconf databases) are
+# removed too: every apt run recreates them, so build-tools' apt run would otherwise rewrite
+# os-min files, and only dpkg's own state may be shared between those two layers.
+[target.os-min]
+provider = "none"
+
+[target.os-min.base]
+oci = "docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4"
+
+[target.os-min.steps.packages]
+run = '''
+set -eu
+snapshot=20261030T000000Z
+rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*
+cat > /etc/apt/sources.list.d/snapshot.sources <<EOF
+Types: deb
+URIs: http://snapshot.debian.org/archive/debian/$snapshot/
+Suites: trixie trixie-updates
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://snapshot.debian.org/archive/debian-security/$snapshot/
+Suites: trixie-security
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3 update
+DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 upgrade -y
+DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+  ca-certificates tzdata libssl3t64 zlib1g libffi8 libyaml-0-2 libgmp10 libreadline8t64 \
+  libsqlite3-0 libbz2-1.0 liblzma5 libncursesw6 libatomic1 debian-archive-keyring
+apt-get clean
+rm -rf /etc/apt/sources.list.d/* /var/lib/apt/lists/* /var/cache/apt/* \
+  /var/log/apt /var/log/dpkg.log /var/log/alternatives.log /var/cache/ldconfig/aux-cache \
+  /var/cache/debconf/* /var/lib/apt/extended_states /var/lib/dpkg/*-old
+'''
+
+[target.os-min.process.sh]
+cmd = ["/bin/sh"]

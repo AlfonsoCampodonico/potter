@@ -62,7 +62,11 @@ impl Provider for RubyProvider {
         let ruby = ruby_version(repo, opts, &lock, &gemfile, &mut d)?;
         let rails = gems.contains("rails") || gems.contains("railties");
 
-        let mut build_layers = vec![cref("os-min", None), cref("ruby", Some(ruby.version))];
+        let mut build_layers = vec![
+            cref("os-min", None),
+            cref("build-tools", None),
+            cref("ruby", Some(ruby.version)),
+        ];
         let mut steps = Vec::new();
         let (apt_build, apt_runtime) = apt_packages(&gems);
         if !apt_build.is_empty() {
@@ -266,7 +270,7 @@ fn ruby_version(
         && let Some(req) = gemfile_ruby(gemfile)
     {
         let set = parse_gem_requirement(&req).map_err(|e| bad_constraint("ruby", &req, "Gemfile ruby", e))?;
-        src = Some(detected(format!("Gemfile ruby \"{req}\""), set));
+        src = Some(detected(format!("Gemfile ruby = {req}"), set));
     }
     catalog::pick(&RUBY, "runtime.ruby", src, d)
 }

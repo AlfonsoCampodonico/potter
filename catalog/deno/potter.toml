@@ -1,0 +1,29 @@
+# deno: the official Linux build from deno's GitHub release, installed as /usr/local/bin/deno.
+# build-tools' perl unpacks the zip.
+[target.deno]
+provider = "none"
+
+[target.deno.base]
+catalog = ["os-min", "build-tools"]
+
+[target.deno.steps.install]
+run = '''
+set -eu
+version=2.9.8
+case "$(uname -m)" in
+  x86_64) build=deno-x86_64-unknown-linux-gnu; sha256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609 ;;
+  aarch64) build=deno-aarch64-unknown-linux-gnu; sha256=d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905 ;;
+  *) echo "no deno build for $(uname -m)" >&2; exit 1 ;;
+esac
+/usr/lib/apt/apt-helper -o APT::Sandbox::User=root -o Acquire::Retries=3 \
+  download-file "https://github.com/denoland/deno/releases/download/v$version/$build.zip" "/tmp/deno.zip" "SHA256:$sha256"
+echo "$sha256  /tmp/deno.zip" | sha256sum -c -
+mkdir /tmp/deno
+perl -MIO::Uncompress::Unzip=unzip,\$UnzipError -e 'unzip $ARGV[0] => $ARGV[2], Name => $ARGV[1] or die $UnzipError' \
+  /tmp/deno.zip "deno" /tmp/deno/deno
+install -m 755 /tmp/deno/deno /usr/local/bin/deno
+rm -rf /tmp/deno /tmp/deno.zip
+'''
+
+[target.deno.process.deno]
+cmd = ["/usr/local/bin/deno"]

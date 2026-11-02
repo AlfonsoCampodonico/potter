@@ -1,7 +1,7 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Approved rev 1.6 (2026-10-06)
+**Status:** Approved rev 1.7 (2026-11-02)
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 
@@ -28,6 +28,16 @@
   - **`[target.x] export` for detected targets:**
     - Entries relative to the target root are copied under the image workdir (Go/Rust: `/out/<p>`); absolute entries are copied as is.
     - It closes the gap where Go/Rust images ship only the binary and miss runtime files such as templates or `data/`.
+- **rev 1.7 (2026-11-02):** P3, the signed catalog, as settled by [2026-10-31-potter-p3-catalog-design.md](2026-10-31-potter-p3-catalog-design.md), which wins where the two differ. Reference: [docs/catalog.md](../../catalog.md).
+  - **PHP stays on the stopgap (§7, §15):** the catalog carries no `php`, `php-fpm`, `php-ext-*`, `composer`, `nginx`, swoole, RoadRunner or FrankenPHP. A base naming any of them is lowered through `stopgap.rs` whole; a ref that is neither a catalog layer nor PHP-only is a plan error (exit 2).
+  - **One line per runtime (§7):** `os-min` (Debian 13), `build-tools`, node 26, bun 1, deno 2, python 3.15, uv, poetry, pipenv, ruby 4.0, go 1.27, rust 1.99, `static-server`, on x86_64 and aarch64. The detector's table carries the same lines (PHP keeps 8.2/8.3/8.4 for the stopgap), and a test fails when the two disagree. A constraint no line satisfies is exit 2 at plan time, naming it, its source and what the catalog has; there is no fallback to the stopgap for non-PHP targets. PHP targets take node and bun from the same lines.
+  - **`build-tools` (§7):** a tool layer of compilers and -dev headers that detectors add to every non-PHP build chain, never to run bases. Only `os-min` and `build-tools` hold Debian packages; every other layer installs under `/usr/local` or `/opt`.
+  - **ns-built catalog (§7, §17):** recipes under `catalog/` are built with the namespace executor in the `catalog` tenant on GitHub Actions. Every entry records `executor = "ns"`, and anything containing one has `ns` provenance (P12). VM-built entries will supersede them once the VM executor builds.
+  - **Hand-bumped pins (§7):** every upstream download is pinned by URL and SHA-256, `os-min` by a `debian:trixie-slim` digest and a `snapshot.debian.org` date. No release-feed watchers and no scheduled rebuilds, so the 24 h / 7 day targets do not apply this round. `supersedes`, `fixes` and `potter catalog affected` carry a fix.
+  - **OCI-based rebase kept (§16):** §16 said OCI-based images are never rebased; the shipped `potter rebase` for OCI run bases stays. Catalog images rebase onto superseding entries behind the line, ABI and soname gates; pre-P3 stopgap images rebase by lowering through the stopgap again.
+  - **The index (§7, §8.1):** an OCI image manifest with `artifactType` `application/vnd.potter.catalog.index.v1+json` and one layer, the canonical index JSON (`potter.catalog/v1`). The annotations `dev.potter.catalog.signature` (base64 ed25519 over the index blob's SHA-256) and `dev.potter.catalog.key` (key id) sign it; it is tagged `index` and `index-<hex>`. Trusted keys are compiled in; `POTTER_CATALOG` and `POTTER_CATALOG_KEY` override the location and add a key, each printing a `note:`. A verified serial is remembered per location and a lower one refused unless pinned.
+  - **Layers (§7):** ordinary OCI layer blobs (deterministic tar, zstd), as every potter chain layer is, which kiln converts to erofs with the image. Each entry carries `env`, applied bottom first (`PATH` entries prepended, others override), because a composite replaces the image config.
+  - **Publishing (§7):** each architecture builds on the published index; the two layouts merge into one index one serial up, signed once.
 - **rev 1.5 (2026-10-06):** P1b refinements (implementation level).
   - **Catalog lines refreshed to current releases (§7):**
     - python 3.12/3.13/3.14 (default 3.13);

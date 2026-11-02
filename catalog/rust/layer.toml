@@ -1,0 +1,17 @@
+name = "rust"
+line = "1.99"
+version = "1.99.0"
+kind = "runtime"
+requires = ["os-min"]
+env = { PATH = "/usr/local/cargo/bin", RUSTUP_HOME = "/usr/local/rustup", CARGO_HOME = "/usr/local/cargo", RUSTUP_TOOLCHAIN = "1.99.0" }
+source = "https://static.rust-lang.org/dist/channel-rust-1.99.0.toml"
+license = "MIT OR Apache-2.0"
+smoke_with = ["build-tools"]
+smoke = '''
+set -eu
+rustc --version | grep -q '^rustc 1.99.0 '
+cargo --version
+printf 'fn main() { println!("hello from rust"); }\n' > /tmp/hello.rs
+rustc -o /tmp/hello /tmp/hello.rs
+test "$(/tmp/hello)" = "hello from rust"
+'''

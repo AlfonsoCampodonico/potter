@@ -17,6 +17,9 @@ expression: "render(\"deno-fresh\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "deno",
               "version": "2"
             }

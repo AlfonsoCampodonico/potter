@@ -1,0 +1,30 @@
+# poetry: a virtualenv at /usr/local/lib/poetry on the catalog's python, installed by pip from
+# requirements.txt (every package pinned by version and SHA-256, wheels only), with a wrapper
+# at /usr/local/bin/poetry.
+#
+# To bump: change the pin in requirements.in and regenerate requirements.txt with
+#   uv pip compile requirements.in --universal --python-version 3.15 --only-binary :all: \
+#     --generate-hashes -o requirements.txt
+[target.poetry]
+provider = "none"
+
+[target.poetry.base]
+catalog = ["os-min", "python@3.15"]
+
+[target.poetry.steps.install]
+run = '''
+set -eu
+export SOURCE_DATE_EPOCH=0
+python3 -m venv /usr/local/lib/poetry
+/usr/local/lib/poetry/bin/pip install --no-cache-dir --disable-pip-version-check --no-input \
+  --require-hashes --only-binary :all: -r /app/requirements.txt
+/usr/local/lib/poetry/bin/pip check
+cat > /usr/local/bin/poetry <<'POTTER'
+#!/bin/sh
+exec /usr/local/lib/poetry/bin/poetry "$@"
+POTTER
+chmod 755 /usr/local/bin/poetry
+'''
+
+[target.poetry.process.poetry]
+cmd = ["/usr/local/bin/poetry"]

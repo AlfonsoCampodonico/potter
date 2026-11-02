@@ -137,7 +137,11 @@ impl Provider for RustProvider {
                     .insert(process, Process::new(&[&format!("/out/{name}")]));
             }
         }
-        let layers = vec![cref("os-min", None), cref("rust", Some(rust.version))];
+        let layers = vec![
+            cref("os-min", None),
+            cref("build-tools", None),
+            cref("rust", Some(rust.version)),
+        ];
         Ok(Detection {
             target: new_target(target, ProviderId::Rust, layers, steps, image),
             decisions: d,

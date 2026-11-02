@@ -1,0 +1,14 @@
+name = "python"
+line = "3.15"
+version = "3.15.2"
+kind = "runtime"
+requires = ["os-min"]
+abi = { python-abi = "cp315" }
+source = "https://www.python.org/ftp/python/3.15.2/"
+license = "PSF-2.0"
+smoke = '''
+set -eu
+python3 -c 'import ssl, sqlite3, ctypes, zlib, bz2, lzma, readline, curses, hashlib, uuid'
+test "$(python3 -c 'import sys; print(sys.version.split()[0])')" = 3.15.2
+python -m venv /tmp/venv && /tmp/venv/bin/python -c 'import sys; assert sys.prefix == "/tmp/venv"'
+'''

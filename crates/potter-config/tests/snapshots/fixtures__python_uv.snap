@@ -17,8 +17,11 @@ expression: "render(\"python-uv\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "python",
-              "version": "3.12"
+              "version": "3.15"
             },
             {
               "name": "uv"
@@ -125,7 +128,7 @@ expression: "render(\"python-uv\")"
             },
             {
               "name": "python",
-              "version": "3.12"
+              "version": "3.15"
             }
           ]
         },
@@ -181,7 +184,7 @@ expression: "render(\"python-uv\")"
 # decisions
 app provider = python [detected: pyproject.toml]
 app python.package_manager = uv [detected: uv.lock is present]
-app runtime.python = 3.12 [detected: .python-version = 3.12]
+app runtime.python = 3.15 [detected: .python-version = 3.15]
 app apt.build = libpq-dev [detected: Python packages that need system libraries]
 app port = 8000 [default]
 app process.web = /app/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000 [detected: app.py defines `app`]

@@ -2,6 +2,8 @@
 //! `vmkit-sandbox` that may create user namespaces), `newuidmap` and a subordinate id range.
 #![allow(dead_code)]
 
+pub mod catalog;
+
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -87,6 +89,11 @@ impl Ctx {
 /// A busybox root: the host's static busybox and its applets, `/etc/passwd` with root and `app`
 /// (1000, home `/home/app`), and the usual directories.
 pub fn busybox_root() -> Vec<u8> {
+    busybox_root_with_motd(b"hello\n")
+}
+
+/// [`busybox_root`] with `motd` as `/etc/motd`: a patched build of the same root.
+pub fn busybox_root_with_motd(motd: &[u8]) -> Vec<u8> {
     use kiln_erofs::testtar::{Opts, TarBuilder};
     let dir = Opts::default().mode(0o755);
     let file = Opts::default().mode(0o644);
@@ -109,7 +116,7 @@ pub fn busybox_root() -> Vec<u8> {
         &file,
     );
     t.file("etc/group", b"root:x:0:\napp:x:1000:\n", &file);
-    t.file("etc/motd", b"hello\n", &file);
+    t.file("etc/motd", motd, &file);
     t.finish()
 }
 
@@ -192,6 +199,7 @@ impl Ctx {
             cache_from: None,
             cache_to: None,
             deps: Default::default(),
+            catalog: None,
             progress: &mut progress,
         };
         potter_exec::chain::run_chain(&mut ctx, target, repo)
@@ -223,6 +231,7 @@ impl Ctx {
             cache_from: None,
             cache_to: None,
             deps: Default::default(),
+            catalog: None,
             progress: &mut progress,
         };
         potter_exec::assemble::build_target(&mut ctx, target, repo, tags)
@@ -261,6 +270,7 @@ impl Ctx {
             cache_from: None,
             cache_to: None,
             deps: Default::default(),
+            catalog: None,
             progress: &mut progress,
         };
         let r = potter_exec::chain::run_chain(&mut ctx, target, repo);

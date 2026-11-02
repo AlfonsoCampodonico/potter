@@ -16,8 +16,8 @@ potter rebase potter/app:latest --executor ns
 The run base is the bottom of the image that a rebase replaces:
 - **With `export`:** the image's run base and its `runtime_steps`. The export layer and the files
   layer sit above it.
-- **Without `export`:** the OCI base the build chain started from (after catalog lowering). Every
-  build step is above it.
+- **Without `export`:** the base the build chain started from: the composite of catalog layers, or
+  the OCI image a PHP base is lowered to by the stopgap. Every build step is above it.
 
 At build time potter converts the run base into a kiln image of its own (untagged) and converts the
 image with that base recorded (kiln's `BaseRecord`, the same record `kiln convert --base` writes). The
@@ -40,7 +40,11 @@ base can be rebased.
 2. Resolves the run base again:
    - an OCI base by its recorded reference, never its pinned digest, so a rebuilt tag is picked up;
    - with `--base REF`, another OCI reference instead (not for catalog bases, exit 2);
-   - a catalog base by lowering it again (`stopgap.rs`).
+   - a catalog base against the catalog, from the constraints the image recorded, behind the
+     catalog gates (see [Catalog images](#catalog-images));
+   - a non-PHP catalog base built before P3 (no `dev.potter.catalog.*` annotations), or a PHP
+     one, by lowering it through the stopgap again (`stopgap.rs`). The catalog isn't loaded for
+     these; moving such an image onto the catalog takes a rebuild.
 3. Re-runs the runtime steps on it with the namespace executor. They're `apt` steps with no inputs,
    cached like any step, so this is usually a cache hit or a short install.
 4. Converts the new run base under the image's layer budget. If it's the run base the image already
@@ -52,7 +56,54 @@ base can be rebased.
    - refuses, with the reason, when the base changes in a way the app could notice (below).
 6. Tags the result: `--tag NAME`, or the image's own name when it was given by name.
 
-A refused rebase tags nothing and exits 1 with every reason. The image needs a rebuild.
+A refused rebase tags nothing and names every reason. The image needs a rebuild. kiln's refusals
+exit 1, the catalog gates' exit 2.
+
+## Catalog images
+
+An image on a catalog run base records its catalog layers, the constraints they resolved from
+(`name@line`), the index, the layers above its run base that a rebase keeps, and the sonames its
+ELF files need (see [plan-format.md](plan-format.md#image-annotations-spec-51-18)). How the
+catalog supersedes a layer, and how advisories find affected images, is in [catalog.md](catalog.md).
+A rebase:
+
+1. Resolves the recorded constraints again, against the catalog's current index or the one
+   `--catalog-index` pins. A layer some newer entry supersedes is replaced by it.
+2. Runs the line and ABI gates. A refusal stops the rebase before any layer is fetched or any step
+   runs, and it exits 2:
+   - `line`: a layer changes its line, leaves the run base or joins it, or the index no longer
+     lists a layer the image is on;
+   - `abi`: a layer changes any ABI value (the refusal names the key, the old and the new value).
+3. Builds the new composite and re-runs the runtime steps on it.
+4. Runs the `sonames` gate before anything is tagged, also exiting 2 on refusal. The gate refuses
+   when the image records no `dev.potter.sonames.needed`, or when the app needs a soname that none
+   of these provides: a new catalog layer's `provides_sonames`, a layer the rebase keeps byte for
+   byte (export and files, or every layer above the base without an export), or a re-run runtime
+   step's new layer. The old runtime-step layers don't count, because the rebase drops them.
+   Shared objects the app ships itself never cause a refusal.
+5. Goes on through kiln's rebase as for any image. kiln's gates stay in force. An image with
+   `export` keeps its export and files layers byte for byte. An image without one takes kiln's
+   re-derive path.
+
+An image that records part of a catalog record (`dev.potter.chain`, `dev.potter.sonames.needed` or
+any `dev.potter.catalog.*` key) but not `dev.potter.catalog.layers` is refused as not a potter
+catalog image (exit 2). It is never treated as a pre-P3 stopgap image.
+
+The run base records the catalog layers it was built from on its own manifest. A rebased image
+keeps the source manifest it was built from, so this record is how a later rebase knows which
+layers the image is on now.
+
+The result's `replaced` lists the `[old, new]` catalog entry digests that were swapped. The
+composite's display name (`potter-catalog@<index>`) is never reported as the replaced base.
+
+`--dry-run` resolves and runs the catalog gates, prints the replacements and every gate's verdict,
+and writes nothing: no layer is fetched, no step runs, no composite is built and nothing is tagged.
+Loading the catalog still keeps its verified index, as any read of it does.
+- The runtime steps aren't re-run, so the `sonames` verdict counts none of their layers. When the
+  image has runtime steps, it's marked provisional ("runtime steps not re-run"): the real rebase
+  may pass where the dry run refused.
+- kiln's gates need the new run base built, so a dry run reports them as not checked.
+- It exits 2 when a catalog gate refuses, and it takes catalog images only.
 
 ## Refusals
 
@@ -73,7 +124,9 @@ kiln's gates decide (kiln `docs/format.md`, kiln spec §16.3). A rebase is refus
 | `--base REF` | Rebase onto another OCI image instead of resolving the recorded reference again |
 | `--tag NAME` | Tag the result (default: `IMAGE`, when it's a name; a digest needs `--tag` to tag anything) |
 | `--tenant ID` | Whose cache the runtime steps use (default `local`) |
-| `--json` | Print `digest`, `tag`, `unchanged`, `old_base`, `new_base`, `base_ref`, `base_digest`, `reused`, `changed`, `executed`, `cached` |
+| `--catalog-index D` | Resolve a catalog run base against this index (`sha256:<hex>`, still verified) instead of the current one |
+| `--dry-run` | Catalog images: print what would be replaced and every gate's verdict, writing nothing (`--executor` not needed) |
+| `--json` | Print `digest`, `tag`, `unchanged`, `old_base`, `new_base`, `base_ref`, `base_digest`, `reused`, `changed`, `executed`, `cached`, `replaced`. With `--dry-run`: `dry_run`, `digest`, `index`, `replaced`, and `gates` (`gate`, `verdict`, `reasons`, `provisional`) |
 
 ## Not done yet
 
@@ -81,8 +134,7 @@ kiln's gates decide (kiln `docs/format.md`, kiln spec §16.3). A rebase is refus
   assembled, with its SBOM and provenance. A rebase writes a kiln image to the local store only. So
   there is no provenance record naming the replaced base yet (spec §17, P12). That needs the rebased
   OCI image assembled and pushed with its own attestations.
-- **Catalog re-resolution (spec §16 step 1).** There's no catalog yet. Catalog bases are lowered
-  onto upstream images, and the rebase resolves those again.
-- **The `DT_NEEDED` soname check (spec §16).** kiln's gates catch release and shadowed-file changes,
-  but not a native library in the app whose soname the new base no longer provides.
+- **The `DT_NEEDED` soname check for OCI bases.** Catalog images get it. For an OCI base, kiln's
+  gates catch release and shadowed-file changes, but not a native library in the app whose soname
+  the new base no longer provides.
 - **Multi-platform images.** potter builds one platform per image, and rebase takes those.

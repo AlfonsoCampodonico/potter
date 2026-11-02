@@ -17,8 +17,11 @@ expression: "render(\"python-django\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "python",
-              "version": "3.13"
+              "version": "3.15"
             }
           ]
         },
@@ -93,7 +96,7 @@ expression: "render(\"python-django\")"
             },
             {
               "name": "python",
-              "version": "3.13"
+              "version": "3.15"
             }
           ]
         },
@@ -138,7 +141,7 @@ expression: "render(\"python-django\")"
 # decisions
 app provider = python [detected: requirements.txt]
 app python.package_manager = pip [detected: requirements.txt is present]
-app runtime.python = 3.13 [default]
+app runtime.python = 3.15 [default]
 app port = 8000 [default]
 app process.web = /app/.venv/bin/gunicorn config.wsgi --bind 0.0.0.0:8000 [detected: Django project config]
 app steps.collectstatic = enabled [detected: Django project config]

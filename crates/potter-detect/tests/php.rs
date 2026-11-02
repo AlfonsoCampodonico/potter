@@ -105,7 +105,7 @@ fn unsatisfiable_php() {
     let msg = detect_at(r.path(), &DetectOptions::default()).unwrap_err().to_string();
     assert_eq!(
         msg,
-        "no available php version satisfies composer.json require.php = ^7.4 (available: 8.2, 8.3, 8.4)"
+        "runtime.php: ^7.4 from composer.json require.php is not in the catalog; the catalog has php 8.2, 8.3, 8.4"
     );
 }
 

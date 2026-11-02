@@ -17,6 +17,9 @@ expression: "render(\"bun\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "bun",
               "version": "1"
             }

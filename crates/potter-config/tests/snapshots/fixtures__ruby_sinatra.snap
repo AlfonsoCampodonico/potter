@@ -17,8 +17,11 @@ expression: "render(\"ruby-sinatra\")"
               "name": "os-min"
             },
             {
+              "name": "build-tools"
+            },
+            {
               "name": "ruby",
-              "version": "3.3"
+              "version": "4.0"
             }
           ]
         },
@@ -90,7 +93,7 @@ expression: "render(\"ruby-sinatra\")"
             },
             {
               "name": "ruby",
-              "version": "3.3"
+              "version": "4.0"
             }
           ]
         },
@@ -157,7 +160,7 @@ expression: "render(\"ruby-sinatra\")"
 
 # decisions
 app provider = ruby [detected: Gemfile]
-app runtime.ruby = 3.3 [detected: Gemfile.lock RUBY VERSION = 3.3.6p108]
+app runtime.ruby = 4.0 [detected: Gemfile.lock RUBY VERSION = 4.0.1p0]
 app apt.build = libpq-dev [detected: gems that need system libraries]
 app port = 3000 [default]
 app process.web = rackup [detected: config.ru exists]

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 
 use kiln_oci::media::{self, Compression};
-use kiln_oci::{ContainerConfig, Descriptor, OciError, Platform, ResolvedImage};
+use kiln_oci::{ContainerConfig, Descriptor, ImageConfig, ImageManifest, OciError, Platform, ResolvedImage};
 use kiln_registry::{Client, DockerConfig, Reference, RegistryError};
 use kiln_store::{Digest, Store};
 
@@ -19,6 +19,34 @@ pub struct BaseImage {
 }
 
 impl BaseImage {
+    /// The image `manifest` already in `store`, with every layer there too; `repository` is
+    /// the name it goes by.
+    pub fn local(store: &Store, manifest: &Digest, repository: &str) -> Result<BaseImage, BuildError> {
+        let infra = |e: &dyn std::fmt::Display| BuildError::Infra(format!("the local image {manifest}: {e}"));
+        let bytes = store.read_metadata(manifest).map_err(|e| infra(&e))?;
+        let m: ImageManifest = serde_json::from_slice(&bytes).map_err(|e| infra(&e))?;
+        let bytes = store.read_metadata(&m.config.digest).map_err(|e| infra(&e))?;
+        let config: ImageConfig = serde_json::from_slice(&bytes).map_err(|e| infra(&e))?;
+        if let Some(l) = m.layers.iter().find(|l| !store.has_blob(&l.digest)) {
+            return Err(infra(&format!("its layer {} is not in the store", l.digest)));
+        }
+        Ok(BaseImage {
+            resolved: ResolvedImage {
+                platform: Platform {
+                    architecture: config.architecture.clone(),
+                    os: config.os.clone(),
+                    variant: config.variant.clone(),
+                },
+                manifest_digest: manifest.clone(),
+                config_digest: m.config.digest.clone(),
+                manifest: m,
+                config,
+                ref_name: None,
+            },
+            repository: repository.to_string(),
+        })
+    }
+
     /// The manifest digest (`sha256:...`): the chain's cache root.
     pub fn key_digest(&self) -> String {
         self.resolved.manifest_digest.to_string()

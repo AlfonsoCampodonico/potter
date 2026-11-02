@@ -9,7 +9,8 @@ use kiln_oci::{Descriptor, Platform, media};
 use kiln_registry::DockerConfig;
 use kiln_store::{Digest, Store};
 use potter_cache::{Entry, ExecutorClass, Index, PotterHome, StepInput, Tenant, base_key, step_key};
-use potter_plan::{Base, Chain, Step, Target};
+use potter_catalog::{Arch, Location, Resolution, Verified, fetch_layer, is_php_only, resolve};
+use potter_plan::{Base, CatalogRef, Chain, Step, Target};
 
 use crate::base::{BaseImage, layer_reader, resolve_base};
 use crate::error::{BuildError, io};
@@ -45,9 +46,69 @@ pub struct BuildCtx<'a> {
     pub cache_from: Option<&'a crate::remote::RemoteCache>,
     /// Where sealed steps are published.
     pub cache_to: Option<&'a crate::remote::RemoteCache>,
+    /// The verified catalog, for non-PHP catalog bases (spec §7.2); `None` when no target needs it.
+    pub catalog: Option<&'a CatalogCtx>,
     /// The final layers of the targets built so far, for `copy_from` (spec §9.6 step 2).
     pub deps: BTreeMap<String, Vec<LayerRef>>,
     pub progress: &'a mut dyn FnMut(Progress),
+}
+
+/// The catalog a build resolves its non-PHP catalog bases against: loaded once per invocation.
+#[derive(Debug, Clone)]
+pub struct CatalogCtx {
+    pub verified: Verified,
+}
+
+impl CatalogCtx {
+    /// The verified index at `POTTER_CATALOG` (or the default catalog), or the one `pin` names.
+    pub fn load(store: &Store, home: &PotterHome, pin: Option<&str>, auth: DockerConfig) -> Result<Self, BuildError> {
+        let location = Location::from_env()?;
+        let verified = potter_catalog::load(&location, pin, home.root(), store, auth)?;
+        Ok(CatalogCtx { verified })
+    }
+
+    /// The verified index at `location`, trusting `extra` keys besides the usual ones (the
+    /// catalog driver's in-process key for the layout it is building). `home` keeps the
+    /// location's serial record.
+    pub fn load_at(
+        store: &Store,
+        home: &Path,
+        location: &Location,
+        auth: DockerConfig,
+        extra: &[potter_catalog::TrustedKey],
+    ) -> Result<Self, BuildError> {
+        let verified = potter_catalog::load_trusting(location, None, home, store, auth, extra)?;
+        Ok(CatalogCtx { verified })
+    }
+
+    /// Resolves every catalog base among `bases` for `platform` and fetches each layer, so that an
+    /// unsatisfiable base or a bad layer fails the invocation before any step runs (spec §7.2).
+    /// The chains resolve again later, against the same index and with the layers in the store.
+    pub fn prepare<'b>(
+        &self,
+        store: &Store,
+        bases: impl IntoIterator<Item = &'b Base>,
+        platform: &Platform,
+        auth: DockerConfig,
+    ) -> Result<(), BuildError> {
+        for base in bases {
+            let Base::Catalog { layers } = base else { continue };
+            if !needs_catalog(base) {
+                continue;
+            }
+            let r = resolve(&self.verified, layers, catalog_arch(platform)?)?;
+            for e in &r.entries {
+                fetch_layer(&self.verified, e, store, auth.clone())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `base` is built from the catalog: a catalog base with no PHP-only layer. PHP bases
+/// keep the stopgap until the catalog ships the PHP stack.
+pub fn needs_catalog(base: &Base) -> bool {
+    matches!(base, Base::Catalog { layers } if !layers.iter().any(|r| is_php_only(&r.name)))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +176,8 @@ pub struct ChainState {
     pub cached: usize,
     /// Each layer added on top of the base, in order.
     pub records: Vec<StepRecord>,
+    /// What the catalog resolved the base to, for a composite base.
+    pub catalog: Option<Resolution>,
 }
 
 fn unsupported(what: String, milestone: &'static str) -> BuildError {
@@ -123,7 +186,7 @@ fn unsupported(what: String, milestone: &'static str) -> BuildError {
 
 fn check_base(base: &Base, what: &str) -> Result<(), BuildError> {
     match base {
-        // Catalog bases are lowered onto upstream images until P3 (stopgap.rs).
+        // Catalog bases build on composites, or PHP ones on their stopgap images (lower_base).
         Base::Oci { .. } | Base::Catalog { .. } => Ok(()),
         Base::Stage { .. } => Err(unsupported(
             format!("the stage base of {what}"),
@@ -222,8 +285,81 @@ pub fn run_chain(ctx: &mut BuildCtx, target: &Target, repo_root: &Path) -> Resul
     )
 }
 
-/// Runs `chain` for the target `tname`, whose sources are under `source_root`. A catalog base
-/// is lowered onto its stopgap image and install steps; `apt` steps become installs.
+/// What a chain's base is built from.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LoweredBase<'c> {
+    /// An image in a registry: an OCI base, or a PHP catalog base's stopgap image.
+    Oci { reference: String, digest: Option<String> },
+    /// The composite of these catalog layers.
+    Catalog(&'c [CatalogRef]),
+}
+
+/// `chain`'s base and the steps that run on it. A catalog base with a PHP-only layer is lowered
+/// onto its stopgap image and install steps, with the stopgap's `apt` lowering; any other catalog
+/// base is resolved against the catalog, with no install steps, and its `apt` steps pin a Debian
+/// snapshot (spec §4.3).
+pub(crate) fn lower_base(
+    chain: &Chain,
+    role: crate::stopgap::Role,
+) -> Result<(LoweredBase<'_>, Vec<Step>), BuildError> {
+    Ok(match &chain.base {
+        Base::Oci { reference, digest } => (
+            LoweredBase::Oci {
+                reference: reference.clone(),
+                digest: digest.clone(),
+            },
+            chain.steps.iter().map(crate::stopgap::lower_step).collect(),
+        ),
+        Base::Catalog { layers } if !needs_catalog(&chain.base) => {
+            let lowered = crate::stopgap::lower(layers, role)?;
+            let steps = lowered
+                .steps
+                .into_iter()
+                .chain(chain.steps.iter().map(crate::stopgap::lower_step))
+                .collect();
+            (
+                LoweredBase::Oci {
+                    reference: lowered.reference,
+                    digest: None,
+                },
+                steps,
+            )
+        }
+        Base::Catalog { layers } => (
+            LoweredBase::Catalog(layers),
+            chain.steps.iter().map(crate::apt::lower).collect(),
+        ),
+        Base::Stage { .. } => unreachable!("check_base refuses stages"),
+    })
+}
+
+/// The catalog's name for `platform`'s architecture.
+pub fn catalog_arch(platform: &Platform) -> Result<Arch, BuildError> {
+    match platform.architecture.as_str() {
+        "amd64" | "x86_64" => Ok(Arch::X86_64),
+        "arm64" | "aarch64" => Ok(Arch::Aarch64),
+        other => Err(BuildError::Plan(format!(
+            "the catalog has no layers for the architecture {other}"
+        ))),
+    }
+}
+
+/// The composite base of the catalog layers `refs`: resolved against the build's catalog, each
+/// layer fetched into the store, then merged.
+fn catalog_base(ctx: &BuildCtx, refs: &[CatalogRef]) -> Result<(BaseImage, Resolution), BuildError> {
+    let catalog = ctx
+        .catalog
+        .ok_or_else(|| BuildError::Infra("the catalog was not loaded".into()))?;
+    let r = resolve(&catalog.verified, refs, catalog_arch(&ctx.platform)?)?;
+    for e in &r.entries {
+        fetch_layer(&catalog.verified, e, ctx.store, ctx.auth.clone())?;
+    }
+    let base = crate::composite::composite(ctx.store, ctx.home, &r, &ctx.platform)?;
+    Ok((base, r))
+}
+
+/// Runs `chain` for the target `tname`, whose sources are under `source_root`, on the base
+/// [`lower_base`] makes of it.
 pub fn run_steps(
     ctx: &mut BuildCtx,
     tname: &str,
@@ -251,25 +387,23 @@ pub fn run_steps(
             ));
         }
     }
-    let (reference, digest, prelude) = match &chain.base {
-        Base::Oci { reference, digest } => (reference.clone(), digest.clone(), Vec::new()),
-        Base::Catalog { layers } => {
-            let lowered = crate::stopgap::lower(layers, role)?;
-            (lowered.reference, None, lowered.steps)
+    let (lowered, steps) = lower_base(chain, role)?;
+    let (base, base_ref, resolution) = match lowered {
+        LoweredBase::Oci { reference, digest } => {
+            let base = resolve_base(
+                ctx.store,
+                &reference,
+                digest.as_deref(),
+                &ctx.platform,
+                ctx.auth.clone(),
+            )?;
+            (base, reference, None)
         }
-        Base::Stage { .. } => unreachable!("check_base refuses stages"),
+        LoweredBase::Catalog(refs) => {
+            let (base, r) = catalog_base(ctx, refs)?;
+            (base, format!("potter-catalog@{}", r.index_digest), Some(r))
+        }
     };
-    let steps: Vec<Step> = prelude
-        .into_iter()
-        .chain(chain.steps.iter().map(crate::stopgap::lower_step))
-        .collect();
-    let base = resolve_base(
-        ctx.store,
-        &reference,
-        digest.as_deref(),
-        &ctx.platform,
-        ctx.auth.clone(),
-    )?;
     let mut state = ChainState {
         layers: base
             .layers()
@@ -286,8 +420,9 @@ pub fn run_steps(
         executed: 0,
         cached: 0,
         records: Vec::new(),
-        base_ref: reference.clone(),
+        base_ref,
         base,
+        catalog: resolution,
     };
     // Unpacked directories of the layers, filled in as misses need them.
     let mut lowers: Vec<Option<PathBuf>> = vec![None; state.layers.len()];
@@ -986,6 +1121,7 @@ mod tests {
             cache_from: None,
             cache_to: None,
             deps: BTreeMap::new(),
+            catalog: None,
             progress: &mut progress,
         };
         let copy = Step::CopyFrom {
@@ -1003,6 +1139,351 @@ mod tests {
         let err = run_steps(&mut ctx, "app:run", &chain, dir.path(), crate::stopgap::Role::Run).unwrap_err();
         assert_eq!(err.exit_code(), 2, "{err}");
         assert!(err.to_string().contains("stage"), "{err}");
+    }
+
+    /// A store, a potter home and a build context over them on `platform`, with `catalog`.
+    fn with_ctx<R>(
+        dir: &std::path::Path,
+        platform: &str,
+        catalog: Option<&CatalogCtx>,
+        f: impl FnOnce(&mut BuildCtx) -> R,
+    ) -> R {
+        let store = kiln_store::Store::open(dir.join("kiln")).unwrap();
+        let home = PotterHome::open(dir.join("potter")).unwrap();
+        let tenant = Tenant::local();
+        let index = home.index(&tenant).unwrap();
+        let sandbox = crate::sandboxed::SandboxCtx {
+            potter: "/nonexistent/potter".into(),
+            runs: home.runs(),
+        };
+        let mut progress = |_: Progress| {};
+        let mut ctx = BuildCtx {
+            store: &store,
+            home: &home,
+            tenant: &tenant,
+            index: &index,
+            sandbox: &sandbox,
+            platform: kiln_oci::Platform::parse(platform).unwrap(),
+            no_cache: false,
+            auth: kiln_registry::DockerConfig::anonymous(),
+            executor: ExecutorClass::Ns,
+            backend: None,
+            secrets: &BTreeMap::new(),
+            tenant_key: [0u8; 32],
+            cache_from: None,
+            cache_to: None,
+            deps: BTreeMap::new(),
+            catalog,
+            progress: &mut progress,
+        };
+        f(&mut ctx)
+    }
+
+    /// A catalog in an OCI layout under `dir`, for aarch64: `os-min` (a base with `/bin/sh`)
+    /// and `go` 1.25 over it. Loading checks signatures; resolving and fetching do not.
+    fn test_catalog(dir: &std::path::Path) -> CatalogCtx {
+        use kiln_erofs::testtar::{Opts, TarBuilder};
+        use potter_catalog::{Arch, Entry, Index, Kind, Location, SCHEMA, Verified, write_layout};
+        let root = Opts::default();
+        let mut os = TarBuilder::new();
+        os.dir("bin", &root).file("bin/sh", b"sh", &root.clone().mode(0o755));
+        let mut go = TarBuilder::new();
+        go.dir("usr", &root)
+            .dir("usr/local", &root)
+            .dir("usr/local/go", &root)
+            .dir("usr/local/go/bin", &root)
+            .file("usr/local/go/bin/go", b"go", &root.clone().mode(0o755));
+        let layers_dir = dir.join("layers");
+        std::fs::create_dir_all(&layers_dir).unwrap();
+        let mut entries = Vec::new();
+        let mut layers = Vec::new();
+        for (name, line, kind, tar, path) in [
+            ("os-min", "13", Kind::Base, os.finish(), "/bin"),
+            ("go", "1.25", Kind::Runtime, go.finish(), "/usr/local/go/bin"),
+        ] {
+            let digest = kiln_store::Digest::of(&tar);
+            let file = layers_dir.join(name);
+            std::fs::write(&file, &tar).unwrap();
+            layers.push((
+                Descriptor::new(media::OCI_LAYER_TAR, digest.clone(), tar.len() as u64),
+                file,
+            ));
+            entries.push(Entry {
+                name: name.into(),
+                line: line.into(),
+                version: format!("{line}.0"),
+                arch: Arch::Aarch64,
+                kind,
+                digest: digest.to_string(),
+                diff_id: digest.to_string(),
+                size: tar.len() as u64,
+                media_type: media::OCI_LAYER_TAR.into(),
+                abi: [("os", "debian-13"), ("libc", "glibc-2.41")]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                requires: vec![],
+                conflicts: vec![],
+                env: [("PATH".to_string(), path.to_string())].into(),
+                provides_sonames: vec![],
+                executor: "ns".into(),
+                source: "https://example.test".into(),
+                license: "MIT".into(),
+                supersedes: None,
+                fixes: vec![],
+            });
+        }
+        let index = Index {
+            schema: SCHEMA.into(),
+            serial: 1,
+            created: "2026-11-01T00:00:00Z".into(),
+            entries,
+        };
+        let blob = index.canonical();
+        let layout = dir.join("layout");
+        write_layout(&layout, &blob, "0000000000000000", "unsigned", &layers).unwrap();
+        CatalogCtx {
+            verified: Verified {
+                index,
+                digest: kiln_store::Digest::of(&blob).to_string(),
+                location: Location::Layout(layout),
+            },
+        }
+    }
+
+    fn catalog(refs: &[(&str, Option<&str>)]) -> Base {
+        Base::Catalog {
+            layers: refs.iter().map(|(n, v)| CatalogRef::new(n, *v)).collect(),
+        }
+    }
+
+    fn apt() -> Step {
+        Step::Apt {
+            name: "pkgs".into(),
+            packages: vec!["curl".into()],
+            snapshot: DEFAULT_APT_SNAPSHOT.into(),
+        }
+    }
+
+    #[test]
+    fn php_refs_take_the_stopgap() {
+        let chain = Chain {
+            base: catalog(&[("php", Some("8.4")), ("php-ext-intl", None), ("composer", Some("2"))]),
+            steps: vec![apt()],
+        };
+        assert!(!needs_catalog(&chain.base));
+        let (base, steps) = lower_base(&chain, crate::stopgap::Role::Build).unwrap();
+        let LoweredBase::Oci { reference, digest } = base else {
+            panic!("a PHP base is lowered onto an upstream image: {base:?}")
+        };
+        assert_eq!((reference.as_str(), digest), ("php:8.4-cli-trixie", None));
+        // The stopgap's prelude installs the extension, and its apt lowering carries the snapshot.
+        assert_eq!(steps[0].name(), "catalog-php-extensions");
+        let Some(Step::Run { env, .. }) = steps.last() else {
+            panic!("{steps:?}")
+        };
+        assert_eq!(env["POTTER_APT_SNAPSHOT"], DEFAULT_APT_SNAPSHOT);
+        // One PHP-only ref is enough: such a base is never resolved against the catalog.
+        let mixed = Chain {
+            base: catalog(&[("os-min", None), ("nginx", None)]),
+            steps: vec![],
+        };
+        assert!(!needs_catalog(&mixed.base));
+        let (base, _) = lower_base(&mixed, crate::stopgap::Role::Run).unwrap();
+        assert!(matches!(base, LoweredBase::Oci { .. }), "{base:?}");
+        let oci = Chain {
+            base: oci(),
+            steps: vec![],
+        };
+        assert!(!needs_catalog(&oci.base));
+    }
+
+    #[test]
+    fn catalog_refs_resolve_to_a_composite() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = test_catalog(&dir.path().join("catalog"));
+        let chain = Chain {
+            base: catalog(&[("os-min", None), ("go", Some("1.25"))]),
+            steps: vec![],
+        };
+        assert!(needs_catalog(&chain.base));
+        let (base, steps) = lower_base(&chain, crate::stopgap::Role::Build).unwrap();
+        assert!(
+            matches!(base, LoweredBase::Catalog(refs) if refs.len() == 2),
+            "{base:?}"
+        );
+        assert!(steps.is_empty(), "no prelude steps: {steps:?}");
+        let state = with_ctx(dir.path(), "linux/arm64", Some(&cat), |ctx| {
+            run_steps(ctx, "app", &chain, dir.path(), crate::stopgap::Role::Build)
+        })
+        .unwrap();
+        assert_eq!(state.base.repository, crate::composite::REPOSITORY);
+        assert_eq!(state.base_ref, format!("potter-catalog@{}", cat.verified.digest));
+        let r = state.catalog.as_ref().expect("the resolution is kept");
+        assert_eq!(r.constraints, ["os-min@13", "go@1.25"]);
+        assert_eq!(r.index_digest, cat.verified.digest);
+        assert_eq!(state.layers.len(), 1, "one composite layer");
+        assert_eq!(state.env["PATH"], "/usr/local/go/bin:/bin");
+        assert_eq!((state.workdir.as_str(), state.user.as_str()), ("/", "0:0"));
+
+        // A non-PHP catalog base with no catalog loaded is potter's bug, not the plan's.
+        let err = with_ctx(dir.path(), "linux/arm64", None, |ctx| {
+            run_steps(ctx, "app", &chain, dir.path(), crate::stopgap::Role::Build)
+        })
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 4, "{err}");
+        assert!(err.to_string().contains("the catalog was not loaded"), "{err}");
+    }
+
+    /// A catalog image records the layers a rebase keeps: the export, then the generated files.
+    #[test]
+    fn the_chain_annotation_lists_export_then_files() {
+        use crate::assemble::{ANN_CATALOG_INDEX, ANN_CHAIN, ANN_SONAMES_NEEDED, build_target};
+        let dir = tempfile::tempdir().unwrap();
+        let cat = test_catalog(&dir.path().join("catalog"));
+        let mut t = target(catalog(&[("os-min", None), ("go", Some("1.25"))]), vec![]);
+        t.image.base = catalog(&[("os-min", None)]);
+        t.image.export = vec![Export {
+            path: "/usr/local/go/bin/go".into(),
+            dest: "/app/go".into(),
+            exclude: vec![],
+        }];
+        t.image.files = vec![GeneratedFile {
+            path: "/etc/app.conf".into(),
+            content: "x\n".into(),
+            mode: 0o644,
+        }];
+        let built = with_ctx(dir.path(), "linux/arm64", Some(&cat), |ctx| {
+            build_target(ctx, &t, dir.path(), &[])
+        })
+        .unwrap();
+        let bytes = built_manifest(dir.path(), &built.manifest_digest);
+        let m: kiln_oci::ImageManifest = serde_json::from_slice(&bytes).unwrap();
+        let a = m.annotations.unwrap();
+        let layers: Vec<String> = m.layers.iter().map(|l| l.digest.to_string()).collect();
+        let chain: Vec<String> = serde_json::from_str(&a[ANN_CHAIN]).unwrap();
+        assert_eq!(chain, layers[layers.len() - 2..], "the export, then the files layer");
+        assert_eq!(a[ANN_CATALOG_INDEX], cat.verified.digest);
+        assert_eq!(a[ANN_SONAMES_NEEDED], "[]");
+        assert!(
+            built.bases.is_empty(),
+            "composites are not base images: {:?}",
+            built.bases
+        );
+        assert_eq!(built.catalog.len(), 2, "the build and the run composites");
+        assert_eq!(
+            built.run_catalog.as_ref(),
+            Some(&built.catalog[1]),
+            "the run composite's"
+        );
+    }
+
+    fn built_manifest(dir: &std::path::Path, digest: &kiln_store::Digest) -> Vec<u8> {
+        kiln_store::Store::open(dir.join("kiln"))
+            .unwrap()
+            .read_metadata(digest)
+            .unwrap()
+    }
+
+    #[test]
+    fn unknown_ref_is_a_plan_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = test_catalog(&dir.path().join("catalog"));
+        let run = |base: Base, platform: &str| {
+            let chain = Chain { base, steps: vec![] };
+            with_ctx(dir.path(), platform, Some(&cat), |ctx| {
+                run_steps(ctx, "app", &chain, dir.path(), crate::stopgap::Role::Build)
+            })
+            .unwrap_err()
+        };
+        let err = run(catalog(&[("os-min", None), ("zig", Some("0.14"))]), "linux/arm64");
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("zig"), "{err}");
+        // An architecture the catalog has no name for.
+        let err = run(catalog(&[("os-min", None)]), "linux/riscv64");
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert!(err.to_string().contains("riscv64"), "{err}");
+        // The catalog holds the go layer only for aarch64.
+        let err = run(catalog(&[("os-min", None), ("go", Some("1.25"))]), "linux/amd64");
+        assert_eq!(err.exit_code(), 2, "{err}");
+    }
+
+    #[test]
+    fn prepare_resolves_and_fetches_every_catalog_base_up_front() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = test_catalog(&dir.path().join("catalog"));
+        let store = kiln_store::Store::open(dir.path().join("kiln")).unwrap();
+        let arm = kiln_oci::Platform::parse("linux/arm64").unwrap();
+        let anon = kiln_registry::DockerConfig::anonymous;
+        let build = catalog(&[("os-min", None), ("go", Some("1.25"))]);
+        let php = catalog(&[("php", Some("8.4"))]);
+        cat.prepare(&store, [&build, &php, &oci()], &arm, anon()).unwrap();
+        for e in &cat.verified.index.entries {
+            assert!(
+                store.has_blob(&kiln_store::Digest::parse(&e.digest).unwrap()),
+                "{}",
+                e.name
+            );
+        }
+        // A base the catalog cannot satisfy fails before anything is built, whichever chain it is.
+        let run = catalog(&[("os-min", None), ("zig", Some("0.14"))]);
+        let err = cat.prepare(&store, [&build, &run], &arm, anon()).unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
+        let riscv = kiln_oci::Platform::parse("linux/riscv64").unwrap();
+        assert_eq!(
+            cat.prepare(&store, [&build], &riscv, anon()).unwrap_err().exit_code(),
+            2
+        );
+        // Only PHP and OCI bases: the architecture is never asked about.
+        cat.prepare(&store, [&php, &oci()], &riscv, anon()).unwrap();
+        // A layer whose bytes do not match the index is hostile.
+        let dir = tempfile::tempdir().unwrap();
+        let cat = test_catalog(&dir.path().join("catalog"));
+        let go = cat.verified.index.entries.iter().find(|e| e.name == "go").unwrap();
+        let blob = dir
+            .path()
+            .join("catalog/layout/blobs/sha256")
+            .join(&go.digest["sha256:".len()..]);
+        let mut bytes = std::fs::read(&blob).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&blob, bytes).unwrap();
+        let store = kiln_store::Store::open(dir.path().join("kiln")).unwrap();
+        let err = cat.prepare(&store, [&build], &arm, anon()).unwrap_err();
+        assert_eq!(err.exit_code(), 3, "{err}");
+    }
+
+    #[test]
+    fn apt_step_pins_the_snapshot() {
+        let chain = Chain {
+            base: catalog(&[("os-min", None), ("go", Some("1.25"))]),
+            steps: vec![apt(), run("ok")],
+        };
+        let (_, steps) = lower_base(&chain, crate::stopgap::Role::Build).unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[1], run("ok"));
+        let Step::Run {
+            name,
+            command: Command::Shell(script),
+            network,
+            ..
+        } = &steps[0]
+        else {
+            panic!("{:?}", steps[0])
+        };
+        assert_eq!(name, "pkgs");
+        assert!(network);
+        let snap = DEFAULT_APT_SNAPSHOT;
+        for want in [
+            "/etc/apt/sources.list.d/debian.sources".to_string(),
+            format!("http://snapshot.debian.org/archive/debian/{snap}/"),
+            format!("http://snapshot.debian.org/archive/debian-security/{snap}/"),
+            "Suites: trixie".into(),
+            "apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3 update".into(),
+            "apt-get -o Acquire::Retries=3 install -y --no-install-recommends curl".into(),
+            "rm -rf /var/lib/apt/lists/*".into(),
+        ] {
+            assert!(script.contains(&want), "{want:?} not in {script}");
+        }
     }
 
     #[test]

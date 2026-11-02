@@ -27,23 +27,58 @@ pub enum BuildError {
     StepOutput(String),
     #[error("{0}")]
     Infra(String),
-    /// A rebase that kiln's gates refused: the image needs a rebuild (spec §16).
-    #[error("the rebase is refused, rebuild the image instead: {}", .0.join("; "))]
-    RebaseRefused(Vec<String>),
+    /// A catalog layer failed a check the catalog driver runs on it: an overlap or its smoke
+    /// test (design §6.2).
+    #[error("{0}")]
+    LayerCheck(String),
+    /// A refused rebase: the image needs a rebuild (spec §16).
+    #[error("the rebase is refused, rebuild the image instead: {}", .reasons.join("; "))]
+    RebaseRefused { reasons: Vec<String>, by: RefusedBy },
+}
+
+/// Which gates refused a rebase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedBy {
+    /// kiln's: the new base changes in a way the app could notice (exit 1).
+    Kiln,
+    /// The catalog's (design §8): a line, ABI or soname change, or a record the image lacks (exit 2).
+    Catalog,
 }
 
 impl BuildError {
-    /// The process exit code (spec §11): 1 a step failed or a rebase was refused, 2 the plan or a usage error, 3 a
-    /// sandbox or protocol violation, 4 infrastructure.
+    /// The process exit code (spec §11): 1 a step failed, a catalog layer failed its checks or
+    /// kiln refused a rebase, 2 the plan, a usage error or a catalog gate's refusal, 3 a sandbox
+    /// or protocol violation, 4 infrastructure.
     pub fn exit_code(&self) -> u8 {
         match self {
-            BuildError::StepFailed { .. } | BuildError::StepOutput(_) | BuildError::RebaseRefused(_) => 1,
-            BuildError::SymlinkEscape { .. }
+            BuildError::StepFailed { .. }
+            | BuildError::StepOutput(_)
+            | BuildError::LayerCheck(_)
+            | BuildError::RebaseRefused {
+                by: RefusedBy::Kiln, ..
+            } => 1,
+            BuildError::RebaseRefused {
+                by: RefusedBy::Catalog, ..
+            }
+            | BuildError::SymlinkEscape { .. }
             | BuildError::SpecialFile { .. }
             | BuildError::Unsupported { .. }
             | BuildError::Plan(_) => 2,
             BuildError::Hostile(_) => 3,
             BuildError::Io { .. } | BuildError::Infra(_) => 4,
+        }
+    }
+}
+
+/// Catalog failures keep their exit codes: hostile 3, infrastructure 4, plan and unsatisfiable 2.
+impl From<potter_catalog::CatalogError> for BuildError {
+    fn from(e: potter_catalog::CatalogError) -> Self {
+        use potter_catalog::CatalogError as C;
+        let msg = e.to_string();
+        match e {
+            C::Hostile(_) => BuildError::Hostile(msg),
+            C::Infra(_) => BuildError::Infra(msg),
+            C::Unsatisfied(_) | C::Plan(_) => BuildError::Plan(msg),
         }
     }
 }

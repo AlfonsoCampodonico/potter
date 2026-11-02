@@ -92,6 +92,9 @@ enum Cmd {
         /// Above it the bottom layers merge into one composite, the base's first
         #[arg(long, value_parser = max_layers_arg)]
         max_layers: Option<u32>,
+        /// Resolve catalog bases against this index (sha256:<hex>) instead of the catalog's current one
+        #[arg(long)]
+        catalog_index: Option<String>,
     },
     /// Swap a built image's run base for a patched one without rebuilding it (spec §16)
     Rebase {
@@ -112,6 +115,17 @@ enum Cmd {
         /// Print a JSON summary
         #[arg(long)]
         json: bool,
+        /// Resolve a catalog run base against this index (sha256:<hex>) instead of the catalog's current one
+        #[arg(long)]
+        catalog_index: Option<String>,
+        /// Print the catalog layers a rebase would replace and every gate's verdict, writing nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Inspect the signed runtime catalog
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCmd,
     },
     /// Check a pushed image's SBOM, provenance and signature against a public key (spec §17)
     Verify {
@@ -156,9 +170,87 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum CatalogCmd {
+    /// List the catalog's current layers
+    Ls {
+        /// x86_64 or aarch64 (default: this machine's); ignored with --all
+        #[arg(long)]
+        arch: Option<String>,
+        /// List every architecture and the superseded entries too, ignoring --arch
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the layers, bottom first, and the composite key that constraints resolve to
+    Resolve {
+        /// name or name@line
+        #[arg(required = true)]
+        constraints: Vec<String>,
+        /// x86_64 or aarch64 (default: this machine's)
+        #[arg(long)]
+        arch: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify the index and fetch and re-hash every current layer
+    Verify {
+        /// Verify the index sha256:<hex> instead of the catalog's current one
+        #[arg(long)]
+        catalog_index: Option<String>,
+    },
+    /// List the entries a security advisory id fixes, or the entries around a layer digest
+    Affected {
+        /// An advisory id or sha256:<digest>
+        what: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Build every recipe of a catalog directory into a signed OCI layout (the catalog's CI)
+    #[command(hide = true)]
+    Build {
+        /// One <name>/potter.toml and <name>/layer.toml per layer
+        #[arg(required_unless_present = "merge")]
+        catalog_dir: Option<PathBuf>,
+        /// The OCI layout to write
+        #[arg(long)]
+        out: PathBuf,
+        /// The ed25519 private key (PKCS#8 PEM) that signs the index
+        #[arg(long)]
+        sign_key: PathBuf,
+        /// The catalog this one follows, verified first: <registry ref> or oci-layout:<dir>
+        #[arg(long)]
+        previous: Option<String>,
+        /// Build nothing: merge these layouts, one per architecture and each built with the same
+        /// --previous, into one index one serial above it (repeatable)
+        #[arg(long, value_name = "LAYOUT", conflicts_with = "catalog_dir")]
+        merge: Vec<PathBuf>,
+        /// An ed25519 public key (PEM) trusted for every --merge layout (repeatable)
+        #[arg(long, value_name = "PEM", requires = "merge")]
+        merge_key: Vec<PathBuf>,
+    },
+    /// Verify a catalog layout with the trusted keys, then push its layers and its index
+    #[command(hide = true)]
+    Publish {
+        layout: PathBuf,
+        /// <registry>/<repository>:<tag>
+        registry_ref: String,
+        /// The first publish: a registry that refuses to read the target (401/403) counts as
+        /// holding no catalog yet. An index it does serve must still be followed.
+        #[arg(long)]
+        first: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum KeyCmd {
     /// Write a new P-256 signing key: <dir>/potter.key (0600) and <dir>/potter.pub
-    Generate { dir: PathBuf },
+    Generate {
+        dir: PathBuf,
+        /// Write an ed25519 catalog key instead: <dir>/catalog.key (0600) and <dir>/catalog.pub
+        #[arg(long)]
+        ed25519: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -215,6 +307,7 @@ fn main() -> ExitCode {
             max_layers,
         } => plan(&path, target.as_deref(), json, explain, max_layers),
         Cmd::Detect { path } => detect(&path),
+        Cmd::Catalog { command } => catalog(command),
         Cmd::Rebase {
             image,
             base,
@@ -222,7 +315,18 @@ fn main() -> ExitCode {
             executor,
             tenant,
             json,
-        } => rebase(&image, base.as_deref(), tag.as_deref(), executor, &tenant, json),
+            catalog_index,
+            dry_run,
+        } => rebase(
+            &image,
+            base.as_deref(),
+            tag.as_deref(),
+            executor,
+            &tenant,
+            json,
+            catalog_index.as_deref(),
+            dry_run,
+        ),
         Cmd::Verify {
             image,
             key,
@@ -230,8 +334,8 @@ fn main() -> ExitCode {
             expect_builder,
         } => verify(&image, &key, expect_tenant.as_deref(), expect_builder.as_deref()),
         Cmd::Key {
-            command: KeyCmd::Generate { dir },
-        } => key_generate(&dir),
+            command: KeyCmd::Generate { dir, ed25519 },
+        } => key_generate(&dir, ed25519),
         Cmd::Build {
             path,
             target,
@@ -250,6 +354,7 @@ fn main() -> ExitCode {
             source_revision,
             tenant_key_file,
             max_layers,
+            catalog_index,
         } => {
             let publish = match Publish::check(output.as_deref(), sign_key, builder_id, source_revision, &target) {
                 Ok(p) => p,
@@ -275,6 +380,7 @@ fn main() -> ExitCode {
                 publish.as_ref(),
                 tenant_key,
                 max_layers,
+                catalog_index.as_deref(),
             )
         }
         Cmd::Unpack { blob, media_type, dest } => helper(potter_exec::unpack::unpack_blob(&blob, &media_type, &dest)),
@@ -422,10 +528,19 @@ fn read_tenant_key(path: &Path) -> Result<[u8; 32], (String, u8)> {
     Ok(k)
 }
 
-fn key_generate(dir: &Path) -> ExitCode {
+fn key_generate(dir: &Path, ed25519: bool) -> ExitCode {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let key = potter_supply::sign::SigningKey::generate();
+    let (private, public, names) = if ed25519 {
+        let (private, public) = potter_catalog::generate_pem();
+        (private, public, ("catalog.key", "catalog.pub"))
+    } else {
+        let key = potter_supply::sign::SigningKey::generate();
+        (key.to_pem(), key.verifying_key().to_pem(), ("potter.key", "potter.pub"))
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return fail(&format!("{}: {e}", dir.display()), 4);
+    }
     let write = |name: &str, mode: u32, text: &str| -> Result<(), (String, u8)> {
         let path = dir.join(name);
         let mut f = std::fs::OpenOptions::new()
@@ -440,12 +555,10 @@ fn key_generate(dir: &Path) -> ExitCode {
         f.write_all(text.as_bytes())
             .map_err(|e| (format!("{}: {e}", path.display()), 4))
     };
-    if let Err((e, code)) = write("potter.key", 0o600, &key.to_pem())
-        .and_then(|()| write("potter.pub", 0o644, &key.verifying_key().to_pem()))
-    {
+    if let Err((e, code)) = write(names.0, 0o600, &private).and_then(|()| write(names.1, 0o644, &public)) {
         return fail(&e, code);
     }
-    println!("{}", dir.join("potter.pub").display());
+    println!("{}", dir.join(names.1).display());
     ExitCode::SUCCESS
 }
 
@@ -605,6 +718,36 @@ fn open_homes() -> Result<(kiln_store::Store, potter_cache::PotterHome, PathBuf)
     Ok((store, home, potter))
 }
 
+/// The catalog, loaded only when one of `bases` is built from it: PHP and OCI bases never
+/// fetch it (spec §7.2). With `prepare`, every catalog base is resolved and its layers fetched
+/// now, before any step runs, so that a base the catalog cannot satisfy or a bad layer fails the
+/// build early.
+fn load_catalog<'b>(
+    store: &kiln_store::Store,
+    home: &potter_cache::PotterHome,
+    pin: Option<&str>,
+    bases: impl IntoIterator<Item = &'b potter_plan::Base>,
+    prepare: bool,
+) -> Result<Option<potter_exec::chain::CatalogCtx>, (String, u8)> {
+    let bases: Vec<&potter_plan::Base> = bases.into_iter().collect();
+    if !bases.iter().any(|b| potter_exec::chain::needs_catalog(b)) {
+        if pin.is_some() {
+            eprintln!("warning: --catalog-index is ignored: nothing here builds on the catalog");
+        }
+        return Ok(None);
+    }
+    let failed = |e: potter_exec::BuildError| (e.to_string(), e.exit_code());
+    let auth = kiln_registry::DockerConfig::from_env;
+    let catalog = potter_exec::chain::CatalogCtx::load(store, home, pin, auth()).map_err(failed)?;
+    if prepare {
+        catalog
+            .prepare(store, bases, &kiln_oci::Platform::host(), auth())
+            .map_err(failed)?;
+    }
+    Ok(Some(catalog))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn rebase(
     image: &str,
     base: Option<&str>,
@@ -612,9 +755,12 @@ fn rebase(
     executor: Option<Executor>,
     tenant: &str,
     json: bool,
+    catalog_index: Option<&str>,
+    dry_run: bool,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
-    if let Err(code) = check_executor(executor) {
+    // A dry run runs nothing, so it needs no executor.
+    if let Err(code) = check_executor(executor).or_else(|code| if dry_run { Ok(()) } else { Err(code) }) {
         return code;
     }
     let (store, home, potter) = match open_homes() {
@@ -625,9 +771,13 @@ fn rebase(
         Ok(t) => t,
         Err(e) => return fail(&e.to_string(), 2),
     };
-    let tenant_key = match potter_cache::tenant_key(&home, &tenant) {
-        Ok(k) => k,
-        Err(e) => return fail(&e.to_string(), 4),
+    // A dry run hashes nothing with the tenant's key, so it never makes one.
+    let tenant_key = match dry_run {
+        true => [0; 32],
+        false => match potter_cache::tenant_key(&home, &tenant) {
+            Ok(k) => k,
+            Err(e) => return fail(&e.to_string(), 4),
+        },
     };
     let index = match home.index(&tenant) {
         Ok(i) => i,
@@ -637,9 +787,24 @@ fn rebase(
         potter,
         runs: home.runs(),
     };
-    let _lock = match potter_exec::sandboxed::begin_build(&sandbox, &home) {
-        Ok(l) => l,
-        Err(e) => return fail(&e.to_string(), e.exit_code()),
+    // The run chain the rebase re-runs decides whether the catalog is loaded: an image built
+    // through the stopgap before P3 goes through it again, never the catalog. An image that
+    // cannot be read, or a `--base` the image refuses, is reported by the rebase itself.
+    let chain = potter_exec::rebase::recorded(&store, image)
+        .and_then(|r| potter_exec::rebase::rebase_chain(&r, base))
+        .ok();
+    // No `prepare`: a rebase fetches the new layers only once the line and ABI gates pass, when
+    // its run chain builds the composite, and that is its first step anyway.
+    let catalog = match load_catalog(&store, &home, catalog_index, chain.iter().map(|c| &c.base), false) {
+        Ok(c) => c,
+        Err((e, code)) => return fail(&e, code),
+    };
+    let _lock = match dry_run {
+        true => None,
+        false => match potter_exec::sandboxed::begin_build(&sandbox, &home) {
+            Ok(l) => Some(l),
+            Err(e) => return fail(&e.to_string(), e.exit_code()),
+        },
     };
     let secrets = Default::default();
     let mut progress = |p: Progress| match p {
@@ -672,13 +837,26 @@ fn rebase(
         cache_from: None,
         cache_to: None,
         deps: Default::default(),
+        catalog: catalog.as_ref(),
         progress: &mut progress,
     };
-    let req = potter_exec::rebase::Request { image, base, tag };
+    let req = potter_exec::rebase::Request {
+        image,
+        base,
+        tag,
+        catalog_index,
+    };
+    if dry_run {
+        return match potter_exec::rebase::dry_run(&ctx, &req) {
+            Ok(d) => print_dry_run(image, &d, json),
+            Err(e) => fail(&e.to_string(), e.exit_code()),
+        };
+    }
     let r = match potter_exec::rebase::rebase(&mut ctx, &req) {
         Ok(r) => r,
         Err(e) => return fail(&e.to_string(), e.exit_code()),
     };
+    let replaced: Vec<[&str; 2]> = r.replaced.iter().map(|(o, n)| [o.as_str(), n.as_str()]).collect();
     if json {
         println!(
             "{}",
@@ -694,6 +872,7 @@ fn rebase(
                 "changed": r.changed,
                 "executed": r.executed,
                 "cached": r.cached,
+                "replaced": replaced,
             })
         );
     } else if r.unchanged {
@@ -704,18 +883,85 @@ fn rebase(
             r.base_digest
         );
     } else {
+        // A catalog image names the catalog layers it swapped, never the composite's display name.
+        let replaced = match r.replaced.is_empty() {
+            true => format!("replaced run base {}", r.old_base),
+            false => format!(
+                "replaced catalog layers {}",
+                r.replaced
+                    .iter()
+                    .map(|(o, n)| format!("{o} -> {n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
         println!(
-            "{} {} on {}@{} ({} app layers kept, {} re-derived; replaced run base {})",
+            "{} {} on {}@{} ({} app layers kept, {} re-derived; {replaced})",
             sanitize(r.tag.as_deref().unwrap_or(image)),
             r.digest,
             sanitize(&r.base_ref),
             r.base_digest,
             r.reused,
             r.changed,
-            r.old_base
         );
     }
     ExitCode::SUCCESS
+}
+
+/// `potter rebase --dry-run`: the layers a rebase would replace and every gate's verdict; exit 2
+/// when a catalog gate refuses. kiln's gates need the new run base built, so a dry run cannot
+/// check them.
+fn print_dry_run(image: &str, r: &potter_exec::rebase::DryRun, json: bool) -> ExitCode {
+    const KILN: &str = "not checked: kiln's gates need the new run base built";
+    let refused = r.verdicts.iter().any(|v| !v.refusals.is_empty());
+    if json {
+        let mut gates: Vec<serde_json::Value> = r
+            .verdicts
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "gate": v.gate,
+                    "verdict": if v.refusals.is_empty() { "pass" } else { "refused" },
+                    "reasons": v.refusals,
+                    "provisional": v.provisional,
+                })
+            })
+            .collect();
+        gates.push(serde_json::json!({"gate": "kiln", "verdict": "not checked", "reasons": [KILN]}));
+        let replaced: Vec<[&str; 2]> = r.replaced.iter().map(|(o, n)| [o.as_str(), n.as_str()]).collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "dry_run": true,
+                "digest": r.digest.to_string(),
+                "index": r.index,
+                "replaced": replaced,
+                "gates": gates,
+            })
+        );
+    } else {
+        if r.replaced.is_empty() {
+            println!("{}: the catalog has nothing newer for its run base", sanitize(image));
+        }
+        for (o, n) in &r.replaced {
+            println!("{}: would replace {o} with {n}", sanitize(image));
+        }
+        for v in &r.verdicts {
+            let note = v
+                .provisional
+                .map(|p| format!(" (provisional: {p})"))
+                .unwrap_or_default();
+            match v.refusals.as_slice() {
+                [] => println!("{}: pass{note}", v.gate),
+                reasons => println!("{}: refused{note}: {}", v.gate, sanitize(&reasons.join("; "))),
+            }
+        }
+        println!("kiln: {KILN}");
+    }
+    match refused {
+        true => ExitCode::from(2),
+        false => ExitCode::SUCCESS,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -733,6 +979,7 @@ fn build(
     publish: Option<&Publish>,
     tenant_key_flag: Option<[u8; 32]>,
     max_layers: Option<u32>,
+    catalog_index: Option<&str>,
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
@@ -812,6 +1059,16 @@ fn build(
         Ok(i) => i,
         Err(e) => return fail(&e.to_string(), 4),
     };
+    let catalog = match load_catalog(
+        &store,
+        &home,
+        catalog_index,
+        targets.iter().flat_map(|t| [&t.build.base, &t.image.base]),
+        true,
+    ) {
+        Ok(c) => c,
+        Err((e, code)) => return fail(&e, code),
+    };
     let sandbox = potter_exec::sandboxed::SandboxCtx {
         potter,
         runs: home.runs(),
@@ -866,6 +1123,7 @@ fn build(
         cache_from: cache_from.as_ref(),
         cache_to: cache_to.as_ref(),
         deps: Default::default(),
+        catalog: catalog.as_ref(),
         progress: &mut progress,
     };
     let sign_key = match publish
@@ -995,4 +1253,323 @@ fn detect(path: &Path) -> ExitCode {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => fail(&e.to_string(), 2),
     }
+}
+
+fn catalog_arch(arch: Option<&str>) -> Result<potter_catalog::Arch, (String, u8)> {
+    use potter_catalog::Arch;
+    match arch {
+        Some("x86_64") => Ok(Arch::X86_64),
+        Some("aarch64") => Ok(Arch::Aarch64),
+        Some(other) => Err((format!("--arch {other:?} is neither x86_64 nor aarch64"), 2)),
+        None => potter_exec::chain::catalog_arch(&kiln_oci::Platform::host()).map_err(|e| (e.to_string(), 2)),
+    }
+}
+
+fn catalog(command: CatalogCmd) -> ExitCode {
+    match run_catalog(command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err((e, code)) => fail(&e, code),
+    }
+}
+
+fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
+    use potter_catalog::{Entry, fetch_layer};
+    let catalog_err = |e: potter_catalog::CatalogError| (e.to_string(), e.exit_code());
+    // Building and publishing make a catalog: they never read the configured one.
+    let command = match command {
+        CatalogCmd::Build {
+            catalog_dir,
+            out,
+            sign_key,
+            previous,
+            merge,
+            merge_key,
+        } => {
+            return match catalog_dir {
+                Some(dir) => catalog_build(&dir, &out, &sign_key, previous.as_deref()),
+                None => catalog_merge(&merge, &merge_key, &out, &sign_key, previous.as_deref()),
+            };
+        }
+        CatalogCmd::Publish {
+            layout,
+            registry_ref,
+            first,
+        } => return catalog_publish(&layout, &registry_ref, first),
+        other => other,
+    };
+    let pin = match &command {
+        CatalogCmd::Verify { catalog_index } => catalog_index.as_deref(),
+        _ => None,
+    };
+    // Reject a bad --arch before touching the catalog.
+    let arch = match &command {
+        CatalogCmd::Ls { arch, .. } | CatalogCmd::Resolve { arch, .. } => Some(catalog_arch(arch.as_deref())?),
+        _ => None,
+    };
+    let (store, home, _) = open_homes().map_err(|e| (e, 4))?;
+    let auth = kiln_registry::DockerConfig::from_env;
+    let location = potter_catalog::Location::from_env().map_err(catalog_err)?;
+    let verified = potter_catalog::load(&location, pin, home.root(), &store, auth()).map_err(catalog_err)?;
+    let index = &verified.index;
+    let print = |s: String| print!("{}", sanitize(&s));
+    let to_json = |v: serde_json::Value| format!("{}\n", serde_json::to_string_pretty(&v).expect("json"));
+    match command {
+        CatalogCmd::Ls { all, json, .. } => {
+            let arch = arch.expect("ls has an arch");
+            let successor = |e: &Entry| {
+                index
+                    .entries
+                    .iter()
+                    .find(|n| n.supersedes.as_deref() == Some(&e.digest))
+            };
+            let rows: Vec<(&Entry, Option<&Entry>)> = match all {
+                true => index.entries.iter().map(|e| (e, successor(e))).collect(),
+                false => index.current().filter(|e| e.arch == arch).map(|e| (e, None)).collect(),
+            };
+            if json {
+                let v: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|(e, by)| {
+                        let mut v = serde_json::to_value(e).expect("json");
+                        v["superseded_by"] = by.map_or(serde_json::Value::Null, |n| n.digest.clone().into());
+                        v
+                    })
+                    .collect();
+                print(to_json(v.into()));
+            } else {
+                let rows: Vec<_> = rows
+                    .into_iter()
+                    .map(|(e, by)| {
+                        (
+                            e,
+                            by.map(|n| format!("superseded by {}", render::short_digest(&n.digest))),
+                        )
+                    })
+                    .collect();
+                print(render::catalog_table(&rows));
+            }
+        }
+        CatalogCmd::Resolve { constraints, json, .. } => {
+            let refs = constraints
+                .iter()
+                .map(|c| match c.split_once('@') {
+                    Some((n, l)) if !n.is_empty() && !l.is_empty() => Ok(potter_plan::CatalogRef::new(n, Some(l))),
+                    None if !c.is_empty() => Ok(potter_plan::CatalogRef::new(c, None)),
+                    _ => Err((format!("constraint {c:?} is not name or name@line"), 2)),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let r =
+                potter_catalog::resolve(&verified, &refs, arch.expect("resolve has an arch")).map_err(catalog_err)?;
+            if json {
+                print(to_json(serde_json::json!({
+                    "entries": r.entries,
+                    "constraints": r.constraints,
+                    "index_digest": r.index_digest,
+                    "key": r.composite_key(),
+                })));
+            } else {
+                let rows: Vec<_> = r.entries.iter().map(|e| (e, None)).collect();
+                print(render::catalog_table(&rows));
+                print(format!("key {}\n", r.composite_key()));
+            }
+        }
+        CatalogCmd::Verify { .. } => {
+            let mut n = 0;
+            for e in index.current() {
+                let descriptor = fetch_layer(&verified, e, &store, auth()).map_err(catalog_err)?;
+                // fetch_layer trusts a blob already in the store: hash it again.
+                let hostile = |m: String| (format!("catalog layer {} {}: {m}", e.name, e.digest), 3);
+                let file = store
+                    .open_blob(&descriptor.digest)
+                    .map_err(|err| hostile(err.to_string()))?;
+                let (actual, _) = kiln_store::HashingReader::new(file)
+                    .finish_to_eof()
+                    .map_err(|err| hostile(err.to_string()))?;
+                if actual != descriptor.digest {
+                    return Err(hostile(format!("the stored blob hashes to {actual}")));
+                }
+                n += 1;
+            }
+            println!("ok {n} layers");
+        }
+        CatalogCmd::Build { .. } | CatalogCmd::Publish { .. } => unreachable!("handled above"),
+        CatalogCmd::Affected { what, json } => {
+            let mut rows: Vec<(&Entry, Option<String>)> = Vec::new();
+            if what.starts_with("sha256:") {
+                let target = index
+                    .by_digest(&what)
+                    .ok_or_else(|| (format!("the catalog has no entry with digest {what}"), 2))?;
+                let mut seen = std::collections::BTreeSet::from([target.digest.as_str()]);
+                let mut at = target;
+                while let Some(older) = at.supersedes.as_deref().and_then(|d| index.by_digest(d)) {
+                    if !seen.insert(older.digest.as_str()) {
+                        break;
+                    }
+                    rows.push((older, Some("superseded".into())));
+                    at = older;
+                }
+                let mut frontier = vec![target.digest.as_str()];
+                while let Some(d) = frontier.pop() {
+                    for newer in index.entries.iter().filter(|e| e.supersedes.as_deref() == Some(d)) {
+                        if seen.insert(newer.digest.as_str()) {
+                            rows.push((newer, Some("supersedes".into())));
+                            frontier.push(newer.digest.as_str());
+                        }
+                    }
+                }
+            } else {
+                rows = index
+                    .entries
+                    .iter()
+                    .filter(|e| e.fixes.contains(&what))
+                    .map(|e| (e, None))
+                    .collect();
+            }
+            if json {
+                print(to_json(
+                    rows.iter()
+                        .map(|(e, _)| serde_json::to_value(e).expect("json"))
+                        .collect(),
+                ));
+            } else {
+                print(render::catalog_table(&rows));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `potter catalog build`: every recipe built with the namespace executor in the `catalog`
+/// tenant, checked, and written to `out` signed with `sign_key`. Exit 1 when a layer overlaps
+/// another or fails its smoke test, 2 for a recipe or usage error (a missing or unreadable
+/// `--sign-key` too), 3 when `previous` does not verify, 4 for infrastructure.
+fn catalog_build(catalog_dir: &Path, out: &Path, sign_key: &Path, previous: Option<&str>) -> Result<(), (String, u8)> {
+    use potter_exec::chain::{Progress, StepState};
+    let built = |e: potter_exec::BuildError| (e.to_string(), e.exit_code());
+    let (key, previous) = build_args(sign_key, previous)?;
+    if !cfg!(target_os = "linux") {
+        return Err(("the namespace executor needs Linux".into(), 4));
+    }
+    let (store, home, potter) = open_homes().map_err(|e| (e, 4))?;
+    let sandbox = potter_exec::sandboxed::SandboxCtx {
+        potter,
+        runs: home.runs(),
+    };
+    let _lock = potter_exec::sandboxed::begin_build(&sandbox, &home).map_err(built)?;
+    let mut progress = |p: Progress| match p {
+        Progress::Step { target, step, state } => {
+            let state = match state {
+                StepState::Cached | StepState::Pulled => "cached".to_string(),
+                StepState::Pushed => "pushed".to_string(),
+                StepState::Running => "running".to_string(),
+                StepState::Done { secs } => format!("done ({secs:.1}s)"),
+                StepState::Failed => "failed".to_string(),
+            };
+            eprintln!("[{}] {}: {state}", sanitize(&target), sanitize(&step));
+        }
+        Progress::Warning(w) => eprintln!("warning: {}", sanitize(&w)),
+        Progress::Log { target, step, line } => {
+            eprintln!("[{}/{}] {}", sanitize(&target), sanitize(&step), sanitize(&line))
+        }
+    };
+    let mut parts = potter_exec::catalog_build::Parts {
+        store: &store,
+        home: &home,
+        sandbox: &sandbox,
+        platform: kiln_oci::Platform::host(),
+        auth: kiln_registry::DockerConfig::from_env(),
+        progress: &mut progress,
+    };
+    let req = potter_exec::catalog_build::Request {
+        catalog_dir,
+        out,
+        sign_key: &key,
+        previous: previous.as_ref(),
+        created: now_rfc3339(),
+    };
+    let report = potter_exec::catalog_build::build(&mut parts, &req).map_err(built)?;
+    print_report(&report, out);
+    Ok(())
+}
+
+/// `--sign-key` and `--previous` of `potter catalog build`, read and parsed.
+fn build_args(
+    sign_key: &Path,
+    previous: Option<&str>,
+) -> Result<(potter_catalog::SigningKey, Option<potter_catalog::Location>), (String, u8)> {
+    let pem = std::fs::read_to_string(sign_key).map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
+    let key = potter_catalog::signing_key_from_pem(&pem)
+        .map_err(|e| (format!("--sign-key {}: {e}", sign_key.display()), 2))?;
+    let previous = previous
+        .map(potter_catalog::Location::parse)
+        .transpose()
+        .map_err(|e| (format!("--previous: {e}"), e.exit_code()))?;
+    Ok((key, previous))
+}
+
+/// `potter catalog build --merge`: the per-architecture layouts as one index, signed with
+/// `sign_key`. Needs no sandbox. 2 when the layouts were not built on the same `previous` or
+/// overlap in architecture, 3 when one does not verify, 4 for infrastructure.
+fn catalog_merge(
+    layouts: &[PathBuf],
+    layout_keys: &[PathBuf],
+    out: &Path,
+    sign_key: &Path,
+    previous: Option<&str>,
+) -> Result<(), (String, u8)> {
+    let (key, previous) = build_args(sign_key, previous)?;
+    let layout_keys = layout_keys
+        .iter()
+        .map(|p| {
+            let pem = std::fs::read_to_string(p).map_err(|e| (format!("--merge-key {}: {e}", p.display()), 2))?;
+            potter_catalog::TrustedKey::from_pem(&pem).map_err(|e| (format!("--merge-key {}: {e}", p.display()), 2))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (store, home, _) = open_homes().map_err(|e| (e, 4))?;
+    let req = potter_exec::catalog_build::MergeRequest {
+        layouts,
+        layout_keys: &layout_keys,
+        out,
+        sign_key: &key,
+        previous: previous.as_ref(),
+        created: now_rfc3339(),
+    };
+    let report = potter_exec::catalog_build::merge(&store, home.root(), kiln_registry::DockerConfig::from_env(), &req)
+        .map_err(|e| (e.to_string(), e.exit_code()))?;
+    print_report(&report, out);
+    Ok(())
+}
+
+/// One line per layer of `report`, then the index written to `out`.
+fn print_report(report: &potter_exec::catalog_build::Report, out: &Path) {
+    for (e, outcome) in &report.layers {
+        use potter_exec::catalog_build::assign::Outcome;
+        let what = match outcome {
+            Outcome::New => "new".to_string(),
+            Outcome::Kept => "kept".to_string(),
+            Outcome::Supersedes(old) => format!("supersedes {old}"),
+        };
+        println!("{} {} {} {what}", sanitize(&e.name), sanitize(&e.version), e.digest);
+    }
+    println!(
+        "wrote {}: serial {}, index {}",
+        sanitize(&out.display().to_string()),
+        report.index.serial,
+        report.digest
+    );
+}
+
+/// `potter catalog publish`: 3 when the layout does not verify under the trusted keys, 4 when
+/// the registry fails.
+fn catalog_publish(layout: &Path, registry_ref: &str, first: bool) -> Result<(), (String, u8)> {
+    let to = kiln_registry::Reference::parse(registry_ref).map_err(|e| (format!("{registry_ref}: {e}"), 2))?;
+    let v = potter_exec::catalog_build::publish(layout, &to, kiln_registry::DockerConfig::from_env(), first)
+        .map_err(|e| (e.to_string(), e.exit_code()))?;
+    println!(
+        "pushed {} serial {} index {}",
+        sanitize(registry_ref),
+        v.index.serial,
+        v.digest
+    );
+    Ok(())
 }

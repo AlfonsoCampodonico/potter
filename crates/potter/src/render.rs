@@ -137,6 +137,56 @@ pub fn layer_merges(l: &potter_exec::assemble::LayerReport) -> Option<String> {
     }
 }
 
+/// The catalog entries as a table, each with an optional note after the digest.
+pub fn catalog_table(rows: &[(&potter_catalog::Entry, Option<String>)]) -> String {
+    let arch = |a| match a {
+        potter_catalog::Arch::X86_64 => "x86_64",
+        potter_catalog::Arch::Aarch64 => "aarch64",
+    };
+    let kind = |k| match k {
+        potter_catalog::Kind::Base => "base",
+        potter_catalog::Kind::Runtime => "runtime",
+        potter_catalog::Kind::Extension => "extension",
+        potter_catalog::Kind::Tool => "tool",
+    };
+    let mut cells = vec![["NAME", "LINE", "VERSION", "ARCH", "KIND", "EXECUTOR", "DIGEST", ""].map(String::from)];
+    for (e, note) in rows {
+        cells.push([
+            e.name.clone(),
+            e.line.clone(),
+            e.version.clone(),
+            arch(e.arch).into(),
+            kind(e.kind).into(),
+            e.executor.clone(),
+            short_digest(&e.digest),
+            note.clone().unwrap_or_default(),
+        ]);
+    }
+    let widths: Vec<usize> = (0..7)
+        .map(|i| cells.iter().map(|r| r[i].chars().count()).max().unwrap())
+        .collect();
+    let mut s = String::new();
+    for r in &cells {
+        let mut line = String::new();
+        for (i, w) in widths.iter().enumerate() {
+            write!(line, "{:<w$}  ", r[i]).unwrap();
+        }
+        line.push_str(&r[7]);
+        writeln!(s, "{}", line.trim_end()).unwrap();
+    }
+    s
+}
+
+/// The first 12 hex digits of a `sha256:` digest.
+pub fn short_digest(digest: &str) -> String {
+    digest
+        .strip_prefix("sha256:")
+        .unwrap_or(digest)
+        .chars()
+        .take(12)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use potter_exec::assemble::LayerReport;

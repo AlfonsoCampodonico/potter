@@ -11,11 +11,13 @@ use kiln_oci::{
     ContainerConfig, Descriptor, ImageConfig, ImageManifest, Platform, ResolvedImage, RootFs, canonical_json,
 };
 use kiln_store::{Digest, Store};
+use potter_catalog::Resolution;
 use potter_plan::{Base, Chain, GeneratedFile, Image, Process, Target};
 
 use crate::chain::{BuildCtx, LayerRef, Progress, StepRecord, run_chain, run_steps};
 use crate::error::{BuildError, io};
 use crate::merge::{ExportSpec, export_layer};
+use crate::sonames::Caps;
 use crate::tarball::{Meta, TarWriter, epoch};
 
 /// A built target.
@@ -29,8 +31,15 @@ pub struct Built {
     pub cached: usize,
     /// The layers the build added: the run base's chain, then the build chain.
     pub steps: Vec<StepRecord>,
-    /// The OCI bases it resolved: the build base first.
+    /// The OCI bases it resolved: the build base first. A composite of catalog layers is not
+    /// one: `catalog` describes it.
     pub bases: Vec<BaseRecord>,
+    /// What the catalog resolved its composite bases to: the build base's first, then the run
+    /// base's when it is another composite.
+    pub catalog: Vec<Resolution>,
+    /// The run base's resolution, when it is a composite: the catalog layers in the image (with
+    /// no exports, the build base's). Build-only layers are in `catalog` alone.
+    pub run_catalog: Option<Resolution>,
     /// The OCI image manifest's digest (`digest` is the kiln image's).
     pub manifest_digest: Digest,
     /// How its layers were fitted into the budget.
@@ -178,6 +187,30 @@ impl RunBase {
             base: from.layers().len(),
             name: name.to_string(),
         })
+    }
+
+    /// The run base a run chain ended in: its base and runtime steps' layers, under its env, with
+    /// its catalog layers recorded when it is a composite.
+    pub fn of(store: &Store, run: &crate::chain::ChainState) -> Result<Self, String> {
+        let b = RunBase::new(store, &run.base_ref, &run.base, &run.env, &run.layers)?;
+        match &run.catalog {
+            Some(r) => b.with_catalog(store, r),
+            None => Ok(b),
+        }
+    }
+
+    /// Records the catalog layers `r` resolved to on the run base's own manifest. A rebased image
+    /// keeps the source manifest it was built from, whose `dev.potter.catalog.layers` then names
+    /// the layers it left; its run base's record says which ones it is on now.
+    pub fn with_catalog(mut self, store: &Store, r: &Resolution) -> Result<Self, String> {
+        let digests: Vec<&str> = r.entries.iter().map(|e| e.digest.as_str()).collect();
+        let list = serde_json::to_string(&digests).expect("a string list serialises");
+        let manifest = &mut self.resolved.manifest;
+        manifest.annotations = Some(BTreeMap::from([(ANN_CATALOG_LAYERS.to_string(), list)]));
+        self.resolved.manifest_digest = store
+            .put_bytes(&canonical_json(&self.resolved.manifest))
+            .map_err(|e| e.to_string())?;
+        Ok(self)
     }
 
     pub fn layers(&self) -> usize {
@@ -335,6 +368,66 @@ pub fn image_config(
 pub const ANN_RUN_CHAIN: &str = "dev.potter.run_chain";
 /// The layer budget the image was built with, which a rebase keeps.
 pub const ANN_MAX_LAYERS: &str = "dev.potter.max_layers";
+/// The catalog layers behind a catalog image's run-base composite, bottom first (spec §16).
+pub const ANN_CATALOG_LAYERS: &str = "dev.potter.catalog.layers";
+/// The constraints the run base resolved from, one `name@line` per requested layer.
+pub const ANN_CATALOG_CONSTRAINTS: &str = "dev.potter.catalog.constraints";
+/// The digest of the index the run base resolved against.
+pub const ANN_CATALOG_INDEX: &str = "dev.potter.catalog.index";
+/// The layers potter stacked on the run base that a rebase keeps, bottom first: with an export,
+/// the runtime steps' layers, the export layer and the generated-files layer; without one, every
+/// layer above the base. The init layer is not among them: kiln adds it after the manifest is
+/// written, and a rebase stacks the current one.
+pub const ANN_CHAIN: &str = "dev.potter.chain";
+/// The sonames the app's ELF files need, which a rebase's new run base must provide.
+pub const ANN_SONAMES_NEEDED: &str = "dev.potter.sonames.needed";
+
+/// The annotations of an image whose run base is the composite `run_base` resolved to (spec
+/// §16): its catalog layers, constraints and index, the `chain` of layers above it, and the
+/// sonames those need; `needed` is `None` when they could not all be read, and the annotation is
+/// then left out rather than recorded as none.
+pub fn catalog_annotations(
+    run_base: &Resolution,
+    chain: &[Digest],
+    needed: Option<&BTreeSet<String>>,
+) -> BTreeMap<String, String> {
+    let list = |v: &[String]| serde_json::to_string(v).expect("a string list serialises");
+    let digests: Vec<String> = run_base.entries.iter().map(|e| e.digest.clone()).collect();
+    let chain: Vec<String> = chain.iter().map(ToString::to_string).collect();
+    let mut a = BTreeMap::from([
+        (ANN_CATALOG_LAYERS.to_string(), list(&digests)),
+        (ANN_CATALOG_CONSTRAINTS.to_string(), list(&run_base.constraints)),
+        (ANN_CATALOG_INDEX.to_string(), run_base.index_digest.clone()),
+        (ANN_CHAIN.to_string(), list(&chain)),
+    ]);
+    if let Some(needed) = needed {
+        let needed: Vec<String> = needed.iter().cloned().collect();
+        a.insert(ANN_SONAMES_NEEDED.into(), list(&needed));
+    }
+    a
+}
+
+/// The sonames the ELF files in `layers` need, read within `caps`; `None`, with a warning, when
+/// a cap was hit, so that the image records nothing rather than a partial list.
+pub fn needed_sonames(
+    store: &Store,
+    layers: &[Descriptor],
+    mut caps: Caps,
+    warn: &mut dyn FnMut(String),
+) -> Result<Option<BTreeSet<String>>, BuildError> {
+    let mut needed = BTreeSet::new();
+    for l in layers {
+        let mut reader = crate::base::layer_reader(store, l)?;
+        needed.extend(crate::sonames::needed(&mut reader, &mut caps)?);
+        if let Some(why) = caps.exceeded() {
+            warn(format!(
+                "the ELF files were not all read ({why}): the image records no {ANN_SONAMES_NEEDED}, and potter rebase will refuse it"
+            ));
+            return Ok(None);
+        }
+    }
+    Ok(Some(needed))
+}
 
 /// The image manifest's annotations (spec §5.1, §18): the plan's labels, the listen port, every
 /// process as a JSON argv, and the canonical hash of the target that produced it.
@@ -413,10 +506,19 @@ pub fn build_target(
     let image = &target.image;
     let infra = |e: &dyn std::fmt::Display| BuildError::Infra(format!("target {}: {e}", target.name));
     // The image's base: its own chain (the run base and its runtime steps), or with no exports
-    // the build chain itself, whose run base is the OCI base it was lowered onto.
+    // the build chain itself, whose run base is the OCI base it was lowered onto or its composite.
     let mut steps = Vec::new();
     let mut bases = Vec::new();
-    let (run_base, run_chain, mut layers): (RunBase, Chain, Vec<LayerRef>) = if image.export.is_empty() {
+    // Besides the run base and the image's layers: the catalog resolution of a composite run
+    // base, the layers above the run base a rebase keeps, and those whose ELF files the app needs.
+    let (run_base, run_chain, mut layers, run_catalog, mut kept, app): (
+        RunBase,
+        Chain,
+        Vec<LayerRef>,
+        Option<Resolution>,
+        Vec<LayerRef>,
+        Vec<LayerRef>,
+    ) = if image.export.is_empty() {
         if image.base != target.build.base || !image.runtime_steps.is_empty() {
             return Err(BuildError::Plan(format!(
                 "target {}: an image with its own base or runtime steps needs `export` paths",
@@ -431,15 +533,33 @@ pub fn build_target(
             &chain.base.env(),
             &chain.layers[..n],
         )
+        .and_then(|b| match &chain.catalog {
+            Some(r) => b.with_catalog(ctx.store, r),
+            None => Ok(b),
+        })
         .map_err(|e| infra(&e))?;
-        let run_chain = Chain {
-            base: Base::Oci {
+        // A rebase resolves a composite's catalog base again; any other base is an OCI one.
+        let base = match &chain.catalog {
+            Some(_) => target.build.base.clone(),
+            None => Base::Oci {
                 reference: chain.base_ref.clone(),
                 digest: None,
             },
+        };
+        let run_chain = Chain {
+            base,
             steps: Vec::new(),
         };
-        (run_base, run_chain, chain.layers.clone())
+        // With no export, every layer above the base is the app's.
+        let above = chain.layers[n..].to_vec();
+        (
+            run_base,
+            run_chain,
+            chain.layers.clone(),
+            chain.catalog.clone(),
+            above.clone(),
+            above,
+        )
     } else {
         let run_chain = Chain {
             base: image.base.clone(),
@@ -453,13 +573,14 @@ pub fn build_target(
             crate::stopgap::Role::Run,
         )?;
         let mut layers = run.layers.clone();
-        let run_base =
-            RunBase::new(ctx.store, &run.base_ref, &run.base, &run.env, &run.layers).map_err(|e| infra(&e))?;
+        let run_base = RunBase::of(ctx.store, &run).map_err(|e| infra(&e))?;
         steps.extend(run.records.iter().cloned());
-        bases.push(BaseRecord {
-            reference: run.base_ref.clone(),
-            digest: run.base.resolved.manifest_digest.clone(),
-        });
+        if run.catalog.is_none() {
+            bases.push(BaseRecord {
+                reference: run.base_ref.clone(),
+                digest: run.base.resolved.manifest_digest.clone(),
+            });
+        }
         let store = ctx.store;
         let open: Vec<crate::merge::LayerOpen> = chain
             .layers
@@ -482,8 +603,10 @@ pub fn build_target(
             layer: export.diff_id.clone(),
             class: None,
         });
-        layers.push(export);
-        (run_base, run_chain, layers)
+        let mut kept = run.layers[run.base.layers().len()..].to_vec();
+        kept.push(export.clone());
+        layers.push(export.clone());
+        (run_base, run_chain, layers, run.catalog, kept, vec![export])
     };
     if !image.files.is_empty() {
         let file = files_layer(&image.files, tmp(ctx)?)?;
@@ -495,6 +618,7 @@ pub fn build_target(
             layer: files.diff_id.clone(),
             class: None,
         });
+        kept.push(files.clone());
         layers.push(files);
     }
 
@@ -507,7 +631,7 @@ pub fn build_target(
         layers.iter().map(|l| l.diff_id.clone()).collect(),
     );
     steps.extend(chain.records.iter().cloned());
-    if !bases.iter().any(|b| b.digest == chain.base.resolved.manifest_digest) {
+    if chain.catalog.is_none() && !bases.iter().any(|b| b.digest == chain.base.resolved.manifest_digest) {
         bases.insert(
             0,
             BaseRecord {
@@ -531,6 +655,13 @@ pub fn build_target(
                 potter_plan::canonical_json(&run_chain).map_err(|e| infra(&e))?,
             );
             a.insert(ANN_MAX_LAYERS.into(), image.layer_budget().to_string());
+            if let Some(r) = &run_catalog {
+                let descriptors: Vec<Descriptor> = app.iter().map(|l| l.descriptor.clone()).collect();
+                let mut warn = |w: String| (ctx.progress)(Progress::Warning(format!("target {}: {w}", target.name)));
+                let needed = needed_sonames(ctx.store, &descriptors, Caps::default(), &mut warn)?;
+                let kept: Vec<Digest> = kept.iter().map(|l| l.descriptor.digest.clone()).collect();
+                a.extend(catalog_annotations(r, &kept, needed.as_ref()));
+            }
             a
         }),
     };
@@ -561,6 +692,8 @@ pub fn build_target(
     for t in &tags {
         ctx.store.set_ref(t, &digest).map_err(|e| infra(&e))?;
     }
+    let mut catalog: Vec<Resolution> = chain.catalog.into_iter().collect();
+    catalog.extend(run_catalog.clone().filter(|r| !catalog.contains(r)));
     Ok(Built {
         target: target.name.clone(),
         reference: tags[0].clone(),
@@ -569,6 +702,8 @@ pub fn build_target(
         cached: chain.cached,
         steps,
         bases,
+        catalog,
+        run_catalog,
         manifest_digest,
         layers: layer_report,
     })
@@ -686,5 +821,119 @@ mod tests {
             .config
             .unwrap();
         assert_eq!(c.working_dir.as_deref(), Some("/srv"));
+    }
+
+    fn resolution() -> potter_catalog::Resolution {
+        let entry = |name: &str, n: u8| potter_catalog::Entry {
+            name: name.into(),
+            line: "1".into(),
+            version: "1.0".into(),
+            arch: potter_catalog::Arch::Aarch64,
+            kind: potter_catalog::Kind::Base,
+            digest: format!("sha256:{}", format!("{n:02x}").repeat(32)),
+            diff_id: format!("sha256:{}", format!("{n:02x}").repeat(32)),
+            size: 1,
+            media_type: kiln_oci::media::OCI_LAYER_TAR.into(),
+            abi: BTreeMap::new(),
+            requires: vec![],
+            conflicts: vec![],
+            env: BTreeMap::new(),
+            provides_sonames: vec![],
+            executor: "ns".into(),
+            source: "https://example.test".into(),
+            license: "MIT".into(),
+            supersedes: None,
+            fixes: vec![],
+        };
+        potter_catalog::Resolution {
+            entries: vec![entry("os-min", 1), entry("go", 2)],
+            constraints: vec!["os-min@13".into(), "go@1.27".into()],
+            index_digest: format!("sha256:{}", "ab".repeat(32)),
+        }
+    }
+
+    #[test]
+    fn annotations_name_catalog_layers_index_and_constraints() {
+        let r = resolution();
+        let chain = [Digest::of(b"runtime step"), Digest::of(b"export")];
+        let needed: BTreeSet<String> = ["libc.so.6".to_string()].into();
+        let a = catalog_annotations(&r, &chain, Some(&needed));
+        let json = |k: &str| serde_json::from_str::<serde_json::Value>(&a[k]).unwrap();
+        assert_eq!(
+            json(ANN_CATALOG_LAYERS),
+            serde_json::json!([r.entries[0].digest, r.entries[1].digest]),
+            "bottom first"
+        );
+        assert_eq!(
+            json(ANN_CATALOG_CONSTRAINTS),
+            serde_json::json!(["os-min@13", "go@1.27"])
+        );
+        assert_eq!(a[ANN_CATALOG_INDEX], r.index_digest);
+        assert_eq!(
+            json(ANN_CHAIN),
+            serde_json::json!([chain[0].to_string(), chain[1].to_string()])
+        );
+        assert_eq!(json(ANN_SONAMES_NEEDED), serde_json::json!(["libc.so.6"]));
+        assert_eq!(
+            a.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                ANN_CATALOG_CONSTRAINTS,
+                ANN_CATALOG_INDEX,
+                ANN_CATALOG_LAYERS,
+                ANN_CHAIN,
+                ANN_SONAMES_NEEDED
+            ]
+        );
+        // Sonames that could not be read are left out, not recorded as none.
+        let a = catalog_annotations(&r, &chain, None);
+        assert!(!a.contains_key(ANN_SONAMES_NEEDED), "{a:?}");
+        assert!(a.contains_key(ANN_CATALOG_INDEX));
+    }
+
+    #[test]
+    fn needed_sonames_read_every_given_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let x86 = crate::sonames::fixture::checked_in(crate::sonames::fixture::EM_X86_64);
+        let other = crate::sonames::fixture::shared_object(crate::sonames::fixture::EM_X86_64, &["libz.so.1"], None);
+        let layers = [
+            layer(&store, &[("app/a.so", &x86)]),
+            layer(&store, &[("app/b", &other)]),
+        ];
+        let found = needed_sonames(&store, &layers, crate::sonames::Caps::default(), &mut |w| panic!("{w}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            found,
+            ["libc.so.6", "libssl.so.3", "libz.so.1"].map(String::from).into()
+        );
+    }
+
+    #[test]
+    fn oversized_elf_omits_annotation_with_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let elf = crate::sonames::fixture::checked_in(crate::sonames::fixture::EM_AARCH64);
+        let layers = [layer(&store, &[("app/big.so", &elf)])];
+        let caps = crate::sonames::Caps::new(elf.len() as u64 - 1, crate::sonames::MAX_TOTAL, 10);
+        let mut warnings = Vec::new();
+        let found = needed_sonames(&store, &layers, caps, &mut |w| warnings.push(w)).unwrap();
+        assert_eq!(found, None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("/app/big.so") && warnings[0].contains(ANN_SONAMES_NEEDED),
+            "{warnings:?}"
+        );
+    }
+
+    fn layer(store: &Store, files: &[(&str, &[u8])]) -> Descriptor {
+        let mut w = TarWriter::new(Vec::new());
+        for (path, body) in files {
+            w.file(path, &Meta::root(0o755, 0), body.len() as u64, &mut &body[..])
+                .unwrap();
+        }
+        let tar = w.finish().unwrap();
+        let digest = store.put_bytes(&tar).unwrap();
+        Descriptor::new(OCI_LAYER_TAR, digest, tar.len() as u64)
     }
 }

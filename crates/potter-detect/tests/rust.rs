@@ -8,7 +8,7 @@ fn axum_single_package() {
     let d = detect("rust-axum");
     let t = &d.target;
     assert_eq!(t.provider, "rust");
-    assert_eq!(layers(&t.build.base), ["os-min", "rust@1.99"]);
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "rust@1.99"]);
     assert_eq!(step_names(t), ["deps-inputs", "deps", "source", "build"]);
     assert_eq!(
         includes(t, "deps-inputs"),
@@ -70,11 +70,11 @@ fn toolchain_channel_and_rust_version() {
         base[0],
         base[1],
         base[2],
-        ("rust-toolchain.toml", "[toolchain]\nchannel = \"1.97.0\"\n"),
+        ("rust-toolchain.toml", "[toolchain]\nchannel = \"1.99.0\"\n"),
     ]);
     assert_eq!(
         decision(&detect_at(r.path(), &DetectOptions::default()).unwrap(), "runtime.rust").value,
-        "1.97"
+        "1.99"
     );
     let r = temp_repo(&[base[0], base[1], base[2], ("rust-toolchain", "nightly-2026-09-01\n")]);
     assert!(matches!(

@@ -153,6 +153,7 @@ fn with_ctx<R>(
         cache_from: None,
         cache_to: None,
         deps: BTreeMap::new(),
+        catalog: None,
         progress: &mut progress,
     };
     let r = f(&mut ctx);

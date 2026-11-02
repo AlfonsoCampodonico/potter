@@ -1,0 +1,8 @@
+name = "deno"
+line = "2"
+version = "2.9.8"
+kind = "runtime"
+requires = ["os-min"]
+source = "https://github.com/denoland/deno/releases/tag/v2.9.8"
+license = "MIT"
+smoke = "DENO_DIR=/tmp/deno deno eval '0' && deno --version | grep -q '^deno 2.9.8 '"

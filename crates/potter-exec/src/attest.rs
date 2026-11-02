@@ -9,8 +9,8 @@ use kiln_store::{Digest, Store};
 use potter_cache::ExecutorClass;
 use potter_plan::{Base, Step, Target};
 use potter_supply::lockfiles::{self, Component, LOCKFILES, MAX_COMPONENTS, MAX_LOCKFILE};
-use potter_supply::provenance::{self, ProvStep, ProvenanceInput};
-use potter_supply::sbom::{self, SbomInput};
+use potter_supply::provenance::{self, CatalogLayer, ProvStep, ProvenanceInput};
+use potter_supply::sbom::{self, CatalogPackage, SbomInput};
 use potter_supply::sign::{self, SigningKey, VerifyingKey};
 
 use crate::assemble::Built;
@@ -174,20 +174,47 @@ pub fn attestations(
     let digest = built.manifest_digest.to_string();
     let files = lockfiles(store, &inputs_layers(input.target, built), warn)?;
     let components = components(&files, warn);
-    let catalog: Vec<(String, Option<String>)> = [&input.target.build.base, &input.target.image.base]
-        .into_iter()
-        .filter_map(|b| match b {
-            Base::Catalog { layers } => Some(layers),
-            _ => None,
+    // The catalog layers behind the composites, each once, from the signed index. Provenance
+    // names every one; the SBOM lists only those in the image, the run base's: a go image on
+    // os-min ships no build-tools or go.
+    let mut entries: Vec<&potter_catalog::Entry> = Vec::new();
+    for e in built.catalog.iter().flat_map(|r| &r.entries) {
+        if !entries.iter().any(|x| x.digest == e.digest) {
+            entries.push(e);
+        }
+    }
+    let mut catalog: Vec<CatalogPackage> = built
+        .run_catalog
+        .iter()
+        .flat_map(|r| &r.entries)
+        .map(|e| CatalogPackage {
+            name: e.name.clone(),
+            version: Some(e.version.clone()),
+            source: Some(e.source.clone()),
+            license: Some(e.license.clone()),
         })
-        .flatten()
-        .map(|c| (c.name.clone(), c.version.clone()))
-        .fold(Vec::new(), |mut v, c| {
-            if !v.contains(&c) {
-                v.push(c);
+        .collect();
+    // A stopgap base (PHP) was never resolved, so the plan's refs are all there is to list: the
+    // run base's too, which with no exports is the build base.
+    if let b @ Base::Catalog { layers } = &input.target.image.base
+        && !crate::chain::needs_catalog(b)
+    {
+        for c in layers {
+            let p = CatalogPackage::named(&c.name, c.version.as_deref());
+            if !catalog.contains(&p) {
+                catalog.push(p);
             }
-            v
-        });
+        }
+    }
+    let catalog_layers: Vec<CatalogLayer> = entries
+        .iter()
+        .map(|e| CatalogLayer {
+            digest: e.digest.clone(),
+            name: e.name.clone(),
+            version: e.version.clone(),
+            executor: e.executor.clone(),
+        })
+        .collect();
     let bases: Vec<(String, String)> = built
         .bases
         .iter()
@@ -231,7 +258,8 @@ pub fn attestations(
         source_revision: input.source.as_deref(),
         source_dirty: None,
         tenant: input.tenant,
-        catalog_index: None,
+        catalog_index: built.catalog.first().map(|r| r.index_digest.as_str()),
+        catalog: &catalog_layers,
         bases: &bases,
         steps: &steps,
         started: input.started,
@@ -627,6 +655,8 @@ mod tests {
                 reference: "ruby:3.3".into(),
                 digest: Digest::of(b"base"),
             }],
+            catalog: vec![],
+            run_catalog: None,
             manifest_digest: manifest,
             layers: crate::assemble::LayerReport {
                 max_layers: 10,
@@ -671,6 +701,114 @@ mod tests {
         let byproducts = prov["predicate"]["runDetails"]["byproducts"].to_string();
         assert!(byproducts.contains(r#""executor":"ns""#) && byproducts.contains(r#""executor":"host""#));
         verify_manifest(&vk, &atts[2].bytes, &digest).unwrap();
+    }
+
+    /// A catalog image's attestations describe its composite through the catalog: the index and
+    /// each entry, never the composite as a base image.
+    #[test]
+    fn catalog_bases_are_described_by_the_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut built = built(&store);
+        built.bases.clear();
+        let entry = |name: &str, n: u8, executor: &str| potter_catalog::Entry {
+            name: name.into(),
+            line: "1".into(),
+            version: format!("1.{n}"),
+            arch: potter_catalog::Arch::Aarch64,
+            kind: potter_catalog::Kind::Runtime,
+            digest: format!("sha256:{}", format!("{n:02x}").repeat(32)),
+            diff_id: format!("sha256:{}", format!("{n:02x}").repeat(32)),
+            size: 1,
+            media_type: kiln_oci::media::OCI_LAYER_TAR.into(),
+            abi: Default::default(),
+            requires: vec![],
+            conflicts: vec![],
+            env: Default::default(),
+            provides_sonames: vec![],
+            executor: executor.into(),
+            source: format!("https://example.test/{name}"),
+            license: "MIT".into(),
+            supersedes: None,
+            fixes: vec![],
+        };
+        let index = format!("sha256:{}", "ab".repeat(32));
+        let resolution = |entries| potter_catalog::Resolution {
+            entries,
+            constraints: vec![],
+            index_digest: index.clone(),
+        };
+        // A go-style plan: the build base is os-min, build-tools and go, the run base os-min
+        // alone. They share os-min: it is listed once.
+        built.catalog = vec![
+            resolution(vec![
+                entry("os-min", 1, "vm"),
+                entry("build-tools", 3, "vm"),
+                entry("go", 2, "ns"),
+            ]),
+            resolution(vec![entry("os-min", 1, "vm")]),
+        ];
+        built.run_catalog = Some(built.catalog[1].clone());
+        let mut target = target();
+        target.build.base = Base::Catalog {
+            layers: vec![
+                potter_plan::CatalogRef::new("os-min", None),
+                potter_plan::CatalogRef::new("build-tools", None),
+                potter_plan::CatalogRef::new("go", Some("1")),
+            ],
+        };
+        target.image.base = Base::Catalog {
+            layers: vec![potter_plan::CatalogRef::new("os-min", None)],
+        };
+        built.steps[1].class = Some(ExecutorClass::Vm);
+        let input = AttestInput {
+            target: &target,
+            built: &built,
+            subject_name: "r/acme/app",
+            builder_id: "b",
+            tenant: "acme",
+            source: None,
+            started: "2026-10-11T10:00:00Z",
+            finished: "2026-10-11T10:01:00Z",
+        };
+        let atts = attestations(&store, &input, None, &mut |w| panic!("{w}")).unwrap();
+        let statement = |kind| {
+            let a = atts.iter().find(|a| a.kind == kind).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&a.bytes).unwrap()["predicate"].clone()
+        };
+        let prov = statement(Kind::Provenance);
+        let def = &prov["buildDefinition"];
+        assert_eq!(def["internalParameters"]["catalogIndex"], index.as_str());
+        assert_eq!(def["internalParameters"]["executor"], "ns", "go is ns-built");
+        let deps = def["resolvedDependencies"].as_array().unwrap();
+        let names: Vec<&str> = deps.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            ["os-min", "build-tools", "go"],
+            "provenance names the build layers"
+        );
+        assert_eq!(
+            deps[2]["annotations"],
+            serde_json::json!({"version": "1.2", "executor": "ns"})
+        );
+        assert!(!prov.to_string().contains("potter-catalog@"), "{prov}");
+        let sbom = statement(Kind::Sbom);
+        let catalog: Vec<&serde_json::Value> = sbom["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["SPDXID"].as_str().unwrap().starts_with("SPDXRef-Catalog-"))
+            .collect();
+        // The image holds os-min alone: the build-only layers are not its packages.
+        assert_eq!(catalog.len(), 1, "{sbom}");
+        assert_eq!(catalog[0]["name"], "os-min");
+        assert_eq!(catalog[0]["versionInfo"], "1.1");
+        assert_eq!(catalog[0]["downloadLocation"], "https://example.test/os-min");
+        assert_eq!(catalog[0]["licenseConcluded"], "MIT");
+        assert!(
+            !sbom["packages"].to_string().contains("SPDXRef-Base-"),
+            "a composite is not a base image: {sbom}"
+        );
     }
 
     #[test]

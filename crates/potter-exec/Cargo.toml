@@ -8,12 +8,15 @@ description = "potter's build engine: inputs layers, bases, the namespace execut
 [dependencies]
 flate2 = "1.1.10"
 globset = "0.4.16"
+goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 kiln-erofs = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 potter-cache = { path = "../potter-cache" }
+potter-catalog = { path = "../potter-catalog" }
+potter-config = { path = "../potter-config" }
 potter-plan = { path = "../potter-plan" }
 potter-supply = { path = "../potter-supply" }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -23,6 +26,7 @@ rustix = { version = "1.1.5", features = ["fs", "process"] }
 tar = "0.4.44"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
+toml = "0.9"
 vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "b1baf3a0712209dbe7c7659186ad02b702524d3e" }
 zstd = "0.14.0"
 

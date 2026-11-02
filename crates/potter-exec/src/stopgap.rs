@@ -76,7 +76,7 @@ const PYTHON_TOOLS: [&str; 3] = ["uv", "poetry", "pipenv"];
 const APT_CLEAN: &str = "rm -rf /var/lib/apt/lists/*";
 
 /// A root `Run` step with network access, in `/`.
-fn install(name: &str, script: String) -> Step {
+pub(crate) fn install(name: &str, script: String) -> Step {
     Step::Run {
         name: name.into(),
         command: Command::Shell(script),

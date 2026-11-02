@@ -22,6 +22,17 @@ pub struct ProvStep {
     pub class: Option<String>,
 }
 
+/// A catalog layer the build used, from the signed index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogLayer {
+    /// `sha256:<hex>` of the layer blob.
+    pub digest: String,
+    pub name: String,
+    pub version: String,
+    /// The executor class that built it: `ns` or `vm`.
+    pub executor: String,
+}
+
 pub struct ProvenanceInput<'a> {
     pub subject_name: &'a str,
     /// `sha256:<hex>` of the image manifest.
@@ -36,7 +47,9 @@ pub struct ProvenanceInput<'a> {
     pub source_dirty: Option<bool>,
     pub tenant: &'a str,
     pub catalog_index: Option<&'a str>,
-    /// (reference, `sha256:<hex>`) of each base image.
+    /// The catalog layers behind the image's catalog bases, bottom first.
+    pub catalog: &'a [CatalogLayer],
+    /// (reference, `sha256:<hex>`) of each OCI base image.
     pub bases: &'a [(String, String)],
     pub steps: &'a [ProvStep],
     /// RFC 3339.
@@ -54,11 +67,39 @@ pub fn in_toto(subject_name: &str, subject_digest: &str, predicate_type: &str, p
     })
 }
 
+/// The executor class the image as a whole may claim (P12): `ns` when any layer, a step's or a
+/// catalog layer's, is not `vm`-built; `vm` when they all are; `host` when no layer carries a
+/// class at all. That happens only on an OCI base with no `Run` or `Apt` step: potter built
+/// every layer above the base on the host (inputs, export, files). The OCI base's own layers
+/// are not classed here: no potter executor built them, and they appear as resolved
+/// dependencies by reference and digest.
+pub fn image_executor(steps: &[ProvStep], catalog: &[CatalogLayer]) -> &'static str {
+    let classes: Vec<&str> = steps
+        .iter()
+        .filter_map(|s| s.class.as_deref())
+        .chain(catalog.iter().map(|c| c.executor.as_str()))
+        .collect();
+    if classes.is_empty() {
+        "host"
+    } else if classes.iter().all(|&c| c == "vm") {
+        "vm"
+    } else {
+        "ns"
+    }
+}
+
 pub fn statement(input: &ProvenanceInput) -> Value {
     let dependencies: Vec<Value> = input
         .bases
         .iter()
         .map(|(reference, digest)| json!({"uri": reference, "digest": digest_set(digest)}))
+        .chain(input.catalog.iter().map(|c| {
+            json!({
+                "name": c.name,
+                "digest": digest_set(&c.digest),
+                "annotations": {"version": c.version, "executor": c.executor},
+            })
+        }))
         .collect();
     let byproducts: Vec<Value> = input
         .steps
@@ -84,7 +125,11 @@ pub fn statement(input: &ProvenanceInput) -> Value {
                 "plan": input.plan_hash,
                 "source": {"revision": input.source_revision, "dirty": input.source_dirty},
             },
-            "internalParameters": {"tenant": input.tenant, "catalogIndex": input.catalog_index},
+            "internalParameters": {
+                "tenant": input.tenant,
+                "catalogIndex": input.catalog_index,
+                "executor": image_executor(input.steps, input.catalog),
+            },
             "resolvedDependencies": dependencies,
         },
         "runDetails": {
@@ -128,6 +173,7 @@ mod tests {
             source_dirty: None,
             tenant: "acme",
             catalog_index: None,
+            catalog: &[],
             bases,
             steps,
             started: "2026-10-11T00:00:00Z",
@@ -158,7 +204,7 @@ mod tests {
         );
         assert_eq!(
             def["internalParameters"],
-            json!({"tenant": "acme", "catalogIndex": null})
+            json!({"tenant": "acme", "catalogIndex": null, "executor": "host"})
         );
         assert_eq!(
             def["resolvedDependencies"],
@@ -199,6 +245,63 @@ mod tests {
         assert_eq!(
             s["predicate"]["buildDefinition"]["externalParameters"]["source"],
             json!({"revision": null, "dirty": null})
+        );
+    }
+
+    fn layer(name: &str, executor: &str) -> CatalogLayer {
+        CatalogLayer {
+            digest: format!("sha256:{name}"),
+            name: name.into(),
+            version: "1.0".into(),
+            executor: executor.into(),
+        }
+    }
+
+    #[test]
+    fn provenance_is_ns_with_ns_catalog_layer() {
+        let steps = [
+            step("web", "inputs-app", None, "sha256:1111", None),
+            step("web", "build", Some("ffff"), "sha256:2222", Some("vm")),
+        ];
+        let executor = |catalog: &[CatalogLayer]| {
+            let mut i = input(&[], &steps);
+            i.catalog_index = Some("sha256:9999");
+            i.catalog = catalog;
+            statement(&i)["predicate"]["buildDefinition"]["internalParameters"].clone()
+        };
+        assert_eq!(executor(&[layer("os-min", "vm")])["executor"], "vm");
+        let mixed = executor(&[layer("os-min", "vm"), layer("go", "ns")]);
+        assert_eq!(mixed["executor"], "ns", "{mixed}");
+        assert_eq!(mixed["catalogIndex"], "sha256:9999");
+        // A step's ns layer is enough too, and only host layers claim no executor.
+        let ns_step = [step("web", "build", Some("ffff"), "sha256:2222", Some("ns"))];
+        let s = statement(&input(&[], &ns_step));
+        assert_eq!(
+            s["predicate"]["buildDefinition"]["internalParameters"]["executor"],
+            "ns"
+        );
+        let host = [step("web", "inputs-app", None, "sha256:1111", None)];
+        let s = statement(&input(&[], &host));
+        assert_eq!(
+            s["predicate"]["buildDefinition"]["internalParameters"]["executor"],
+            "host"
+        );
+    }
+
+    #[test]
+    fn catalog_layers_are_resolved_dependencies() {
+        let bases = [("busybox:1".to_string(), "sha256:bbbb".to_string())];
+        let catalog = [layer("os-min", "vm"), layer("go", "ns")];
+        let mut i = input(&bases, &[]);
+        i.catalog = &catalog;
+        let s = statement(&i);
+        assert_eq!(
+            s["predicate"]["buildDefinition"]["resolvedDependencies"],
+            json!([
+                {"uri": "busybox:1", "digest": {"sha256": "bbbb"}},
+                {"name": "os-min", "digest": {"sha256": "os-min"}, "annotations": {"version": "1.0", "executor": "vm"}},
+                {"name": "go", "digest": {"sha256": "go"}, "annotations": {"version": "1.0", "executor": "ns"}},
+            ])
         );
     }
 }

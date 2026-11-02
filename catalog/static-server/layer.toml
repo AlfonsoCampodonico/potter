@@ -1,0 +1,20 @@
+name = "static-server"
+line = "1"
+version = "1.37.0"
+kind = "tool"
+requires = ["os-min"]
+source = "https://snapshot.debian.org/package/busybox/1%3A1.37.0-6/"
+license = "GPL-2.0-only"
+smoke = '''
+set -eu
+mkdir -p /tmp/www && echo served > /tmp/www/index.html
+static-server --root /tmp/www --listen 127.0.0.1:8080 &
+server=$!
+ok=
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if busybox wget -q -O /tmp/got http://127.0.0.1:8080/index.html 2>/dev/null; then ok=1; break; fi
+  sleep 0.5
+done
+kill "$server"
+test -n "$ok" && test "$(cat /tmp/got)" = served
+'''

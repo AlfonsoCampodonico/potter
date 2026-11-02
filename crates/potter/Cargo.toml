@@ -10,6 +10,7 @@ kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6b
 kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a6bd8f6b34e840cffbf2703288295342e31" }
 potter-cache = { path = "../potter-cache" }
+potter-catalog = { path = "../potter-catalog" }
 clap = { version = "4.6.7", features = ["derive"] }
 potter-config = { path = "../potter-config" }
 potter-detect = { path = "../potter-detect" }
@@ -26,5 +27,8 @@ kiln-image = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "b96a9a
 rustix = { version = "1.1.5", features = ["fs"] }
 vmkit = { git = "https://github.com/AlfonsoCampodonico/vmkit", rev = "b1baf3a0712209dbe7c7659186ad02b702524d3e" }
 assert_cmd = "2.2.2"
+zstd = "0.14.0"
 base64 = "0.22"
+ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }
 predicates = "3.1.4"
+sha2 = "0.10.9"

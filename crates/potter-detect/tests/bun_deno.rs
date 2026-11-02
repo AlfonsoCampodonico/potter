@@ -8,7 +8,7 @@ fn bun() {
     let d = detect("bun");
     let t = &d.target;
     assert_eq!(t.provider, "bun");
-    assert_eq!(layers(&t.build.base), ["os-min", "bun@1"]);
+    assert_eq!(layers(&t.build.base), ["os-min", "build-tools", "bun@1"]);
     assert_eq!(step_names(t), ["deps-inputs", "deps", "source", "build"]);
     assert_eq!(includes(t, "deps-inputs"), ["package.json", "bun.lock", "bunfig.toml"]);
     assert_eq!(command(t, "deps"), "bun install --frozen-lockfile");
@@ -83,5 +83,8 @@ fn deno_without_entry_has_no_process() {
 fn deno_version_file() {
     let r = temp_repo(&[("deno.json", "{}"), ("main.ts", ""), (".dvmrc", "1.46\n")]);
     let msg = detect_at(r.path(), &DetectOptions::default()).unwrap_err().to_string();
-    assert!(msg.contains("no available deno version satisfies .dvmrc"), "{msg}");
+    assert!(
+        msg.contains("runtime.deno: 1.46 from .dvmrc is not in the catalog; the catalog has deno 2"),
+        "{msg}"
+    );
 }

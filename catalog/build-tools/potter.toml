@@ -1,0 +1,22 @@
+# build-tools: compilers and the -dev headers native extensions build against (design §4.3),
+# for build chains only. Installed by an `apt` step, so from the snapshot.debian.org date below
+# with the sources potter writes for catalog chains.
+#
+# Beyond the headers the design names, the -dev packages of os-min's other shared libraries
+# (sqlite3, bz2, lzma, ncurses, gmp) are here so python and ruby build their modules against them.
+[apt]
+snapshot = "20261030T000000Z"
+build = [
+  "gcc", "g++", "make", "libc6-dev", "pkg-config", "git", "python3-minimal",
+  "libssl-dev", "zlib1g-dev", "libffi-dev", "libyaml-dev", "libreadline-dev",
+  "libsqlite3-dev", "libbz2-dev", "liblzma-dev", "libncurses-dev", "libgmp-dev",
+]
+
+[target.build-tools]
+provider = "none"
+
+[target.build-tools.base]
+catalog = ["os-min"]
+
+[target.build-tools.process.sh]
+cmd = ["/bin/sh"]
