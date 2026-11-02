@@ -26,6 +26,8 @@ make -j"$(nproc)"
 make install
 cd /
 rm -rf /tmp/ruby /tmp/ruby.tar.gz /tmp/ruby-man /usr/local/lib/libruby-static.a
+# The bundled gems' extension build logs: mkmf.log differs from build to build.
+find /usr/local/lib/ruby/gems -name mkmf.log -delete
 '''
 
 [target.ruby.process.ruby]
