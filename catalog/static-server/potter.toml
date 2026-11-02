@@ -1,0 +1,44 @@
+# static-server: the busybox httpd shim the stopgap installs (`static-server --root DIR --listen
+# ADDR`), on a static busybox build from Debian's busybox-static package at the snapshot below.
+# The binary is unpacked out of the .deb, so the layer holds no dpkg state.
+[target.static-server]
+provider = "none"
+
+[target.static-server.base]
+catalog = ["os-min"]
+
+[target.static-server.steps.install]
+run = '''
+set -eu
+deb=busybox-static_1.37.0-6+b9
+case "$(uname -m)" in
+  x86_64) arch=amd64; sha256=598a3fd92bdafc34cd81196b2952ad36e910e47a4ecf162f8ce5e8e262598e53 ;;
+  aarch64) arch=arm64; sha256=c833be48abfa16bc19c4966ec93e289ff1ce5d2f1476cad3a57bd105378cd15c ;;
+  *) echo "no busybox build for $(uname -m)" >&2; exit 1 ;;
+esac
+/usr/lib/apt/apt-helper -o APT::Sandbox::User=root -o Acquire::Retries=3 \
+  download-file "http://snapshot.debian.org/archive/debian/20261030T000000Z/pool/main/b/busybox/${deb}_$arch.deb" \
+  /tmp/busybox.deb "SHA256:$sha256"
+echo "$sha256  /tmp/busybox.deb" | sha256sum -c -
+mkdir /tmp/busybox
+dpkg-deb --fsys-tarfile /tmp/busybox.deb | tar -x -C /tmp/busybox ./usr/bin/busybox
+install -D -m 755 /tmp/busybox/usr/bin/busybox /usr/local/bin/busybox
+rm -rf /tmp/busybox /tmp/busybox.deb
+cat > /usr/local/bin/static-server <<'POTTER'
+#!/bin/sh
+root=/srv/www
+listen=0.0.0.0:8080
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) root=$2; shift 2 ;;
+    --listen) listen=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+exec busybox httpd -f -h "$root" -p "$listen"
+POTTER
+chmod 755 /usr/local/bin/static-server
+'''
+
+[target.static-server.process.web]
+cmd = ["/usr/local/bin/static-server"]

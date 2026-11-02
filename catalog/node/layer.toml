@@ -1,0 +1,8 @@
+name = "node"
+line = "26"
+version = "26.13.0"
+kind = "runtime"
+requires = ["os-min"]
+source = "https://nodejs.org/dist/v26.13.0/"
+license = "MIT"
+smoke = "node -e 'process.exit(0)' && npm --version"

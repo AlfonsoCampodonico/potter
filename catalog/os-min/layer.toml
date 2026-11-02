@@ -1,0 +1,16 @@
+name = "os-min"
+line = "13"
+version = "13.7"
+kind = "base"
+env = { PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", LANG = "C.UTF-8" }
+source = "https://hub.docker.com/_/debian"
+license = "DFSG-compatible (see /usr/share/doc/*/copyright)"
+smoke = '''
+set -eu
+. /etc/os-release
+test "$ID" = debian && test "$VERSION_ID" = 13 && test "$(cat /etc/debian_version)" = 13.7
+test -f /usr/share/keyrings/debian-archive-keyring.gpg
+test -f /etc/ssl/certs/ca-certificates.crt
+test -f /usr/share/zoneinfo/UTC
+test -z "$(ls -A /etc/apt/sources.list.d)" && test ! -e /etc/apt/sources.list
+'''

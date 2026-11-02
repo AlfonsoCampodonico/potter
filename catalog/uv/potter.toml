@@ -1,0 +1,27 @@
+# uv: the official Linux build from uv's GitHub release, as /usr/local/bin/uv and uvx.
+[target.uv]
+provider = "none"
+
+[target.uv.base]
+catalog = ["os-min", "python@3.15"]
+
+[target.uv.steps.install]
+run = '''
+set -eu
+version=0.13.6
+case "$(uname -m)" in
+  x86_64) build=uv-x86_64-unknown-linux-gnu; sha256=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645 ;;
+  aarch64) build=uv-aarch64-unknown-linux-gnu; sha256=229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d ;;
+  *) echo "no uv build for $(uname -m)" >&2; exit 1 ;;
+esac
+/usr/lib/apt/apt-helper -o APT::Sandbox::User=root -o Acquire::Retries=3 \
+  download-file "https://github.com/astral-sh/uv/releases/download/$version/$build.tar.gz" /tmp/uv.tar.gz "SHA256:$sha256"
+echo "$sha256  /tmp/uv.tar.gz" | sha256sum -c -
+mkdir /tmp/uv
+tar -xzf /tmp/uv.tar.gz -C /tmp/uv --strip-components=1 --no-same-owner
+install -m 755 /tmp/uv/uv /tmp/uv/uvx /usr/local/bin/
+rm -rf /tmp/uv /tmp/uv.tar.gz
+'''
+
+[target.uv.process.uv]
+cmd = ["/usr/local/bin/uv"]

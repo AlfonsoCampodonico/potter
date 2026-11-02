@@ -1,0 +1,26 @@
+name = "go"
+line = "1.27"
+version = "1.27.3"
+kind = "runtime"
+requires = ["os-min"]
+env = { PATH = "/usr/local/go/bin", GOTOOLCHAIN = "local" }
+source = "https://go.dev/dl/"
+license = "BSD-3-Clause"
+smoke_with = ["build-tools"]
+smoke = '''
+set -eu
+go version | grep -q 'go1.27.3 '
+mkdir -p /tmp/cgo && cd /tmp/cgo
+cat > main.go <<'GO'
+package main
+
+// #include <stdio.h>
+// static void hello(void) { puts("hello from cgo"); fflush(stdout); }
+import "C"
+
+func main() { C.hello() }
+GO
+export GOCACHE=/tmp/gocache GOPATH=/tmp/gopath CGO_ENABLED=1
+go build -o /tmp/cgo/hello main.go
+test "$(/tmp/cgo/hello)" = "hello from cgo"
+'''

@@ -428,7 +428,11 @@ fn native_gems_compile_on_the_catalog_ruby_base() {
     let Some(ctx) = Ctx::new().filter(|_| catalog_network()) else {
         return;
     };
-    let repo = catalog_project(&["os-min", "ruby@3.4"], "gem install nio4r --no-document", &[]);
+    let repo = catalog_project(
+        &["os-min", "build-tools", "ruby@4.0"],
+        "gem install nio4r --no-document",
+        &[],
+    );
     let (code, _, stderr) = build(&ctx, repo.path(), &[]);
     assert_eq!(code, 0, "{stderr}");
 }

@@ -1,0 +1,7 @@
+{
+  "name": "e2e-bun",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "start": "bun server.ts" },
+  "dependencies": { "ms": "2.1.3" }
+}

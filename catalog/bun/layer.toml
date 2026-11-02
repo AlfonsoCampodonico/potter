@@ -1,0 +1,8 @@
+name = "bun"
+line = "1"
+version = "1.4.4"
+kind = "runtime"
+requires = ["os-min"]
+source = "https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4"
+license = "MIT"
+smoke = "bun -e '0' && test \"$(bun --version)\" = 1.4.4"

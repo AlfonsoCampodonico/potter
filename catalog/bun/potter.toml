@@ -1,0 +1,30 @@
+# bun: the official Linux build from bun's GitHub release (the baseline build on x86_64, which
+# runs without AVX2), installed as /usr/local/bin/bun. build-tools' perl unpacks the zip.
+[target.bun]
+provider = "none"
+
+[target.bun.base]
+catalog = ["os-min", "build-tools"]
+
+[target.bun.steps.install]
+run = '''
+set -eu
+version=1.4.4
+case "$(uname -m)" in
+  x86_64) build=bun-linux-x64-baseline; sha256=e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76 ;;
+  aarch64) build=bun-linux-aarch64; sha256=baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e ;;
+  *) echo "no bun build for $(uname -m)" >&2; exit 1 ;;
+esac
+/usr/lib/apt/apt-helper -o APT::Sandbox::User=root -o Acquire::Retries=3 \
+  download-file "https://github.com/oven-sh/bun/releases/download/bun-v$version/$build.zip" "/tmp/bun.zip" "SHA256:$sha256"
+echo "$sha256  /tmp/bun.zip" | sha256sum -c -
+mkdir /tmp/bun
+perl -MIO::Uncompress::Unzip=unzip,\$UnzipError -e 'unzip $ARGV[0] => $ARGV[2], Name => $ARGV[1] or die $UnzipError' \
+  /tmp/bun.zip "$build/bun" /tmp/bun/bun
+install -m 755 /tmp/bun/bun /usr/local/bin/bun
+ln -s bun /usr/local/bin/bunx
+rm -rf /tmp/bun /tmp/bun.zip
+'''
+
+[target.bun.process.bun]
+cmd = ["/usr/local/bin/bun"]

@@ -1,0 +1,43 @@
+# python: CPython compiled from python.org's source tarball on build-tools, into /usr/local.
+# It links against os-min's shared libraries (openssl, zlib, libffi, sqlite3, bz2, lzma, ncurses,
+# readline). libpython is shared and found through its rpath; binaries are stripped.
+# The test suites, idle, tkinter and the man pages are left out. Bytecode is compiled with
+# SOURCE_DATE_EPOCH set, so the .pyc files are hash-checked rather than tied to an mtime.
+[target.python]
+provider = "none"
+
+[target.python.base]
+catalog = ["os-min", "build-tools"]
+
+[target.python.steps.install]
+run = '''
+set -eu
+version=3.15.2
+sha256=f74e1db0eabd651cd01e4e2a00201bd41866abe74869ab716f9bf33cbbaa0943
+/usr/lib/apt/apt-helper -o APT::Sandbox::User=root -o Acquire::Retries=3 \
+  download-file "https://www.python.org/ftp/python/$version/Python-$version.tgz" /tmp/python.tgz "SHA256:$sha256"
+echo "$sha256  /tmp/python.tgz" | sha256sum -c -
+mkdir /tmp/python
+tar -xzf /tmp/python.tgz -C /tmp/python --strip-components=1 --no-same-owner
+cd /tmp/python
+export SOURCE_DATE_EPOCH=0
+./configure --prefix=/usr/local --mandir=/tmp/python-man --enable-shared \
+  --enable-loadable-sqlite-extensions --with-ensurepip=install \
+  LDFLAGS="-Wl,--strip-all -Wl,-rpath,/usr/local/lib"
+make -j"$(nproc)"
+make install
+cd /
+rm -rf /tmp/python /tmp/python.tgz /tmp/python-man
+find /usr/local/lib/python3.15 -depth -type d \
+  \( -name test -o -name tests -o -name idle_test -o -name idlelib -o -name tkinter -o -name turtledemo \) \
+  -exec rm -rf {} +
+rm -f /usr/local/bin/idle3 /usr/local/bin/idle3.15 /usr/local/lib/libpython3.15.a \
+  /usr/local/lib/python3.15/config-3.15-*/libpython3.15.a
+for name in idle pip pydoc python python-config; do
+  test -e "/usr/local/bin/${name}3" && ln -s "${name}3" "/usr/local/bin/$name"
+done
+true
+'''
+
+[target.python.process.python]
+cmd = ["/usr/local/bin/python3"]

@@ -1,0 +1,32 @@
+# ruby: compiled from the official source tarball on build-tools, into /usr/local, with bundler
+# (a default gem). It links against os-min's shared libraries (openssl, zlib, libffi, libyaml,
+# gmp); libruby is shared and found through ruby's default rpath. No rdoc/ri, no man pages,
+# no debug info.
+[target.ruby]
+provider = "none"
+
+[target.ruby.base]
+catalog = ["os-min", "build-tools"]
+
+[target.ruby.steps.install]
+run = '''
+set -eu
+version=4.0.9
+sha256=c35350682ff050b79702d57ade4516e7336063f510155d19fb2fb5b3f3909511
+/usr/lib/apt/apt-helper -o APT::Sandbox::User=root -o Acquire::Retries=3 \
+  download-file "https://cache.ruby-lang.org/pub/ruby/4.0/ruby-$version.tar.gz" /tmp/ruby.tar.gz "SHA256:$sha256"
+echo "$sha256  /tmp/ruby.tar.gz" | sha256sum -c -
+mkdir /tmp/ruby
+tar -xzf /tmp/ruby.tar.gz -C /tmp/ruby --strip-components=1 --no-same-owner
+cd /tmp/ruby
+export SOURCE_DATE_EPOCH=0
+./configure --prefix=/usr/local --mandir=/tmp/ruby-man --enable-shared --disable-install-doc \
+  debugflags=-g0
+make -j"$(nproc)"
+make install
+cd /
+rm -rf /tmp/ruby /tmp/ruby.tar.gz /tmp/ruby-man /usr/local/lib/libruby-static.a
+'''
+
+[target.ruby.process.ruby]
+cmd = ["/usr/local/bin/ruby"]

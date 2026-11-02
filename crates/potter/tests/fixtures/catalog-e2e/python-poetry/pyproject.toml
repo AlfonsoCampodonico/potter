@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "e2e-poetry"
+version = "0.1.0"
+description = ""
+authors = []
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.15"
+flask = "^3.1"
+gunicorn = "^23.0"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"

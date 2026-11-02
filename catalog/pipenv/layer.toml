@@ -1,0 +1,9 @@
+name = "pipenv"
+line = "2026"
+version = "2026.10.4"
+kind = "tool"
+requires = ["python@3.15"]
+abi = { python-abi = "cp315" }
+source = "https://pypi.org/project/pipenv/2026.10.4/"
+license = "MIT"
+smoke = "pipenv --version && pipenv --version | grep -q 'version 2026.10.4'"

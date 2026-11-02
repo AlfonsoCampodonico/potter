@@ -1,0 +1,9 @@
+name = "poetry"
+line = "2"
+version = "2.5.1"
+kind = "tool"
+requires = ["python@3.15"]
+abi = { python-abi = "cp315" }
+source = "https://pypi.org/project/poetry/2.5.1/"
+license = "MIT"
+smoke = "poetry --version && poetry --version | grep -q 'version 2.5.1'"

@@ -1,0 +1,14 @@
+name = "build-tools"
+line = "13"
+version = "13.7"
+kind = "tool"
+requires = ["os-min"]
+source = "https://snapshot.debian.org/archive/debian/20261030T000000Z/"
+license = "DFSG-compatible (see /usr/share/doc/*/copyright)"
+smoke = '''
+set -eu
+printf '#include <stdio.h>\n#include <openssl/ssl.h>\n#include <zlib.h>\nint main(void){puts(zlibVersion());return 0;}\n' > /tmp/t.c
+cc /tmp/t.c -o /tmp/t -lssl -lcrypto -lz && /tmp/t
+pkg-config --exists openssl zlib libffi yaml-0.1 readline sqlite3
+make --version >/dev/null && git --version && python3 --version
+'''

@@ -1,0 +1,26 @@
+# go: the official Linux tarball from go.dev, unpacked to /usr/local/go.
+[target.go]
+provider = "none"
+
+[target.go.base]
+catalog = ["os-min"]
+
+[target.go.steps.install]
+run = '''
+set -eu
+version=1.27.3
+case "$(uname -m)" in
+  x86_64) arch=amd64; sha256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;;
+  aarch64) arch=arm64; sha256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;;
+  *) echo "no go build for $(uname -m)" >&2; exit 1 ;;
+esac
+file=go$version.linux-$arch.tar.gz
+/usr/lib/apt/apt-helper -o APT::Sandbox::User=root -o Acquire::Retries=3 \
+  download-file "https://dl.google.com/go/$file" "/tmp/$file" "SHA256:$sha256"
+echo "$sha256  /tmp/$file" | sha256sum -c -
+tar -xzf "/tmp/$file" -C /usr/local --no-same-owner
+rm -f "/tmp/$file"
+'''
+
+[target.go.process.go]
+cmd = ["/usr/local/go/bin/go"]
