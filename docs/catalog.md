@@ -132,8 +132,8 @@ fails if one of them is not an ed25519 public-key PEM.
 
 1. Generate the new key, commit its `.pub` under `crates/potter-catalog/keys/` next to the old
    one, and release potter (release N). Both keys are trusted.
-2. Replace the `catalog` environment's `POTTER_CATALOG_KEY` secret with the new private key. The next publish is signed
-   with it, and release N verifies it.
+2. Replace the `catalog` environment's `POTTER_CATALOG_SIGNING_KEY` secret with the new private
+   key. The next publish is signed with it, and release N verifies it.
 3. In release N+1, remove the old `.pub`. Releases before N do not trust the new key, so they
    stop verifying the catalog once it is signed with it: users upgrade to N or later.
 
@@ -165,9 +165,12 @@ fixes = ["CVE-2026-12345", "DSA-6001-1"]
 ```
 
 `potter catalog build` copies them onto the entry that supersedes the old one (a layer with no
-entry to supersede drops them); `potter catalog affected CVE-2026-12345` lists it. An image whose `dev.potter.catalog.layers` annotation names the
-superseded digest is affected, and `potter rebase` moves it onto the new entry (see
-[rebase.md](rebase.md#catalog-images)). Clear the list on the next bump.
+entry to supersede drops them); `potter catalog affected CVE-2026-12345` lists it. An image whose
+`dev.potter.catalog.layers` annotation names the superseded digest is affected, and
+`potter rebase` moves it onto the new entry (see [rebase.md](rebase.md#catalog-images)). After a
+rebase the image's own `dev.potter.catalog.layers` is stale (it still names the layers it was
+built on): read the record on its run base instead, or the rebase's `replaced` output. Clear the
+list on the next bump.
 
 ## Maintainers: building and publishing
 
@@ -177,7 +180,7 @@ needs Linux and the sandbox set up as for `potter build --executor ns`.
 ```sh
 potter catalog build CATALOG_DIR --out LAYOUT --sign-key KEY [--previous REF]
 potter catalog build --merge LAYOUT --merge-key PUB ... --out LAYOUT --sign-key KEY [--previous REF]
-potter catalog publish LAYOUT REGISTRY/REPOSITORY:TAG
+potter catalog publish LAYOUT REGISTRY/REPOSITORY:TAG [--first]
 ```
 
 - **`build`** builds every recipe under `CATALOG_DIR` in dependency order with the namespace
@@ -202,7 +205,11 @@ potter catalog publish LAYOUT REGISTRY/REPOSITORY:TAG
   serial, and every entry it lists still listed, in order. A layout that would roll the target
   back or drop entries is refused (exit 2); build it with `--previous` on the target instead.
   Then it pushes the layers, and the index last. Registry credentials come from the Docker config
-  (`DOCKER_CONFIG` or `~/.docker`).
+  (`DOCKER_CONFIG` or `~/.docker`). A target the registry refuses to read (401/403) is exit 4,
+  except with **`--first`**, for the very first publish: ghcr.io answers a read of a package that
+  does not exist yet with 401/403 rather than 404, so under `--first` a 401, 403 or 404 means
+  there is no index yet. An index the target does serve must still be followed, so `--first`
+  never replaces a published catalog; any other error stays exit 4.
 
 Locally, with a throwaway key:
 
@@ -224,21 +231,32 @@ with the same sandbox setup as the main workflow's sandbox job.
   itself: each architecture builds
   every layer into a layout signed with a key made for the job, which covers the overlap check
   and the smoke tests, then runs the agreement test and the end-to-end tests
-  (`POTTER_TEST_CATALOG=1`) on that layout. Nothing is published.
+  (`POTTER_TEST_CATALOG=1`) on that layout. It then builds every layer once more with
+  `--previous oci-layout:` the first layout and fails unless every layer is `kept`: a recipe
+  whose layer is not byte-reproducible would otherwise supersede itself on every push to `main`.
+  Nothing is published.
 - **Pushes to `main`** touching `catalog/**`, and **manual runs**: each architecture builds with
   `--previous ghcr.io/alfonsocampodonico/potter-catalog:index` and a throwaway key. On `main`
   only, each hands its layout and public key to the publish job; a manual run from another
   branch builds and stops there. The publish job alone uses the `catalog` environment (which
   holds the signing secret and only `main` may deploy to) and `packages: write`: it merges the
   two layouts with `build --merge` (one serial bump), signs the result with the
-  `POTTER_CATALOG_KEY` secret, and runs `potter catalog publish` with the job's `GITHUB_TOKEN`.
-  One publish runs at a time. A manual run with `first` set builds without `--previous`, for the
-  very first publish; it stops before merging when the `index` tag already exists, and
-  `publish` would refuse it anyway.
+  `POTTER_CATALOG_SIGNING_KEY` secret, and runs `potter catalog publish` with the job's
+  `GITHUB_TOKEN`. One publish runs at a time. A manual run with `first` set builds without
+  `--previous` and publishes with `--first`, for the very first publish; it stops before merging
+  when the `index` tag already exists, and `publish` would refuse it anyway.
 
 ## Setup
 
-Done once by the repository owner.
+Done once by the repository owner, right after the catalog first lands on `main`. Until it is
+done, two things fail, by design:
+
+- The `catalog` workflow's push run on that merge (and on any later push to `main` touching
+  `catalog/**`) fails with exit 4: it builds with `--previous` on an `index` tag that does not
+  exist yet. Step 4 is what creates it.
+- Every non-PHP `potter build` from `main` fails closed: there is no trusted catalog key
+  compiled in (step 3) and no published catalog to fetch (steps 4 and 5). PHP projects do not use
+  the catalog and build as before.
 
 1. Make the signing key, on a trusted machine:
 
@@ -248,11 +266,13 @@ Done once by the repository owner.
 
 2. Create the GitHub environment `catalog` (Settings, Environments) with a deployment branch
    rule that allows `main` only. Add the private key as that environment's secret
-   `POTTER_CATALOG_KEY`, not as a repository secret, then delete the local copy:
+   `POTTER_CATALOG_SIGNING_KEY`, not as a repository secret, then delete the local copy:
 
    ```sh
-   gh secret set POTTER_CATALOG_KEY --env catalog < ./catalog-key/catalog.key
+   gh secret set POTTER_CATALOG_SIGNING_KEY --env catalog < ./catalog-key/catalog.key
    ```
+
+   (Not `POTTER_CATALOG_KEY`: that environment variable is a path to a trusted public key.)
 
 3. Commit the public key as `crates/potter-catalog/keys/catalog.pub`. potter builds from then on
    trust it.
