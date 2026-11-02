@@ -235,6 +235,10 @@ enum CatalogCmd {
         layout: PathBuf,
         /// <registry>/<repository>:<tag>
         registry_ref: String,
+        /// The first publish: a registry that refuses to read the target (401/403) counts as
+        /// holding no catalog yet. An index it does serve must still be followed.
+        #[arg(long)]
+        first: bool,
     },
 }
 
@@ -1286,7 +1290,11 @@ fn run_catalog(command: CatalogCmd) -> Result<(), (String, u8)> {
                 None => catalog_merge(&merge, &merge_key, &out, &sign_key, previous.as_deref()),
             };
         }
-        CatalogCmd::Publish { layout, registry_ref } => return catalog_publish(&layout, &registry_ref),
+        CatalogCmd::Publish {
+            layout,
+            registry_ref,
+            first,
+        } => return catalog_publish(&layout, &registry_ref, first),
         other => other,
     };
     let pin = match &command {
@@ -1553,9 +1561,9 @@ fn print_report(report: &potter_exec::catalog_build::Report, out: &Path) {
 
 /// `potter catalog publish`: 3 when the layout does not verify under the trusted keys, 4 when
 /// the registry fails.
-fn catalog_publish(layout: &Path, registry_ref: &str) -> Result<(), (String, u8)> {
+fn catalog_publish(layout: &Path, registry_ref: &str, first: bool) -> Result<(), (String, u8)> {
     let to = kiln_registry::Reference::parse(registry_ref).map_err(|e| (format!("{registry_ref}: {e}"), 2))?;
-    let v = potter_exec::catalog_build::publish(layout, &to, kiln_registry::DockerConfig::from_env())
+    let v = potter_exec::catalog_build::publish(layout, &to, kiln_registry::DockerConfig::from_env(), first)
         .map_err(|e| (e.to_string(), e.exit_code()))?;
     println!(
         "pushed {} serial {} index {}",

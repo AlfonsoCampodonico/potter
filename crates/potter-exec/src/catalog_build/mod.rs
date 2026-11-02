@@ -716,8 +716,10 @@ fn read_os_abi(store: &Store, layers: &[LayerRef]) -> Result<[(String, String); 
 
 /// `potter catalog publish`: verifies the layout at `layout` with the trusted keys, checks it
 /// holds every current layer and follows the index already at `to` (if any), then pushes the
-/// layers and the index to `to`.
-pub fn publish(layout: &Path, to: &Reference, auth: DockerConfig) -> Result<Verified, BuildError> {
+/// layers and the index to `to`. With `first`, a registry that refuses to read `to` (401/403)
+/// counts as holding no index yet, as ghcr answers for a package that does not exist; an index
+/// it does serve must still be followed, so `first` never replaces a published catalog.
+pub fn publish(layout: &Path, to: &Reference, auth: DockerConfig, first: bool) -> Result<Verified, BuildError> {
     // Verifying writes the index blob and a serial record: into a scratch store and home, not
     // the user's.
     let scratch = tempfile::tempdir().map_err(io("creating a scratch store"))?;
@@ -731,7 +733,7 @@ pub fn publish(layout: &Path, to: &Reference, auth: DockerConfig) -> Result<Veri
     )?;
     // The index already published there must verify, and the new one must follow it: a higher
     // serial, and every entry it lists still listed. Otherwise a publish could roll it back.
-    if potter_catalog::exists(to, auth.clone())? {
+    if potter_catalog::exists(to, auth.clone(), first)? {
         let current = potter_catalog::load(
             &Location::Registry(to.clone()),
             None,

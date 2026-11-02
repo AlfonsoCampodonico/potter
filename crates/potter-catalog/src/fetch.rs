@@ -370,13 +370,17 @@ fn write_serial(loc: &Location, path: &Path, serial: u64) -> Result<(), CatalogE
     Ok(())
 }
 
-/// Whether the registry has a manifest at `to`: false only when it answers that there is none.
-pub fn exists(to: &Reference, auth: DockerConfig) -> Result<bool, CatalogError> {
+/// Whether the registry has a manifest at `to`: false only when it answers that there is none,
+/// or, with `denied_is_absent`, when it refuses the read (401/403). Some registries (ghcr) answer
+/// so for a package that does not exist yet, so a first publish needs it; anything else stays an
+/// error.
+pub fn exists(to: &Reference, auth: DockerConfig, denied_is_absent: bool) -> Result<bool, CatalogError> {
     let loc = Location::Registry(to.clone());
     let client = Client::new(to.registry(), auth).map_err(|e| from_registry(&loc, e))?;
     match client.get_manifest(to.repository(), &to.target()) {
         Ok(_) => Ok(true),
         Err(RegistryError::NotFound { .. }) => Ok(false),
+        Err(RegistryError::Unauthorized { .. }) if denied_is_absent => Ok(false),
         Err(e) => Err(from_registry(&loc, e)),
     }
 }

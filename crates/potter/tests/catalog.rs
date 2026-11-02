@@ -350,6 +350,115 @@ fn potter_env(home: &Path, args: &[&str], env: &[(&str, &Path)]) -> (i32, String
     )
 }
 
+/// A proxy in front of `backend` that refuses (with `status`) every read of the manifest at
+/// `/v2/<repo>/manifests/<tag>` until a manifest has been put there, as ghcr answers a read of a
+/// package that does not exist yet with 401/403 "denied" rather than 404. Everything else is
+/// passed through. Returns the proxy's host:port.
+fn deny_until_pushed(backend: String, manifest: String, status: u16) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let pushed = Arc::new(AtomicBool::new(false));
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(mut client) = client else { continue };
+            let (backend, manifest, pushed) = (backend.clone(), manifest.clone(), pushed.clone());
+            std::thread::spawn(move || {
+                // The request line and headers; the body (if any) is piped through below.
+                let mut reader = BufReader::new(client.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    head.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut words = head.split_whitespace();
+                let (method, path) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+                if path == manifest {
+                    if matches!(method, "GET" | "HEAD") && !pushed.load(Ordering::SeqCst) {
+                        let body =
+                            r#"{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}"#;
+                        let reply = format!(
+                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            if method == "HEAD" { "" } else { body }
+                        );
+                        let _ = client.write_all(reply.as_bytes());
+                        return;
+                    }
+                    if method == "PUT" {
+                        pushed.store(true, Ordering::SeqCst);
+                    }
+                }
+                let mut upstream = TcpStream::connect(&backend).unwrap();
+                upstream.write_all(head.as_bytes()).unwrap();
+                upstream.write_all(reader.buffer()).unwrap();
+                let mut to_upstream = upstream.try_clone().unwrap();
+                let mut from_client = client.try_clone().unwrap();
+                std::thread::spawn(move || std::io::copy(&mut from_client, &mut to_upstream));
+                let _ = std::io::copy(&mut upstream, &mut client);
+                let _ = client.shutdown(std::net::Shutdown::Both);
+            });
+        }
+    });
+    host
+}
+
+/// `potter catalog publish --first`: a target the registry refuses to read (401/403, ghcr's
+/// answer for a package that does not exist yet) counts as empty, so the very first publish
+/// goes through; without `--first` that refusal is exit 4. A target that does serve an index is
+/// still only replaced by a layout that follows it.
+#[test]
+fn publish_first_takes_a_denied_target() {
+    use kiln_registry::testregistry::{Config, TestRegistry};
+    use potter_catalog::Arch;
+    let mut l = Layouts::new();
+    let (key, public) = l.key("catalog");
+    let go = l.entry("go", Arch::X86_64, "go");
+    let first = l.write("first", 1, vec![go.clone()], &key);
+    let trust = [("POTTER_CATALOG_KEY", public.as_path())];
+    for status in [401, 403] {
+        let reg = TestRegistry::start(Config::default());
+        let proxy = deny_until_pushed(reg.host(), "/v2/acme/catalog/manifests/index".into(), status);
+        let to = format!("{proxy}/acme/catalog:index");
+        let home = l.dir.path().join(format!("home-{status}"));
+        let publish = |layout: &Path, extra: &[&str]| {
+            let mut args = vec!["catalog", "publish", layout.to_str().unwrap(), &to];
+            args.extend_from_slice(extra);
+            potter_env(&home, &args, &trust)
+        };
+
+        // Without --first the refusal is an error, and nothing is pushed.
+        let (code, _, stderr) = publish(&first, &[]);
+        assert_eq!(code, 4, "{status}: {stderr}");
+        assert!(stderr.contains(&format!("HTTP {status}")), "{stderr}");
+        let d = kiln_store::Digest::parse(&go.digest).unwrap();
+        assert!(!reg.has_blob(&d), "nothing was pushed");
+
+        // With --first it publishes, and potter reads it back from the target.
+        let (code, stdout, stderr) = publish(&first, &["--first"]);
+        assert_eq!(code, 0, "{status}: {stderr}");
+        assert!(stdout.contains("serial 1"), "{stdout}");
+        let at = PathBuf::from(&to);
+        let env = [("POTTER_CATALOG", at.as_path()), trust[0]];
+        let (code, stdout, stderr) = potter_env(&home.join("reader"), &["catalog", "verify"], &env);
+        assert_eq!((code, stdout.trim()), (0, "ok 1 layers"), "{stderr}");
+
+        // Now there is an index: --first still refuses to replace it with one it does not follow.
+        let (code, _, stderr) = publish(&first, &["--first"]);
+        assert_eq!(code, 2, "{stderr}");
+        assert!(stderr.contains("would roll it back"), "{stderr}");
+    }
+}
+
 /// `potter catalog build --merge`: the two architectures' layouts of one run, each built on the
 /// same previous catalog, become one index one serial above it, signed once, holding both
 /// architectures' new entries and every current layer.
