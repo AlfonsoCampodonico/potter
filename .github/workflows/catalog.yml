@@ -5,8 +5,10 @@
 # end-to-end tests build projects on it. Nothing is published.
 #
 # Pushes to main that change catalog/, and manual runs: each architecture builds on the published
-# catalog (--previous); the publish job merges the two layouts into one index one serial above
-# it, signs it with the catalog key, and pushes it. Pins move only by hand: there is no schedule.
+# catalog (--previous). On main only, the publish job merges the two layouts into one index one
+# serial above it, signs it with the catalog key (a secret of the `catalog` environment, which
+# only main may use), and pushes it. A manual run from another branch builds and stops there.
+# Pins move only by hand: there is no schedule.
 name: catalog
 
 on:
@@ -14,6 +16,8 @@ on:
     paths:
       - "catalog/**"
       - "crates/potter-catalog/**"
+      - "crates/potter-exec/src/catalog_build/**"
+      - "crates/potter-detect/**"
       - ".github/workflows/catalog.yml"
   push:
     branches: [main]
@@ -50,6 +54,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
       - run: sudo apt-get update && sudo apt-get install -y uidmap busybox-static passt nftables
       - name: A subordinate id range for the runner user
         run: |
@@ -89,9 +95,10 @@ jobs:
           POTTER_TEST_CATALOG: "1"
           POTTER_CATALOG: oci-layout:${{ runner.temp }}/layout
           POTTER_CATALOG_KEY: ${{ runner.temp }}/key/catalog.pub
-        run: cargo test --release -p potter --test catalog_agreement --test catalog_e2e
+        # Each end-to-end test unpacks root filesystems: two at a time fit a runner's disk.
+        run: cargo test --release -p potter --test catalog_agreement --test catalog_e2e -- --test-threads=2
       - name: Hand the layout and its public key to the publish job
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: catalog-${{ runner.arch }}
@@ -103,8 +110,9 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    environment: catalog
     permissions:
       contents: read
       packages: write
@@ -113,36 +121,48 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
       - run: cargo build --release -p potter
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: catalog-*
           path: ${{ runner.temp }}/builds
+      - name: Log in to the registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+          export DOCKER_CONFIG="$RUNNER_TEMP/docker"
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
       - name: Merge both architectures into one index, one serial up, signed with the catalog key
         env:
           SIGNING_KEY: ${{ secrets.POTTER_CATALOG_KEY }}
           FIRST: ${{ inputs.first }}
         run: |
-          key="$RUNNER_TEMP/catalog-signing.key"
-          trap 'rm -f "$key"' EXIT
-          (umask 077 && printf '%s\n' "$SIGNING_KEY" > "$key")
           args=()
+          if [ "$FIRST" = true ]; then
+            # A first catalog only where there is none: publish refuses a rollback anyway.
+            if docker buildx imagetools inspect --raw "$CATALOG:index" >/dev/null 2>&1; then
+              echo "$CATALOG:index exists: run without first, to build on it" >&2
+              exit 1
+            fi
+          else
+            args+=(--previous "$CATALOG:index")
+          fi
           for build in "$RUNNER_TEMP"/builds/*/; do
             args+=(--merge "$build/layout" --merge-key "$build/key/catalog.pub")
           done
-          if [ "${#args[@]}" -ne 8 ]; then
+          if [ "$(find "$RUNNER_TEMP/builds" -mindepth 1 -maxdepth 1 -type d | wc -l)" -ne 2 ]; then
             echo "want one layout per architecture, got: $(ls "$RUNNER_TEMP/builds")" >&2
             exit 1
           fi
-          if [ "$FIRST" != true ]; then
-            args+=(--previous "$CATALOG:index")
-          fi
+          key="$RUNNER_TEMP/catalog-signing.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$SIGNING_KEY" > "$key")
           target/release/potter catalog build --out "$RUNNER_TEMP/merged" --sign-key "$key" "${args[@]}"
+      # Refuses to replace an index it does not follow (a lower or equal serial, or one that drops
+      # entries), and fails closed when the index there does not verify.
       - name: Push the layers, then the index
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: |
-          export DOCKER_CONFIG="$RUNNER_TEMP/docker"
-          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
-          target/release/potter catalog publish "$RUNNER_TEMP/merged" "$CATALOG:index"
+        run: target/release/potter catalog publish "$RUNNER_TEMP/merged" "$CATALOG:index"

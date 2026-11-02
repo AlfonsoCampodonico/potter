@@ -225,7 +225,7 @@ enum CatalogCmd {
         /// --previous, into one index one serial above it (repeatable)
         #[arg(long, value_name = "LAYOUT", conflicts_with = "catalog_dir")]
         merge: Vec<PathBuf>,
-        /// The ed25519 public key (PEM) a --merge layout is signed with (repeatable)
+        /// An ed25519 public key (PEM) trusted for every --merge layout (repeatable)
         #[arg(long, value_name = "PEM", requires = "merge")]
         merge_key: Vec<PathBuf>,
     },
@@ -534,6 +534,9 @@ fn key_generate(dir: &Path, ed25519: bool) -> ExitCode {
         let key = potter_supply::sign::SigningKey::generate();
         (key.to_pem(), key.verifying_key().to_pem(), ("potter.key", "potter.pub"))
     };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return fail(&format!("{}: {e}", dir.display()), 4);
+    }
     let write = |name: &str, mode: u32, text: &str| -> Result<(), (String, u8)> {
         let path = dir.join(name);
         let mut f = std::fs::OpenOptions::new()

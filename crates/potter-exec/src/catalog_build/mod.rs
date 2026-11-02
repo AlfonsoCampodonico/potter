@@ -715,7 +715,8 @@ fn read_os_abi(store: &Store, layers: &[LayerRef]) -> Result<[(String, String); 
 }
 
 /// `potter catalog publish`: verifies the layout at `layout` with the trusted keys, checks it
-/// holds every current layer, then pushes the layers and the index to `to`.
+/// holds every current layer and follows the index already at `to` (if any), then pushes the
+/// layers and the index to `to`.
 pub fn publish(layout: &Path, to: &Reference, auth: DockerConfig) -> Result<Verified, BuildError> {
     // Verifying writes the index blob and a serial record: into a scratch store and home, not
     // the user's.
@@ -728,11 +729,41 @@ pub fn publish(layout: &Path, to: &Reference, auth: DockerConfig) -> Result<Veri
         &store,
         auth.clone(),
     )?;
+    // The index already published there must verify, and the new one must follow it: a higher
+    // serial, and every entry it lists still listed. Otherwise a publish could roll it back.
+    if potter_catalog::exists(to, auth.clone())? {
+        let current = potter_catalog::load(
+            &Location::Registry(to.clone()),
+            None,
+            &scratch.path().join("target-home"),
+            &store,
+            auth.clone(),
+        )?;
+        follows(&current.index, &v.index, to)?;
+    }
     for e in v.index.current() {
         fetch_layer(&v, e, &store, auth.clone())?;
     }
     potter_catalog::push(layout, to, auth)?;
     Ok(v)
+}
+
+/// Whether `new` may replace `current`, the index published at `to`.
+fn follows(current: &Index, new: &Index, to: &Reference) -> Result<(), BuildError> {
+    if new.serial <= current.serial {
+        return Err(BuildError::Plan(format!(
+            "{to} is at serial {}; publishing serial {} over it would roll it back",
+            current.serial, new.serial
+        )));
+    }
+    if new.entries.get(..current.entries.len()) != Some(&current.entries[..]) {
+        return Err(BuildError::Plan(format!(
+            "{to} is at serial {}, and the layout does not list its entries as they are: build it \
+             with --previous {to}",
+            current.serial
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

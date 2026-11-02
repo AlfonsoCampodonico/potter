@@ -9,7 +9,7 @@ mod sign;
 
 pub use error::CatalogError;
 pub use fetch::{
-    INDEX_TYPE, KEY, LAYER_TYPE, SIGNATURE, Verified, fetch_layer, load, load_trusting, push, write_layout,
+    INDEX_TYPE, KEY, LAYER_TYPE, SIGNATURE, Verified, exists, fetch_layer, load, load_trusting, push, write_layout,
 };
 pub use index::{Arch, Entry, Index, Kind, MAX_ENTRIES, MAX_INDEX_BYTES, SCHEMA};
 pub use location::{DEFAULT_CATALOG, INDEX_TAG, Location};

@@ -101,7 +101,30 @@ fn every_layer_a_detected_plan_names_has_a_recipe() {
         repo().join("fixtures"),
         repo().join("crates/potter/tests/fixtures/catalog-e2e"),
     ];
-    for project in dirs.iter().flat_map(|d| projects(d)) {
+    // No fixture uses pipenv: a small one made here.
+    let pipenv = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(pipenv.path().join("app")).unwrap();
+    std::fs::write(
+        pipenv.path().join("app/main.py"),
+        "from flask import Flask\n\napp = Flask(__name__)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pipenv.path().join("Pipfile"),
+        "[packages]\nflask = \"==3.1.0\"\ngunicorn = \"==23.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pipenv.path().join("Pipfile.lock"),
+        r#"{"_meta": {"hash": {"sha256": "0"}, "pipfile-spec": 6, "requires": {}, "sources": []},
+"default": {"flask": {"version": "==3.1.0"}, "gunicorn": {"version": "==23.0.0"}}, "develop": {}}"#,
+    )
+    .unwrap();
+    let projects_all = dirs
+        .iter()
+        .flat_map(|d| projects(d))
+        .chain([pipenv.path().to_path_buf()]);
+    for project in projects_all {
         // Some fixtures exist to be refused (ambiguous, unsatisfiable); they name no layers.
         let Ok(planned) = potter_config::plan_repo(&project, None) else {
             continue;
@@ -143,6 +166,7 @@ fn every_layer_a_detected_plan_names_has_a_recipe() {
         "python",
         "uv",
         "poetry",
+        "pipenv",
         "go",
         "rust",
         "ruby",

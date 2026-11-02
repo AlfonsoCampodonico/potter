@@ -132,7 +132,7 @@ fails if one of them is not an ed25519 public-key PEM.
 
 1. Generate the new key, commit its `.pub` under `crates/potter-catalog/keys/` next to the old
    one, and release potter (release N). Both keys are trusted.
-2. Replace the `POTTER_CATALOG_KEY` secret with the new private key. The next publish is signed
+2. Replace the `catalog` environment's `POTTER_CATALOG_KEY` secret with the new private key. The next publish is signed
    with it, and release N verifies it.
 3. In release N+1, remove the old `.pub`. Releases before N do not trust the new key, so they
    stop verifying the catalog once it is signed with it: users upgrade to N or later.
@@ -164,8 +164,8 @@ When a bump fixes advisories, list them in the layer's `layer.toml`:
 fixes = ["CVE-2026-12345", "DSA-6001-1"]
 ```
 
-The publish copies them onto the entry that supersedes the old one; `potter catalog affected
-CVE-2026-12345` lists it. An image whose `dev.potter.catalog.layers` annotation names the
+`potter catalog build` copies them onto the entry that supersedes the old one (a layer with no
+entry to supersede drops them); `potter catalog affected CVE-2026-12345` lists it. An image whose `dev.potter.catalog.layers` annotation names the
 superseded digest is affected, and `potter rebase` moves it onto the new entry (see
 [rebase.md](rebase.md#catalog-images)). Clear the list on the next bump.
 
@@ -197,8 +197,12 @@ potter catalog publish LAYOUT REGISTRY/REPOSITORY:TAG
   built on another catalog, or two layouts adding entries for the same architecture, are refused
   (exit 2). It needs no sandbox.
 - **`publish`** verifies the layout with the trusted keys (the compiled ones and
-  `POTTER_CATALOG_KEY`), checks it holds every current layer, then pushes the layers and the
-  index. Registry credentials come from the Docker config (`DOCKER_CONFIG` or `~/.docker`).
+  `POTTER_CATALOG_KEY`) and checks it holds every current layer. When the target tag already has
+  an index, that index must verify too (exit 3 otherwise), and the layout must follow it: a higher
+  serial, and every entry it lists still listed, in order. A layout that would roll the target
+  back or drop entries is refused (exit 2); build it with `--previous` on the target instead.
+  Then it pushes the layers, and the index last. Registry credentials come from the Docker config
+  (`DOCKER_CONFIG` or `~/.docker`).
 
 Locally, with a throwaway key:
 
@@ -215,17 +219,22 @@ POTTER_TEST_CATALOG=1 POTTER_CATALOG=oci-layout:/tmp/cat \
 `.github/workflows/catalog.yml` runs on `ubuntu-24.04` (x86_64) and `ubuntu-24.04-arm` (aarch64),
 with the same sandbox setup as the main workflow's sandbox job.
 
-- **Pull requests** touching `catalog/**` or `crates/potter-catalog/**`: each architecture builds
+- **Pull requests** touching `catalog/**`, `crates/potter-catalog/**`,
+  `crates/potter-exec/src/catalog_build/**`, `crates/potter-detect/**` or the workflow file
+  itself: each architecture builds
   every layer into a layout signed with a key made for the job, which covers the overlap check
   and the smoke tests, then runs the agreement test and the end-to-end tests
   (`POTTER_TEST_CATALOG=1`) on that layout. Nothing is published.
 - **Pushes to `main`** touching `catalog/**`, and **manual runs**: each architecture builds with
-  `--previous ghcr.io/alfonsocampodonico/potter-catalog:index` and a throwaway key, and hands its
-  layout and public key to the publish job. That job alone holds the signing secret and
-  `packages: write`: it merges the two layouts with `build --merge` (one serial bump), signs the
-  result with the `POTTER_CATALOG_KEY` secret, and runs `potter catalog publish` with the job's
-  `GITHUB_TOKEN`. One publish runs at a time. A manual run with `first` set builds without
-  `--previous`, for the very first publish.
+  `--previous ghcr.io/alfonsocampodonico/potter-catalog:index` and a throwaway key. On `main`
+  only, each hands its layout and public key to the publish job; a manual run from another
+  branch builds and stops there. The publish job alone uses the `catalog` environment (which
+  holds the signing secret and only `main` may deploy to) and `packages: write`: it merges the
+  two layouts with `build --merge` (one serial bump), signs the result with the
+  `POTTER_CATALOG_KEY` secret, and runs `potter catalog publish` with the job's `GITHUB_TOKEN`.
+  One publish runs at a time. A manual run with `first` set builds without `--previous`, for the
+  very first publish; it stops before merging when the `index` tag already exists, and
+  `publish` would refuse it anyway.
 
 ## Setup
 
@@ -237,10 +246,12 @@ Done once by the repository owner.
    potter key generate --ed25519 ./catalog-key
    ```
 
-2. Add the private key as the Actions secret `POTTER_CATALOG_KEY`, then delete the local copy:
+2. Create the GitHub environment `catalog` (Settings, Environments) with a deployment branch
+   rule that allows `main` only. Add the private key as that environment's secret
+   `POTTER_CATALOG_KEY`, not as a repository secret, then delete the local copy:
 
    ```sh
-   gh secret set POTTER_CATALOG_KEY < ./catalog-key/catalog.key
+   gh secret set POTTER_CATALOG_KEY --env catalog < ./catalog-key/catalog.key
    ```
 
 3. Commit the public key as `crates/potter-catalog/keys/catalog.pub`. potter builds from then on

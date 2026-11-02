@@ -441,3 +441,83 @@ fn merge_makes_one_index_from_both_architectures() {
     let (code, _, _) = run(both);
     assert_eq!(code, 2);
 }
+
+/// `potter key generate --ed25519` makes the directory it writes into.
+#[test]
+fn key_generate_makes_its_directory() {
+    let l = Layouts::new();
+    let dir = l.dir.path().join("not/there/yet");
+    let (code, stdout, stderr) = potter_env(
+        &l.dir.path().join("home"),
+        &["key", "generate", "--ed25519", dir.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), dir.join("catalog.pub").display().to_string());
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(dir.join("catalog.key")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    potter_catalog::signing_key_from_pem(&std::fs::read_to_string(dir.join("catalog.key")).unwrap()).unwrap();
+    // The key files are never replaced.
+    let (code, _, stderr) = potter_env(
+        &l.dir.path().join("home"),
+        &["key", "generate", "--ed25519", dir.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 2, "{stderr}");
+}
+
+/// `potter catalog publish` onto a registry: an empty target takes any verified layout; one that
+/// already holds an index takes only a layout that follows it (a higher serial, every entry
+/// still listed), and one whose index does not verify is refused.
+#[test]
+fn publish_never_rolls_the_target_back() {
+    use kiln_registry::testregistry::{Config, TestRegistry};
+    use potter_catalog::Arch;
+    let mut l = Layouts::new();
+    let (key, public) = l.key("catalog");
+    let go = l.entry("go", Arch::X86_64, "go");
+    let node = l.entry("node", Arch::X86_64, "node");
+    let first = l.write("first", 1, vec![go.clone()], &key);
+    let second = l.write("second", 2, vec![go.clone(), node.clone()], &key);
+    let dropped = l.write("dropped", 3, vec![node.clone()], &key);
+    let reg = TestRegistry::start(Config::default());
+    let to = format!("{}/acme/catalog:index", reg.host());
+    let home = l.dir.path().join("home");
+    let trust = [("POTTER_CATALOG_KEY", public.as_path())];
+    let publish = |layout: &Path, env: &[(&str, &Path)]| {
+        potter_env(&home, &["catalog", "publish", layout.to_str().unwrap(), &to], env)
+    };
+
+    let (code, stdout, stderr) = publish(&first, &trust);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("serial 1"), "{stdout}");
+    // The same serial again, or a lower one: refused.
+    let (code, _, stderr) = publish(&first, &trust);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("at serial 1; publishing serial 1 over it would roll it back"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = publish(&second, &trust);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = publish(&first, &trust);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("would roll it back"), "{stderr}");
+    // A higher serial that drops an entry: refused, and the target keeps serial 2.
+    let (code, _, stderr) = publish(&dropped, &trust);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("does not list its entries"), "{stderr}");
+    let at = PathBuf::from(&to);
+    let env = [("POTTER_CATALOG", at.as_path()), trust[0]];
+    let (code, stdout, stderr) = potter_env(&l.dir.path().join("home2"), &["catalog", "ls", "--all"], &env);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.lines().count(), 3, "{stdout}");
+
+    // The target's index is signed by a key this process does not trust: fail closed.
+    let (other_key, other_pub) = l.key("other");
+    let foreign = l.write("foreign", 9, vec![go.clone(), node.clone()], &other_key);
+    let (code, _, stderr) = publish(&foreign, &[("POTTER_CATALOG_KEY", other_pub.as_path())]);
+    assert_eq!(code, 3, "{stderr}");
+    assert!(stderr.contains("not trusted"), "{stderr}");
+}
