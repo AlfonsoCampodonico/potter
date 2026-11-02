@@ -140,7 +140,7 @@ Each is an OCI image manifest with `subject` set to the image, an empty config (
   - `verificationMaterial.publicKey.hint` is the base64 SHA-256 of the public key's SPKI DER; `tlogEntries` is empty (no transparency log in v1).
 - **Unsigned**: `artifactType` `application/vnd.in-toto+json`, the statement itself; no `signature` referrer.
 
-A composite catalog base is never listed as a base image. The provenance names `internalParameters.catalogIndex`, and each catalog layer is a resolved dependency `{name, digest, annotations: {version, executor}}`. `internalParameters.executor` is `ns` when any layer, a step's or a catalog layer's, is not VM-built (P12), `vm` when all are, and `host` when potter built every layer itself. The SBOM lists one package per catalog layer, from the index: `versionInfo` is the version, `downloadLocation` the upstream source, and `licenseConcluded` the licence.
+A composite catalog base is never listed as a base image. The provenance names `internalParameters.catalogIndex`, and each catalog layer is a resolved dependency `{name, digest, annotations: {version, executor}}`. `internalParameters.executor` is `ns` when any layer, a step's or a catalog layer's, is not VM-built (P12), `vm` when all are, and `host` when potter built every layer itself. The SBOM lists one package per catalog layer in the image (the run base's; build-only layers such as `build-tools` are in the provenance alone), from the index: `versionInfo` is the version, `downloadLocation` the upstream source, and `licenseConcluded` the licence.
 
 ## Exit codes
 

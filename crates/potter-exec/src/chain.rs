@@ -1371,6 +1371,11 @@ mod tests {
             built.bases
         );
         assert_eq!(built.catalog.len(), 2, "the build and the run composites");
+        assert_eq!(
+            built.run_catalog.as_ref(),
+            Some(&built.catalog[1]),
+            "the run composite's"
+        );
     }
 
     fn built_manifest(dir: &std::path::Path, digest: &kiln_store::Digest) -> Vec<u8> {

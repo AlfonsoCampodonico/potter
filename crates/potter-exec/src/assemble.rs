@@ -37,6 +37,9 @@ pub struct Built {
     /// What the catalog resolved its composite bases to: the build base's first, then the run
     /// base's when it is another composite.
     pub catalog: Vec<Resolution>,
+    /// The run base's resolution, when it is a composite: the catalog layers in the image (with
+    /// no exports, the build base's). Build-only layers are in `catalog` alone.
+    pub run_catalog: Option<Resolution>,
     /// The OCI image manifest's digest (`digest` is the kiln image's).
     pub manifest_digest: Digest,
     /// How its layers were fitted into the budget.
@@ -690,7 +693,7 @@ pub fn build_target(
         ctx.store.set_ref(t, &digest).map_err(|e| infra(&e))?;
     }
     let mut catalog: Vec<Resolution> = chain.catalog.into_iter().collect();
-    catalog.extend(run_catalog.filter(|r| !catalog.contains(r)));
+    catalog.extend(run_catalog.clone().filter(|r| !catalog.contains(r)));
     Ok(Built {
         target: target.name.clone(),
         reference: tags[0].clone(),
@@ -700,6 +703,7 @@ pub fn build_target(
         steps,
         bases,
         catalog,
+        run_catalog,
         manifest_digest,
         layers: layer_report,
     })

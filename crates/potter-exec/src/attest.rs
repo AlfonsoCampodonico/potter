@@ -174,16 +174,19 @@ pub fn attestations(
     let digest = built.manifest_digest.to_string();
     let files = lockfiles(store, &inputs_layers(input.target, built), warn)?;
     let components = components(&files, warn);
-    // The catalog layers behind the composites, each once, from the signed index; a stopgap base
-    // (PHP) was never resolved, so the plan's refs are all there is to list.
+    // The catalog layers behind the composites, each once, from the signed index. Provenance
+    // names every one; the SBOM lists only those in the image, the run base's: a go image on
+    // os-min ships no build-tools or go.
     let mut entries: Vec<&potter_catalog::Entry> = Vec::new();
     for e in built.catalog.iter().flat_map(|r| &r.entries) {
         if !entries.iter().any(|x| x.digest == e.digest) {
             entries.push(e);
         }
     }
-    let mut catalog: Vec<CatalogPackage> = entries
+    let mut catalog: Vec<CatalogPackage> = built
+        .run_catalog
         .iter()
+        .flat_map(|r| &r.entries)
         .map(|e| CatalogPackage {
             name: e.name.clone(),
             version: Some(e.version.clone()),
@@ -191,11 +194,11 @@ pub fn attestations(
             license: Some(e.license.clone()),
         })
         .collect();
-    for b in [&input.target.build.base, &input.target.image.base] {
-        let Base::Catalog { layers } = b else { continue };
-        if crate::chain::needs_catalog(b) {
-            continue;
-        }
+    // A stopgap base (PHP) was never resolved, so the plan's refs are all there is to list: the
+    // run base's too, which with no exports is the build base.
+    if let b @ Base::Catalog { layers } = &input.target.image.base
+        && !crate::chain::needs_catalog(b)
+    {
         for c in layers {
             let p = CatalogPackage::named(&c.name, c.version.as_deref());
             if !catalog.contains(&p) {
@@ -653,6 +656,7 @@ mod tests {
                 digest: Digest::of(b"base"),
             }],
             catalog: vec![],
+            run_catalog: None,
             manifest_digest: manifest,
             layers: crate::assemble::LayerReport {
                 max_layers: 10,
@@ -734,15 +738,22 @@ mod tests {
             constraints: vec![],
             index_digest: index.clone(),
         };
-        // The build base and the run base share os-min: it is listed once.
+        // A go-style plan: the build base is os-min, build-tools and go, the run base os-min
+        // alone. They share os-min: it is listed once.
         built.catalog = vec![
-            resolution(vec![entry("os-min", 1, "vm"), entry("go", 2, "ns")]),
+            resolution(vec![
+                entry("os-min", 1, "vm"),
+                entry("build-tools", 3, "vm"),
+                entry("go", 2, "ns"),
+            ]),
             resolution(vec![entry("os-min", 1, "vm")]),
         ];
+        built.run_catalog = Some(built.catalog[1].clone());
         let mut target = target();
         target.build.base = Base::Catalog {
             layers: vec![
                 potter_plan::CatalogRef::new("os-min", None),
+                potter_plan::CatalogRef::new("build-tools", None),
                 potter_plan::CatalogRef::new("go", Some("1")),
             ],
         };
@@ -771,9 +782,13 @@ mod tests {
         assert_eq!(def["internalParameters"]["executor"], "ns", "go is ns-built");
         let deps = def["resolvedDependencies"].as_array().unwrap();
         let names: Vec<&str> = deps.iter().map(|d| d["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["os-min", "go"]);
         assert_eq!(
-            deps[1]["annotations"],
+            names,
+            ["os-min", "build-tools", "go"],
+            "provenance names the build layers"
+        );
+        assert_eq!(
+            deps[2]["annotations"],
             serde_json::json!({"version": "1.2", "executor": "ns"})
         );
         assert!(!prov.to_string().contains("potter-catalog@"), "{prov}");
@@ -784,10 +799,11 @@ mod tests {
             .iter()
             .filter(|p| p["SPDXID"].as_str().unwrap().starts_with("SPDXRef-Catalog-"))
             .collect();
-        assert_eq!(catalog.len(), 2, "{sbom}");
-        assert_eq!(catalog[0]["name"], "go");
-        assert_eq!(catalog[0]["versionInfo"], "1.2");
-        assert_eq!(catalog[0]["downloadLocation"], "https://example.test/go");
+        // The image holds os-min alone: the build-only layers are not its packages.
+        assert_eq!(catalog.len(), 1, "{sbom}");
+        assert_eq!(catalog[0]["name"], "os-min");
+        assert_eq!(catalog[0]["versionInfo"], "1.1");
+        assert_eq!(catalog[0]["downloadLocation"], "https://example.test/os-min");
         assert_eq!(catalog[0]["licenseConcluded"], "MIT");
         assert!(
             !sbom["packages"].to_string().contains("SPDXRef-Base-"),
