@@ -410,3 +410,62 @@ fn key_generate_then_verify_a_published_image() {
         .code(3)
         .stdout(predicate::str::contains("provenance: FAILED"));
 }
+
+#[test]
+fn the_vmm_comes_from_the_flag_or_the_environment() {
+    // Accepted values get past parsing: off Linux they stop at the platform check, on Linux at
+    // the missing kernel, both exit 4 and never the usage error 2.
+    for (env, flag) in [
+        (Some("cloud-hypervisor"), None),
+        (Some("qemu"), Some("firecracker")),
+        (None, Some("cloud-hypervisor")),
+        (None, None),
+    ] {
+        let mut c = bare();
+        if let Some(e) = env {
+            c.env("POTTER_VMM", e);
+        }
+        c.args(["build", "--executor", "vm"]);
+        if let Some(f) = flag {
+            c.args(["--vmm", f]);
+        }
+        c.arg(fixture("explicit-go")).assert().code(4);
+    }
+    bare()
+        .env("POTTER_VMM", "qemu")
+        .args(["build", "--executor", "vm"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown VMM"));
+}
+
+#[test]
+fn the_default_vmm_is_firecracker() {
+    bare()
+        .args(["build", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[default: firecracker]"));
+}
+
+#[test]
+fn a_rebase_dry_run_needs_no_vm_setup() {
+    let kiln = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let run = |extra: &[&str]| {
+        bare()
+            .env("KILN_HOME", kiln.path())
+            .env("POTTER_HOME", home.path())
+            .args(["rebase", "--dry-run"])
+            .args(extra)
+            .arg("potter/none:latest")
+            .output()
+            .unwrap()
+    };
+    let with_vm = run(&["--executor", "vm"]);
+    let without = run(&[]);
+    assert_eq!(with_vm.status.code(), without.status.code());
+    assert_eq!(with_vm.stderr, without.stderr);
+    assert!(!String::from_utf8_lossy(&with_vm.stderr).contains("VM builds need"));
+}

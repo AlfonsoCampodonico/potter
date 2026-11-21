@@ -140,7 +140,7 @@ and how its layer is sealed. Both hand their chain's layers to the same assembly
 `assemble::build_target`, which applies the budget, so an image is merged the same way whichever
 executor built its steps. The fake-backend test
 `vm::chain_tests::a_vm_image_is_assembled_within_its_layer_budget_like_an_ns_one` pins this for
-the VM path. (`--executor vm` is still refused by the CLI until kiln M3e lands.)
+the VM path.
 
 ### What this buys
 

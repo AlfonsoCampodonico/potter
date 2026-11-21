@@ -18,7 +18,7 @@ image was made. Detection only parses files; it never runs your code.
 | Detected targets (catalog bases) | Node, Bun, Deno, Python, Ruby, Go, Rust and static targets build on potter's signed runtime catalog, one line per runtime ([docs/catalog.md](docs/catalog.md)). PHP and Laravel targets are still lowered onto upstream Debian trixie images plus install steps (`potter-exec/src/stopgap.rs`) |
 | Remote cache, target graph and `copy`, `--affected`, build secrets, `--progress json` | Works |
 | Layer budget and composite base | Works for every executor |
-| `potter rebase` (a patched base without a rebuild) | Works, Linux only (runtime steps re-run with `--executor ns`). Local store only: a rebased image isn't pushed with attestations yet |
+| `potter rebase` (a patched base without a rebuild) | Works, Linux only (runtime steps re-run with `--executor ns` or `--executor vm`). Local store only: a rebased image isn't pushed with attestations yet |
 | `--output registry=`, SBOM, provenance, signing, `potter verify` | Works. KMS keys (`kms://`) are refused; there is no transparency log or keyless signing |
 | `--executor vm` (one microVM per target chain) | Works on Linux with KVM: `--kernel`, `--kiln-init`, Firecracker or Cloud Hypervisor |
 | PHP web images (nginx + php-fpm as kiln-init `services`) | Planned and refused at build time (exit 2) until kiln-init starts services. Laravel with Octane on Swoole has no services and is not affected |
@@ -200,9 +200,13 @@ Requirements for the VM executor (Linux with KVM only):
 
 A step runs under kiln's step isolation, which is stricter than `docker build`:
 - no `CAP_MKNOD`, so no device nodes;
-- `/dev` is read-only with only `null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts` and `shm`
-  (no loop, fuse or block devices), and mounts are `nodev`;
-- `/proc` is read-only and partly masked (`sysctl -w` fails), and `/sys` is read-only;
+- `/dev` is read-only with only `null`, `zero`, `full`, `random`, `urandom`, `tty`, `ptmx`, the `fd`,
+  `stdin`, `stdout` and `stderr` links, and the `pts` and `shm` directories (no loop, fuse or block
+  devices), and mounts are `nodev`;
+- `/proc` is a writable clone of init's, except that `/proc/sys`, `/proc/sysrq-trigger`, `/proc/irq`,
+  `/proc/bus` and `/proc/fs` are read-only (`sysctl -w` fails) and `kcore`, `keys`, `timer_list`,
+  `sched_debug`, `acpi`, `scsi`, `latency_stats` and `timer_stats` are masked where present;
+- `/sys` is read-only;
 - no user namespaces: `unshare -U`, rootless podman or buildah and bubblewrap fail, and so does Chrome's
   sandbox (pass `--no-sandbox` to headless Chrome in build steps);
 - only `user.*` (not `user.overlay.*`) and `security.capability` extended attributes reach a layer;
@@ -288,7 +292,7 @@ flowchart LR
     potter["potter"] --> detect["detect PATH"]
     potter --> plan["plan PATH"]
     potter --> build["build PATH --executor ns"]
-    potter --> rebase["rebase IMAGE --executor ns"]
+    potter --> rebase["rebase IMAGE --executor ns|vm"]
     potter --> verify["verify IMAGE --key PUB"]
     potter --> key["key generate DIR"]
     detect -.-> plan
@@ -305,7 +309,7 @@ flowchart LR
 | `potter detect [PATH]` | Lists each provider's claim on `PATH` with its evidence, and the chosen one |
 | `potter plan [PATH] [--target T] [--json \| --explain] [--max-layers N]` | Prints the plan; `--json` prints canonical `potter.plan/v1`; `--explain` shows where every decision came from |
 | `potter build [PATH] --executor ns [options]` | Builds images into `$KILN_HOME` (see below) |
-| `potter rebase IMAGE --executor ns [--base REF] [--tag NAME] [--json]` | Swaps a built image's run base for a patched one without rebuilding it, or refuses with the reason ([docs/rebase.md](docs/rebase.md)) |
+| `potter rebase IMAGE --executor ns\|vm [--base REF] [--tag NAME] [--json]` | Swaps a built image's run base for a patched one without rebuilding it, or refuses with the reason ([docs/rebase.md](docs/rebase.md)) |
 | `potter verify IMAGE --key PUB [--expect-tenant T] [--expect-builder B]` | Checks a pushed image's SBOM, provenance and signature |
 | `potter key generate DIR` | Writes `DIR/potter.key` (0600, PKCS#8 P-256) and `DIR/potter.pub` |
 
