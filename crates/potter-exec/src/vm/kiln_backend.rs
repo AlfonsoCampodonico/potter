@@ -3,7 +3,6 @@
 
 use kiln_run::build as kb;
 use kiln_store::Store;
-use vmkit::Vmm;
 
 use super::backend::{BuildBackend, BuildSpec, BuildVm, RunStep, StepOutcome, Stream};
 use super::kiln_map::{Mirror, VmConfig, device_cap, kiln_spec, kiln_step, outcome, start_error, stream, vm_error};
