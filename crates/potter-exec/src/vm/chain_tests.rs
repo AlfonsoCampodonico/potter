@@ -400,7 +400,20 @@ fn a_full_device_budget_restarts_the_vm_and_builds_the_same_layers() {
     // other; the second finds no slot, so step b boots a new VM from the whole prefix.
     let tight = world();
     let narrow = FakeBackend::new(6, script());
-    let s = vm(&tight, &target(&tight, steps), &narrow).unwrap();
+    narrow.state().finish_fails = true;
+    let (s, lines) = chain(
+        &tight,
+        &target(&tight, steps),
+        ExecutorClass::Vm,
+        Some(&narrow),
+        &BTreeMap::new(),
+    );
+    let s = s.unwrap();
+    let warnings = lines
+        .iter()
+        .filter(|l| l.starts_with("warning: the build VM did not shut down cleanly"))
+        .count();
+    assert_eq!(warnings, 2, "the replaced VM and the last one both warn: {lines:?}");
     let f = narrow.state();
     assert_eq!((f.specs.len(), f.finished), (2, 2));
     assert_eq!(f.specs[0].layers.len(), 2, "the base and the first inputs");
@@ -599,6 +612,14 @@ fn a_chain_past_the_lowers_cap_restarts_from_its_prefix() {
         f.specs[1].root
     );
     assert_eq!(f.steps.len(), 235, "kiln refused nothing");
+    // The root is 1 lower, so exactly 230 steps fit under the cap: the 231st opens a new VM.
+    assert_eq!(f.steps[229].id, 230, "the first VM ran 230 steps");
+    assert_eq!(f.steps[230].id, 1, "the 231st step is the second VM's first");
+    assert!(
+        f.specs
+            .iter()
+            .all(|s| s.source_date_epoch == f.specs[0].source_date_epoch)
+    );
     assert_eq!(f.finished, 2);
 }
 
@@ -608,8 +629,7 @@ fn every_vm_clamps_mtimes_to_source_date_epoch() {
     let t = target(&w, vec![run("a")]);
     let fake = FakeBackend::new(31, vec![Script::files(&[("app/a", "1")])]);
     vm(&w, &t, &fake).unwrap();
-    // SOURCE_DATE_EPOCH is unset in the test environment: potter's default, 0.
-    assert_eq!(fake.state().specs[0].source_date_epoch, Some(0));
+    assert_eq!(fake.state().specs[0].source_date_epoch, Some(crate::tarball::epoch()));
 }
 
 #[test]
@@ -703,4 +723,40 @@ fn targets_are_cleaned_and_a_secret_target_ending_in_a_slash_is_refused() {
             "{raw}"
         );
     }
+}
+
+#[test]
+fn a_125_without_a_kiln_init_line_is_a_plain_exit_status() {
+    let w = world();
+    let t = target(&w, vec![run("a")]);
+    let fake = FakeBackend::new(
+        31,
+        vec![Script::Fail {
+            code: 125,
+            lines: vec!["make: *** [a] Error".into()],
+        }],
+    );
+    let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    let e = r.unwrap_err();
+    assert_eq!(e.exit_code(), 1);
+    assert!(e.to_string().contains("exit status: 125"), "{e}");
+    assert!(!e.to_string().contains("kiln-init could not"), "{e}");
+}
+
+#[test]
+fn a_bad_secret_target_is_refused_before_any_vm_boots() {
+    let w = world();
+    let mut s = run("a");
+    if let Step::Run { secrets, .. } = &mut s {
+        secrets.push(SecretRef {
+            id: "k".into(),
+            target: "/run/secrets/k/".into(),
+        });
+    }
+    let t = target(&w, vec![s]);
+    let fake = FakeBackend::new(31, vec![]);
+    let secrets = BTreeMap::from([("k".to_string(), b"v".to_vec())]);
+    let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &secrets);
+    assert_eq!(r.unwrap_err().exit_code(), 2);
+    assert!(fake.state().specs.is_empty());
 }

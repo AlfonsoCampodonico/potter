@@ -480,7 +480,7 @@ pub fn run_steps(
                     if let Some(vm) = session.as_mut()
                         && !vm.reached(i)
                     {
-                        *session = None;
+                        end_session(session, &mut *ctx.progress);
                     }
                 }
                 Step::Run {
@@ -506,6 +506,12 @@ pub fn run_steps(
                         })?;
                         values.push((s.id.clone(), value.clone()));
                     }
+                    // Targets are checked before any lookup or boot: a bad one is a plan error
+                    // a cache hit can't mask.
+                    let secret_targets = secrets
+                        .iter()
+                        .map(|s| crate::vm::clean_target(&format!("step {sname}: secret {}", s.id), &s.target, true))
+                        .collect::<Result<Vec<_>, _>>()?;
                     let secrets_key = potter_cache::secrets_digest(&ctx.tenant_key, &values);
                     let parent = key;
                     // One key per class this build may use, most preferred first (spec §8.4).
@@ -671,12 +677,7 @@ pub fn run_steps(
                                 .map_err(|_| BuildError::Plan(format!("step {sname}: gid {gid}")))?,
                             lowers_added: vec![],
                             mounts: vec![],
-                            secrets: secrets
-                                .iter()
-                                .map(|s| {
-                                    crate::vm::clean_target(&format!("step {sname}: secret {}", s.id), &s.target, true)
-                                })
-                                .collect::<Result<Vec<_>, _>>()?
+                            secrets: secret_targets
                                 .into_iter()
                                 .zip(values.iter().map(|(_, v)| crate::vm::backend::Secret(v.clone())))
                                 .collect(),
@@ -700,9 +701,11 @@ pub fn run_steps(
                                 })
                             };
                             let mut lines = crate::vm::Lines::default();
-                            let outcome = vm.run(run_step, &mut |stream, bytes| lines.feed(stream, bytes, &mut line));
+                            let outcome = vm.run(run_step, &sname, &mut |stream, bytes| {
+                                lines.feed(stream, bytes, &mut line)
+                            });
                             lines.flush(&mut line);
-                            outcome.map_err(|e| name_refusal(e, &sname))?
+                            outcome?
                         };
                         if !outcome.exit.success() {
                             (ctx.progress)(Progress::Step {
@@ -945,24 +948,6 @@ fn end_session(session: &mut Option<crate::vm::Session>, progress: &mut dyn FnMu
         progress(Progress::Warning(format!(
             "the build VM did not shut down cleanly: {e}"
         )));
-    }
-}
-
-/// Renames kiln's `step <n>:` prefix on a refusal to the plan's name for the step.
-fn name_refusal(e: BuildError, sname: &str) -> BuildError {
-    match e {
-        BuildError::Plan(m) => {
-            let rest = m
-                .strip_prefix("step ")
-                .and_then(|r| r.split_once(": "))
-                .filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-                .map(|(_, r)| r);
-            BuildError::Plan(match rest {
-                Some(r) => format!("step {sname}: {r}"),
-                None => m,
-            })
-        }
-        e => e,
     }
 }
 

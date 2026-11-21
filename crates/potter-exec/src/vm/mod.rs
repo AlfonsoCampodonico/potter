@@ -211,7 +211,12 @@ impl Session {
 
     /// Runs `step`, numbered and given the disks reached since the previous one. A report
     /// naming another step is a protocol violation.
-    pub fn run(&mut self, mut step: RunStep, sink: &mut dyn FnMut(Stream, &[u8])) -> Result<StepOutcome, BuildError> {
+    pub fn run(
+        &mut self,
+        mut step: RunStep,
+        name: &str,
+        sink: &mut dyn FnMut(Stream, &[u8]),
+    ) -> Result<StepOutcome, BuildError> {
         let id = self.next_id;
         self.next_id += 1;
         step.id = id;
@@ -221,7 +226,14 @@ impl Session {
             Ok(o) => o,
             Err(e) => {
                 self.failed = true;
-                return Err(e);
+                // kiln numbers a refused step by its id; the plan names it.
+                return Err(match e {
+                    BuildError::Plan(m) => match m.strip_prefix(&format!("step {id}: ")) {
+                        Some(rest) => BuildError::Plan(format!("step {name}: {rest}")),
+                        None => BuildError::Plan(m),
+                    },
+                    e => e,
+                });
             }
         };
         self.lowers += added + usize::from(outcome.sealed.is_some());
