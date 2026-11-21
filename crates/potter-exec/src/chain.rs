@@ -614,7 +614,11 @@ pub fn run_steps(
                         // A VM has network for all its steps or none: a step that differs gets a new
                         // VM, booted from the prefix so far.
                         if session.as_ref().is_some_and(|vm| vm.network() != *network) {
-                            *session = None;
+                            end_session(session, &mut *ctx.progress);
+                        }
+                        // kiln caps a VM's lowers: past it, a new VM boots from the prefix (D2).
+                        if session.as_ref().is_some_and(|vm| !vm.has_room()) {
+                            end_session(session, &mut *ctx.progress);
                         }
                         if session.is_none() {
                             // Every disk is attached at boot: the layers of the inputs and copies
@@ -666,7 +670,11 @@ pub fn run_steps(
                             mounts: vec![],
                             secrets: secrets
                                 .iter()
-                                .map(|s| s.target.clone())
+                                .map(|s| {
+                                    crate::vm::clean_target(&format!("step {sname}: secret {}", s.id), &s.target, true)
+                                })
+                                .collect::<Result<Vec<_>, _>>()?
+                                .into_iter()
                                 .zip(values.iter().map(|(_, v)| crate::vm::backend::Secret(v.clone())))
                                 .collect(),
                             network: *network,
@@ -691,7 +699,7 @@ pub fn run_steps(
                             let mut lines = crate::vm::Lines::default();
                             let outcome = vm.run(run_step, &mut |stream, bytes| lines.feed(stream, bytes, &mut line));
                             lines.flush(&mut line);
-                            outcome?
+                            outcome.map_err(|e| name_refusal(e, &sname))?
                         };
                         if !outcome.exit.success() {
                             (ctx.progress)(Progress::Step {
@@ -699,8 +707,12 @@ pub fn run_steps(
                                 step: sname.clone(),
                                 state: StepState::Failed,
                             });
+                            let setup_failed = tail.iter().any(|l| l.starts_with("kiln-init: "));
                             let status = match outcome.exit {
                                 crate::vm::backend::Exit::TimedOut => format!("timed out after {}s", timeout.as_secs()),
+                                e @ crate::vm::backend::Exit::Code(125) if setup_failed => {
+                                    format!("{e} (kiln-init could not set the step up)")
+                                }
                                 e => e.to_string(),
                             };
                             return Err(BuildError::StepFailed {
@@ -909,11 +921,46 @@ pub fn run_steps(
         }
         Ok(())
     })();
+    // A chain that succeeded verified and stored every diff: the VM's shutdown is a warning.
+    // After a failure the session is just dropped.
+    if result.is_ok() {
+        end_session(&mut vm_session, &mut *ctx.progress);
+    }
     drop(vm_session);
     for run in runs {
         let _ = ctx.sandbox.remove(&run);
     }
     result.map(|()| state)
+}
+
+/// Ends the build VM, if any. An unclean shutdown after the diffs were verified and stored
+/// can't corrupt the build, so it is a warning (decision D5).
+fn end_session(session: &mut Option<crate::vm::Session>, progress: &mut dyn FnMut(Progress)) {
+    if let Some(vm) = session.take()
+        && let Err(e) = vm.finish()
+    {
+        progress(Progress::Warning(format!(
+            "the build VM did not shut down cleanly: {e}"
+        )));
+    }
+}
+
+/// Renames kiln's `step <n>:` prefix on a refusal to the plan's name for the step.
+fn name_refusal(e: BuildError, sname: &str) -> BuildError {
+    match e {
+        BuildError::Plan(m) => {
+            let rest = m
+                .strip_prefix("step ")
+                .and_then(|r| r.split_once(": "))
+                .filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                .map(|(_, r)| r);
+            BuildError::Plan(match rest {
+                Some(r) => format!("step {sname}: {r}"),
+                None => m,
+            })
+        }
+        e => e,
+    }
 }
 
 /// The layer of an `Inputs` or `CopyFrom` step, built on the host over `layers`, stored.

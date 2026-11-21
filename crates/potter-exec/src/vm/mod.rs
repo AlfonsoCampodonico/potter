@@ -19,14 +19,36 @@ use potter_cache::PotterHome;
 
 use crate::chain::LayerRef;
 use crate::error::{BuildError, io};
-use backend::{BuildBackend, BuildSpec, BuildVm, RunStep, StepOutcome, Stream};
+use backend::{BuildBackend, BuildSpec, BuildVm, Exit, RunStep, StepOutcome, Stream};
 use ingest::OutputDisk;
+use kiln_map::MAX_BUILD_LOWERS;
 
 /// The output disk's size: the cap on everything one VM's steps produce (spec §9.3).
 pub const OUTPUT_SIZE: u64 = 8 << 30;
 /// spec §10: --step-mem 4 GiB and --step-cpus 2 by default.
 pub const MEMORY_MIB: u32 = 4096;
 pub const CPUS: u32 = 2;
+
+/// A mount or secret target as kiln-proto wants it: `/` and the non-empty, non-`.` components
+/// joined by `/` (decision D10). `what` names the target in errors; `file` is a secret, which
+/// can't end in a slash.
+pub fn clean_target(what: &str, raw: &str, file: bool) -> Result<String, BuildError> {
+    let parts: Vec<&str> = raw.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
+    if parts.contains(&"..") {
+        return Err(BuildError::Plan(format!("{what}: the target {raw:?} has a `..`")));
+    }
+    if parts.is_empty() {
+        return Err(BuildError::Plan(format!("{what}: the target {raw:?} is the root")));
+    }
+    if file && raw.ends_with('/') {
+        return Err(BuildError::Plan(format!(
+            "{what}: the target {raw:?} ends in `/`, but a secret is a file"
+        )));
+    }
+    let out = format!("/{}", parts.join("/"));
+    kiln_proto::check_target(what, &out).map_err(BuildError::Plan)?;
+    Ok(out)
+}
 
 /// Joins a step's output chunks into lines, per stream; potter redacts and reports whole lines.
 #[derive(Default)]
@@ -75,6 +97,10 @@ pub struct Session {
     /// Disks reached since the last step, for the next one's `lowers_added`.
     pending: Vec<usize>,
     next_id: u32,
+    /// Lowers kiln counts: the root's, those stacked and those sealed (decision D2).
+    lowers: usize,
+    /// A step failed in a way that ended the VM, or errored: the VM is only dropped.
+    failed: bool,
 }
 
 impl Session {
@@ -126,7 +152,7 @@ impl Session {
             network,
             memory_mib: MEMORY_MIB,
             cpus: CPUS,
-            source_date_epoch: None,
+            source_date_epoch: Some(crate::tarball::epoch()),
         };
         let vm = match backend.start(spec) {
             Ok(vm) => vm,
@@ -143,7 +169,28 @@ impl Session {
             boot,
             pending: Vec::new(),
             next_id: 1,
+            lowers: root,
+            failed: false,
         })
+    }
+
+    /// Whether the next step fits under kiln's lowers cap with what it must stack (D2).
+    pub fn has_room(&self) -> bool {
+        self.lowers + self.pending.len() <= MAX_BUILD_LOWERS
+    }
+
+    /// Shuts the VM down and reports how that went. Dropping a session does the same and
+    /// ignores the result.
+    pub fn finish(mut self) -> Result<(), BuildError> {
+        match self.vm.take() {
+            // A VM that failed is dead or dying: its shutdown says nothing worth reporting.
+            Some(vm) if self.failed => {
+                let _ = vm.finish();
+                Ok(())
+            }
+            Some(vm) => vm.finish(),
+            None => Ok(()),
+        }
     }
 
     pub fn network(&self) -> bool {
@@ -169,10 +216,22 @@ impl Session {
         self.next_id += 1;
         step.id = id;
         step.lowers_added = std::mem::take(&mut self.pending);
-        let outcome = self.vm.as_mut().expect("a live VM").run_step(step, sink)?;
+        let added = step.lowers_added.len();
+        let outcome = match self.vm.as_mut().expect("a live VM").run_step(step, sink) {
+            Ok(o) => o,
+            Err(e) => {
+                self.failed = true;
+                return Err(e);
+            }
+        };
+        self.lowers += added + usize::from(outcome.sealed.is_some());
+        if outcome.exit == Exit::TimedOut {
+            self.failed = true;
+        }
         if let Some(sealed) = &outcome.sealed
             && sealed.id != id
         {
+            self.failed = true;
             return Err(BuildError::Hostile(format!(
                 "the guest reported step {} sealed while step {id} ran",
                 sealed.id
