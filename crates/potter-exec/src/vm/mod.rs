@@ -3,6 +3,7 @@
 //! steps it sends, and the ingest of what comes back, which trusts nothing the guest reports.
 
 pub mod backend;
+pub mod caches;
 #[cfg(test)]
 mod chain_tests;
 pub mod disks;
@@ -20,6 +21,7 @@ use potter_cache::PotterHome;
 use crate::chain::LayerRef;
 use crate::error::{BuildError, io};
 use backend::{BuildBackend, BuildSpec, BuildVm, Exit, RunStep, StepOutcome, Stream};
+use caches::{CacheUse, HeldCache};
 use ingest::OutputDisk;
 use kiln_map::MAX_BUILD_LOWERS;
 
@@ -83,10 +85,26 @@ impl Lines {
     }
 }
 
+/// What a VM boots with.
+pub struct Boot<'a> {
+    /// The chain's layers so far, bottom first.
+    pub prefix: &'a [LayerRef],
+    /// Layers the host built for the chain's later steps, by step index, in order: as many as
+    /// fit are attached.
+    pub later: &'a [(usize, LayerRef)],
+    /// The cache disks of the VM's segment, one per id (D9).
+    pub caches: &'a [CacheUse],
+    /// Where the persistent cache disks live: `PotterHome::vm_mounts` of the tenant.
+    pub cache_root: PathBuf,
+    /// A NIC, for a segment with a networked step (D1).
+    pub network: bool,
+}
+
 /// One VM running a chain from a miss. Every disk is attached at boot: the prefix's layers
 /// (bottom ones squashed when they don't fit) and as many of the chain's later inputs and
-/// copies as fit, stacked when their step is reached. Dropping it tears the VM down and
-/// deletes its output disk.
+/// copies as fit, stacked when their step is reached, and one cache disk per cache id of its
+/// segment. Dropping it tears the VM down, deletes its output disk, discards its persistent cache
+/// disks if the VM died mid-step (D8) and releases their locks.
 pub struct Session {
     vm: Option<Box<dyn BuildVm>>,
     pub disk: OutputDisk,
@@ -99,22 +117,32 @@ pub struct Session {
     next_id: u32,
     /// Lowers kiln counts: the root's, those stacked and those sealed (decision D2).
     lowers: usize,
-    /// A step failed in a way that ended the VM, or errored: the VM is only dropped.
+    /// A step failed in a way that ended the VM, or errored after it was sent: the VM is only
+    /// dropped, and its cache disks discarded.
     failed: bool,
+    /// The cache uses the VM was booted for.
+    uses: Vec<CacheUse>,
+    /// Their disks, locks held. Declared after everything the VM uses, so they drop last.
+    caches: Vec<HeldCache>,
 }
 
 impl Session {
-    /// Boots a VM over `prefix` (bottom first) with `network`, attaching as many of `later`
-    /// (layers the host built for the chain's later steps, by step index, in order) as fit.
+    /// Boots a VM as `boot` says. `warn` gets a warning for each cache disk another build holds.
     pub fn start(
         backend: &dyn BuildBackend,
         store: &Store,
         home: &PotterHome,
-        prefix: &[LayerRef],
-        later: &[(usize, LayerRef)],
-        network: bool,
+        boot: Boot,
+        warn: &mut dyn FnMut(String),
     ) -> Result<Self, BuildError> {
-        let plan = disks::plan_disks(prefix.len(), 0, backend.max_devices(), later.len(), network)?;
+        let Boot {
+            prefix,
+            later,
+            caches: uses,
+            cache_root,
+            network,
+        } = boot;
+        let plan = disks::plan_disks(prefix.len(), uses.len(), backend.max_devices(), later.len(), network)?;
         let mut layers = Vec::new();
         let rest = if plan.squash > 0 {
             layers.push(disks::squashed(store, home, &prefix[..plan.squash])?);
@@ -126,9 +154,9 @@ impl Session {
             layers.push(disks::erofs_of(store, home, l)?);
         }
         let root = layers.len();
-        let mut boot = BTreeMap::new();
+        let mut attached = BTreeMap::new();
         for (step, l) in later.iter().take(plan.spare) {
-            boot.insert(*step, layers.len());
+            attached.insert(*step, layers.len());
             layers.push(disks::erofs_of(store, home, l)?);
         }
         std::fs::create_dir_all(home.runs()).map_err(io("creating the runs directory"))?;
@@ -138,15 +166,21 @@ impl Session {
             .map_err(io("creating a VM directory"))?
             .keep();
         let output = dir.join("output.img");
-        let made = std::fs::File::create(&output).and_then(|f| f.set_len(OUTPUT_SIZE));
-        if let Err(e) = made {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(io("creating the output disk")(e));
-        }
+        let made = std::fs::File::create(&output)
+            .and_then(|f| f.set_len(OUTPUT_SIZE))
+            .map_err(io("creating the output disk"))
+            .and_then(|()| caches::acquire(&cache_root, uses, &dir, warn));
+        let held = match made {
+            Ok(held) => held,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
+        };
         let spec = BuildSpec {
             layers,
             root,
-            cache_disks: vec![],
+            cache_disks: held.iter().map(|h| (h.path.clone(), h.target.clone())).collect(),
             output: output.clone(),
             output_size: OUTPUT_SIZE,
             network,
@@ -166,11 +200,13 @@ impl Session {
             disk: OutputDisk::new(&output, OUTPUT_SIZE),
             dir,
             network,
-            boot,
+            boot: attached,
             pending: Vec::new(),
             next_id: 1,
             lowers: root,
             failed: false,
+            uses: uses.to_vec(),
+            caches: held,
         })
     }
 
@@ -195,6 +231,11 @@ impl Session {
 
     pub fn network(&self) -> bool {
         self.network
+    }
+
+    /// Whether every one of `uses` is a cache disk this VM was booted with.
+    pub fn serves(&self, uses: &[CacheUse]) -> bool {
+        uses.iter().all(|u| self.uses.contains(u))
     }
 
     /// The chain reached step `step`, which built a layer: it is stacked before the next step
@@ -225,7 +266,10 @@ impl Session {
         let outcome = match self.vm.as_mut().expect("a live VM").run_step(step, sink) {
             Ok(o) => o,
             Err(e) => {
-                self.failed = true;
+                // A refusal sent nothing (D3): the VM and its caches are as they were.
+                if !matches!(e, BuildError::Plan(_)) {
+                    self.failed = true;
+                }
                 // kiln numbers a refused step by its id; the plan names it.
                 return Err(match e {
                     BuildError::Plan(m) => match m.strip_prefix(&format!("step {id}: ")) {
@@ -257,6 +301,11 @@ impl Drop for Session {
     fn drop(&mut self) {
         if let Some(vm) = self.vm.take() {
             let _ = vm.finish();
+        }
+        // A VM killed mid-step may have left its ext4 disks inconsistent (D8). The locks are
+        // released after, when the fields drop.
+        if self.failed {
+            caches::discard(&self.caches);
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }

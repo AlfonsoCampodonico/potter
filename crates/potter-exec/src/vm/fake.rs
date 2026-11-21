@@ -173,6 +173,14 @@ impl BuildVm for FakeVm {
         }
         let kstep = kiln_step(&step);
         self.mirror.check(&self.kspec, &kstep)?;
+        // kiln runs such a step with no egress at all (`egress: step.network && spec.network`),
+        // so the step would fail on the network in a way potter never meant: potter must boot a
+        // VM with a NIC for it. The fake refuses it, sending nothing, to catch that.
+        if step.network && !self.kspec.network {
+            return Err(BuildError::Infra(format!(
+                "step {id} asks for the network in a VM booted without a NIC"
+            )));
+        }
         let script = {
             let mut s = self.state.lock().unwrap();
             s.steps.push(step);
@@ -407,6 +415,17 @@ mod tests {
         assert_eq!(vm.run_step(bad, &mut |_, _| {}).unwrap_err().exit_code(), 2);
         assert!(fake.state().steps.is_empty(), "nothing was sent");
         assert!(vm.run_step(step(2), &mut |_, _| {}).unwrap().exit.success());
+    }
+
+    #[test]
+    fn a_networked_step_in_a_vm_without_a_nic_is_refused() {
+        let (fake, spec, _dir) = one_vm(vec![Script::files(&[("a", "1")])]);
+        let mut vm = fake.start(spec).unwrap();
+        let mut networked = step(1);
+        networked.network = true;
+        let e = vm.run_step(networked, &mut |_, _| {}).unwrap_err();
+        assert!(e.to_string().contains("without a NIC"), "{e}");
+        assert!(fake.state().steps.is_empty(), "nothing was sent");
     }
 
     #[test]

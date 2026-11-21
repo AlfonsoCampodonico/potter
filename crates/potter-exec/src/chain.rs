@@ -10,7 +10,7 @@ use kiln_registry::DockerConfig;
 use kiln_store::{Digest, Store};
 use potter_cache::{Entry, ExecutorClass, Index, PotterHome, StepInput, Tenant, base_key, step_key};
 use potter_catalog::{Arch, Location, Resolution, Verified, fetch_layer, is_php_only, resolve};
-use potter_plan::{Base, CatalogRef, Chain, Step, Target};
+use potter_plan::{Base, CacheMount, CatalogRef, Chain, Step, Target};
 
 use crate::base::{BaseImage, layer_reader, resolve_base};
 use crate::error::{BuildError, io};
@@ -369,23 +369,12 @@ pub fn run_steps(
 ) -> Result<ChainState, BuildError> {
     check_base(&chain.base, tname)?;
     check_steps(tname, &chain.steps)?;
-    if ctx.executor == ExecutorClass::Vm {
-        if ctx.backend.is_none() {
-            return Err(BuildError::Infra(
-                "VM builds need kiln build mode (kiln M3e), which this potter does not have yet; pass --executor ns"
-                    .into(),
-            ));
-        }
-        if let Some(Step::Run { name, .. }) = chain
-            .steps
-            .iter()
-            .find(|s| matches!(s, Step::Run { cache_mounts, .. } if !cache_mounts.is_empty()))
-        {
-            return Err(unsupported(
-                format!("the cache mounts of step {name} of {tname} in a VM build"),
-                "P4b (kiln build mode)",
-            ));
-        }
+    if ctx.executor == ExecutorClass::Vm && ctx.backend.is_none() {
+        return Err(BuildError::Infra(
+            "VM builds need a build VM backend: pass --executor vm with --kernel and --kiln-init (potter's CLI \
+             does this), or --executor ns"
+                .into(),
+        ));
     }
     let (lowered, steps) = lower_base(chain, role)?;
     let (base, base_ref, resolution) = match lowered {
@@ -512,6 +501,12 @@ pub fn run_steps(
                         .iter()
                         .map(|s| crate::vm::clean_target(&format!("step {sname}: secret {}", s.id), &s.target, true))
                         .collect::<Result<Vec<_>, _>>()?;
+                    // A VM build's cache disks, one per id (D9).
+                    let uses = if ctx.executor == ExecutorClass::Vm {
+                        cache_uses(&sname, cache_mounts)?
+                    } else {
+                        Vec::new()
+                    };
                     let secrets_key = potter_cache::secrets_digest(&ctx.tenant_key, &values);
                     let parent = key;
                     // One key per class this build may use, most preferred first (spec §8.4).
@@ -618,8 +613,12 @@ pub fn run_steps(
                             .entry("HOME".into())
                             .or_insert_with(|| if uid == 0 { "/root".into() } else { "/".into() });
                         // A VM booted without a NIC (a segment break came before this step's
-                        // segment was seen) can't open egress: a networked step gets a new VM.
-                        if *network && session.as_ref().is_some_and(|vm| !vm.network()) {
+                        // segment was seen) can't open egress, and one booted without this step's
+                        // cache disks can't mount them: the step gets a new VM.
+                        if session
+                            .as_ref()
+                            .is_some_and(|vm| (*network && !vm.network()) || !vm.serves(&uses))
+                        {
                             end_session(session, &mut *ctx.progress);
                         }
                         // kiln caps a VM's lowers: past it, a new VM boots from the prefix (D2).
@@ -630,12 +629,25 @@ pub fn run_steps(
                             // Every disk is attached at boot: the layers of the inputs and copies
                             // ahead, up to the next step that needs another VM, are built now.
                             // The VM has a NIC when any step of the segment needs network; kiln
-                            // opens and closes egress per step (D1).
+                            // opens and closes egress per step (D1). It has a cache disk per id
+                            // of the segment, which ends at a step mapping an id or a target
+                            // another way (D9).
                             let mut vm_network = *network;
+                            let mut vm_caches = uses.clone();
                             let mut later = Vec::new();
                             for (j, s) in steps.iter().enumerate().skip(i + 1) {
                                 match s {
-                                    Step::Run { network: n, .. } => vm_network |= *n,
+                                    Step::Run {
+                                        name,
+                                        network: n,
+                                        cache_mounts: m,
+                                        ..
+                                    } => {
+                                        if !crate::vm::caches::add_uses(&mut vm_caches, &cache_uses(name, m)?) {
+                                            break;
+                                        }
+                                        vm_network |= *n;
+                                    }
                                     Step::Inputs { .. } | Step::CopyFrom { .. } if !buildable_ahead(s) => break,
                                     Step::Inputs { .. } | Step::CopyFrom { .. } => {
                                         let l = match prebuilt.get(&j) {
@@ -649,13 +661,19 @@ pub fn run_steps(
                                 }
                             }
                             let backend = ctx.backend.expect("checked before the chain");
+                            let progress = &mut *ctx.progress;
                             *session = Some(crate::vm::Session::start(
                                 backend,
                                 ctx.store,
                                 ctx.home,
-                                &state.layers,
-                                &later,
-                                vm_network,
+                                crate::vm::Boot {
+                                    prefix: &state.layers,
+                                    later: &later,
+                                    caches: &vm_caches,
+                                    cache_root: ctx.home.vm_mounts(ctx.tenant),
+                                    network: vm_network,
+                                },
+                                &mut |w| progress(Progress::Warning(format!("step {sname}: {w}"))),
                             )?);
                         }
                         (ctx.progress)(Progress::Step {
@@ -676,7 +694,7 @@ pub fn run_steps(
                             gid: u32::try_from(gid)
                                 .map_err(|_| BuildError::Plan(format!("step {sname}: gid {gid}")))?,
                             lowers_added: vec![],
-                            mounts: vec![],
+                            mounts: uses.iter().map(|u| u.target.clone()).collect(),
                             secrets: secret_targets
                                 .into_iter()
                                 .zip(values.iter().map(|(_, v)| crate::vm::backend::Secret(v.clone())))
@@ -761,12 +779,7 @@ pub fn run_steps(
                         // Held until the step ends: exclusive mounts (spec §8.5).
                         let mut held = Vec::new();
                         for m in cache_mounts {
-                            if !potter_plan::is_name(&m.id) {
-                                return Err(BuildError::Plan(format!(
-                                    "step {sname}: the cache mount id {:?} is not a name",
-                                    m.id
-                                )));
-                            }
+                            check_cache_id(&sname, &m.id)?;
                             let root = ctx.home.mounts(ctx.tenant);
                             std::fs::create_dir_all(&root).map_err(io(format!("creating {}", root.display())))?;
                             let lock_path = root.join(format!("{}.lock", m.id));
@@ -949,6 +962,39 @@ fn end_session(session: &mut Option<crate::vm::Session>, progress: &mut dyn FnMu
             "the build VM did not shut down cleanly: {e}"
         )));
     }
+}
+
+/// Refuses a cache mount id that can't name a file or directory under the cache root: not a plan
+/// name, or `.` or `..` (which `is_name` allows).
+fn check_cache_id(sname: &str, id: &str) -> Result<(), BuildError> {
+    if !potter_plan::is_name(id) || id == "." || id == ".." {
+        return Err(BuildError::Plan(format!(
+            "step {sname}: the cache mount id {id:?} is not a name"
+        )));
+    }
+    Ok(())
+}
+
+/// The cache disks step `sname` mounts in a VM, by id and cleaned target (D9, D10), each once.
+/// A step mapping one id to two targets, or two ids to one target, is refused.
+fn cache_uses(sname: &str, mounts: &[CacheMount]) -> Result<Vec<crate::vm::caches::CacheUse>, BuildError> {
+    let mut uses = Vec::new();
+    for m in mounts {
+        check_cache_id(sname, &m.id)?;
+        let target = crate::vm::clean_target(&format!("step {sname}: cache mount {}", m.id), &m.target, false)?;
+        let u = crate::vm::caches::CacheUse {
+            id: m.id.clone(),
+            target,
+        };
+        if !crate::vm::caches::add_uses(&mut uses, std::slice::from_ref(&u)) {
+            return Err(BuildError::Plan(format!(
+                "step {sname}: the cache mount {} at {:?} conflicts with another of its cache mounts (an id at two \
+                 targets, or two ids at one target)",
+                u.id, u.target
+            )));
+        }
+    }
+    Ok(uses)
 }
 
 /// The layer of an `Inputs` or `CopyFrom` step, built on the host over `layers`, stored.
