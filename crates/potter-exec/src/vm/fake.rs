@@ -230,6 +230,7 @@ impl FakeVm {
                 })
             }
             Script::Dies { why } => {
+                // Returns before the caller's `Mirror::record`: the VM is gone, nothing more is sent.
                 let e = vm_error(kiln_run::Error::Refused(format!("step {id}: {why}")));
                 self.dead = Some(why);
                 Err(e)
@@ -374,16 +375,25 @@ mod tests {
 
     #[test]
     fn a_timed_out_or_dead_vm_refuses_more_steps_and_finish() {
-        for script in [
-            Script::Hang,
-            Script::Dies {
-                why: "the VM ended (Killed)".into(),
-            },
+        for (dies, script) in [
+            (false, Script::Hang),
+            (
+                true,
+                Script::Dies {
+                    why: "the VM ended (Killed)".into(),
+                },
+            ),
         ] {
             let (fake, spec, _dir) = one_vm(vec![script, Script::files(&[("a", "1")])]);
             let mut vm = fake.start(spec).unwrap();
-            let _ = vm.run_step(step(1), &mut |_, _| {});
-            assert_eq!(vm.run_step(step(2), &mut |_, _| {}).unwrap_err().exit_code(), 4);
+            let first = vm.run_step(step(1), &mut |_, _| {});
+            match (&dies, first) {
+                (false, r) => assert_eq!(r.unwrap().exit, Exit::TimedOut),
+                (true, r) => assert_eq!(r.unwrap_err().exit_code(), 4),
+            }
+            let later = vm.run_step(step(2), &mut |_, _| {}).unwrap_err();
+            assert_eq!(later.exit_code(), 4);
+            assert!(later.to_string().contains("has ended"), "{later}");
             assert!(vm.finish().is_err());
         }
     }
@@ -409,15 +419,22 @@ mod tests {
 
     #[test]
     fn setup_failure_and_finish_failure_are_scripted() {
-        let (fake, spec, _dir) = one_vm(vec![Script::SetupFail {
-            line: "kiln-init: no mount".into(),
-        }]);
+        let (fake, spec, _dir) = one_vm(vec![
+            Script::SetupFail {
+                line: "kiln-init: no mount".into(),
+            },
+            Script::files(&[("a", "1")]),
+        ]);
         fake.state().finish_fails = true;
         let mut vm = fake.start(spec).unwrap();
         let mut err = Vec::new();
         let o = vm.run_step(step(1), &mut |_, b| err.extend_from_slice(b)).unwrap();
         assert_eq!(o.exit, Exit::Code(125));
         assert_eq!(err, b"kiln-init: no mount\n");
+        assert!(
+            vm.run_step(step(2), &mut |_, _| {}).unwrap().exit.success(),
+            "the VM keeps working after 125"
+        );
         assert!(vm.finish().is_err());
         assert_eq!(fake.state().finished, 1);
     }
