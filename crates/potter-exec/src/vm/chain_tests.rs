@@ -792,6 +792,59 @@ fn cache_mounts_attach_one_ext4_disk_per_id_and_steps_name_their_targets() {
         crate::vm::caches::CACHE_DISK_BYTES
     );
     assert_eq!(runs_left(&w), 0);
+    assert!(
+        !w.home.vm_mounts(&Tenant::local()).join("npm.dirty").exists(),
+        "a clean run leaves no marker"
+    );
+}
+
+#[test]
+fn cache_ids_past_the_device_budget_split_the_chain_instead_of_failing() {
+    // 4 fixed devices, a layer disk and two cache disks.
+    let w = world();
+    let t = target(
+        &w,
+        vec![
+            cached("a", &[("c1", "/1")]),
+            cached("b", &[("c2", "/2")]),
+            cached("c", &[("c3", "/3")]),
+        ],
+    );
+    let fake = FakeBackend::new(7, scripts(&["a", "b", "c"]));
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    let ids: Vec<Vec<String>> = f
+        .specs
+        .iter()
+        .map(|s| s.cache_disks.iter().map(|(_, t)| t.clone()).collect())
+        .collect();
+    assert_eq!(ids, [vec!["/1".to_string(), "/2".to_string()], vec!["/3".to_string()]]);
+}
+
+#[test]
+fn a_networked_step_whose_nic_would_crowd_out_the_layer_disk_starts_a_new_vm() {
+    // Two cache disks fit beside 4 fixed devices and a layer disk; a NIC leaves room for one.
+    let w = world();
+    let mut b = cached("b", &[("c2", "/2")]);
+    if let Step::Run { network, .. } = &mut b {
+        *network = true;
+    }
+    let t = target(&w, vec![cached("a", &[("c1", "/1")]), b]);
+    let fake = FakeBackend::new(7, scripts(&["a", "b"]));
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    assert_eq!(f.specs.iter().map(|s| s.network).collect::<Vec<_>>(), [false, true]);
+}
+
+#[test]
+fn a_step_with_more_cache_disks_than_the_vmm_holds_fails_with_4() {
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("c1", "/1"), ("c2", "/2"), ("c3", "/3")])]);
+    let fake = FakeBackend::new(7, vec![]);
+    let e = vm(&w, &t, &fake).unwrap_err();
+    assert_eq!(e.exit_code(), 4, "{e}");
+    assert!(e.to_string().contains("step a mounts 3 cache disks"), "{e}");
+    assert!(fake.state().specs.is_empty());
 }
 
 #[test]
@@ -883,6 +936,7 @@ fn a_vm_that_dies_or_times_out_discards_its_cache_disks_and_a_failed_step_keeps_
         let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
         assert!(r.is_err());
         assert_eq!(w.home.vm_mounts(&Tenant::local()).join("npm.ext4").exists(), kept);
+        assert!(!w.home.vm_mounts(&Tenant::local()).join("npm.dirty").exists());
     }
 }
 

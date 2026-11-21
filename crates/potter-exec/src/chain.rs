@@ -631,7 +631,17 @@ pub fn run_steps(
                             // The VM has a NIC when any step of the segment needs network; kiln
                             // opens and closes egress per step (D1). It has a cache disk per id
                             // of the segment, which ends at a step mapping an id or a target
-                            // another way (D9).
+                            // another way (D9), or at one whose new ids would leave no room for a
+                            // layer disk.
+                            let backend = ctx.backend.expect("checked before the chain");
+                            let room = cache_room(backend.max_devices(), *network);
+                            if uses.len() > room {
+                                return Err(BuildError::Infra(format!(
+                                    "step {sname} mounts {} cache disks, and this VMM has room for {room} beside \
+                                     its fixed devices and a layer disk",
+                                    uses.len()
+                                )));
+                            }
                             let mut vm_network = *network;
                             let mut vm_caches = uses.clone();
                             let mut later = Vec::new();
@@ -643,10 +653,15 @@ pub fn run_steps(
                                         cache_mounts: m,
                                         ..
                                     } => {
-                                        if !crate::vm::caches::add_uses(&mut vm_caches, &cache_uses(name, m)?) {
+                                        let net = vm_network || *n;
+                                        let mut more = vm_caches.clone();
+                                        if !crate::vm::caches::add_uses(&mut more, &cache_uses(name, m)?)
+                                            || more.len() > cache_room(backend.max_devices(), net)
+                                        {
                                             break;
                                         }
-                                        vm_network |= *n;
+                                        vm_caches = more;
+                                        vm_network = net;
                                     }
                                     Step::Inputs { .. } | Step::CopyFrom { .. } if !buildable_ahead(s) => break,
                                     Step::Inputs { .. } | Step::CopyFrom { .. } => {
@@ -660,7 +675,6 @@ pub fn run_steps(
                                     _ => {}
                                 }
                             }
-                            let backend = ctx.backend.expect("checked before the chain");
                             let progress = &mut *ctx.progress;
                             *session = Some(crate::vm::Session::start(
                                 backend,
@@ -962,6 +976,14 @@ fn end_session(session: &mut Option<crate::vm::Session>, progress: &mut dyn FnMu
             "the build VM did not shut down cleanly: {e}"
         )));
     }
+}
+
+/// The most cache disks a VM can hold on a VMM with `max_devices`, with a NIC when `network`,
+/// and still boot with one layer disk (D9, D14).
+fn cache_room(max_devices: usize, network: bool) -> usize {
+    max_devices
+        .saturating_sub(crate::vm::backend::fixed_devices(network) + 1)
+        .min(kiln_proto::MAX_LAYERS as usize - 1)
 }
 
 /// Refuses a cache mount id that can't name a file or directory under the cache root: not a plan
