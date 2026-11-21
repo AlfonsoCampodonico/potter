@@ -258,6 +258,7 @@ mod tests {
             network: false,
             memory_mib: 4096,
             cpus: 2,
+            source_date_epoch: None,
         };
         let mut vm = fake.start(spec.clone()).unwrap();
         let mut disk = OutputDisk::new(&out, 1 << 20);

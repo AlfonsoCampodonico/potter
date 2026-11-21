@@ -39,6 +39,8 @@ pub struct BuildSpec {
     pub network: bool,
     pub memory_mib: u32,
     pub cpus: u32,
+    /// Clamps every sealed entry's mtime to at most this (kiln's `source_date_epoch`).
+    pub source_date_epoch: Option<u64>,
 }
 
 /// A secret value, which no `Debug` output shows.

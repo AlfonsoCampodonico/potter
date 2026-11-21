@@ -9,6 +9,7 @@ pub mod disks;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod ingest;
+pub mod kiln_map;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -125,6 +126,7 @@ impl Session {
             network,
             memory_mib: MEMORY_MIB,
             cpus: CPUS,
+            source_date_epoch: None,
         };
         let vm = match backend.start(spec) {
             Ok(vm) => vm,

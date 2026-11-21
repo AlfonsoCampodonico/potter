@@ -43,6 +43,8 @@ pub fn plan_disks(
     let fixed = fixed_devices(network);
     let budget = max_devices
         .checked_sub(fixed + mounts)
+        // kiln-proto allows this many layer and cache disks, whatever the VMM has.
+        .map(|b| b.min((kiln_proto::MAX_LAYERS as usize).saturating_sub(mounts)))
         .filter(|&b| b > 0)
         .ok_or_else(|| {
             BuildError::Infra(format!(
@@ -175,6 +177,16 @@ mod tests {
 
     #[test]
     fn the_budget_squashes_only_what_does_not_fit() {
+        // kiln-proto allows 128 layer and cache disks, whatever the VMM has.
+        assert_eq!(
+            plan_disks(200, 0, 300, 0, false).unwrap(),
+            DiskPlan {
+                squash: 73,
+                disks: 128,
+                spare: 0
+            }
+        );
+        assert_eq!(plan_disks(200, 8, 300, 0, false).unwrap().disks, 120);
         // 31 devices with a NIC: 26 for layers and mounts.
         let p = |prefix, mounts, reserve| plan_disks(prefix, mounts, 31, reserve, true).unwrap();
         assert_eq!(
