@@ -10,6 +10,8 @@ pub mod disks;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 pub mod ingest;
+#[cfg(target_os = "linux")]
+pub mod kiln_backend;
 pub mod kiln_map;
 
 use std::collections::BTreeMap;
