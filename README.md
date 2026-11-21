@@ -20,7 +20,7 @@ image was made. Detection only parses files; it never runs your code.
 | Layer budget and composite base | Works for every executor |
 | `potter rebase` (a patched base without a rebuild) | Works, Linux only (runtime steps re-run with `--executor ns`). Local store only: a rebased image isn't pushed with attestations yet |
 | `--output registry=`, SBOM, provenance, signing, `potter verify` | Works. KMS keys (`kms://`) are refused; there is no transparency log or keyless signing |
-| `--executor vm` (one microVM per target chain) | Experimental: implemented against a backend trait and tested with a scripted VM. The CLI refuses it (exit 4) until kiln's build mode lands |
+| `--executor vm` (one microVM per target chain) | Works on Linux with KVM: `--kernel`, `--kiln-init`, Firecracker or Cloud Hypervisor |
 | PHP web images (nginx + php-fpm as kiln-init `services`) | Planned and refused at build time (exit 2) until kiln-init starts services. Laravel with Octane on Swoole has no services and is not affected |
 | PHP layers the stopgap cannot map (for example Octane's RoadRunner and FrankenPHP servers) | Refused, naming the catalog milestone (P3) |
 | Stage bases and the Dockerfile frontend | Not implemented (P5) |
@@ -150,7 +150,7 @@ flowchart LR
     hit -- yes --> reuse["Reuse the layer"]
     hit -- no --> run["Run the step"]
     run --> ns["ns executor:<br/>vmkit sandbox"]
-    run --> vm["vm executor:<br/>build microVM (experimental)"]
+    run --> vm["vm executor:<br/>build microVM"]
     ns --> seal["Seal the diff<br/>into a layer"]
     vm --> seal
     reuse --> assemble["Assemble: run base,<br/>export, files, config"]
@@ -178,14 +178,40 @@ Requirements for the namespace executor (Linux only):
 - vmkit's `vmkit-sandbox` helper (`$VMKIT_SANDBOX`, next to `potter`, or on `PATH`), with its
   AppArmor profile where Ubuntu restricts user namespaces.
 
-The VM executor boots one microVM per target chain with every layer attached as an erofs disk. It is
-built against a `BuildBackend` trait and exercised with a scripted fake VM; the real backend waits for
-kiln's build mode. The executor class is part of every `run` step's key: VM builds look up VM entries
-only, while namespace builds may reuse VM entries.
+The VM executor (`--executor vm`) runs steps in kiln's build mode. It boots one microVM per chain
+segment with every layer attached as an erofs disk, and opens the network per step: a VM boots with a
+NIC when any of its steps needs network, and egress is closed again for the steps that do not. The
+executor class is part of every `run` step's key: VM builds look up VM entries only, while namespace
+builds may reuse VM entries. Cache mounts are 8 GiB ext4 disks under `$POTTER_HOME/vm-mounts/<tenant>/`,
+attached for the whole segment.
+
+Requirements for the VM executor (Linux with KVM only):
+- access to `/dev/kvm`;
+- a VMM: Firecracker (the default) or Cloud Hypervisor (`--vmm cloud-hypervisor`, `$POTTER_VMM`), found
+  through `$VMKIT_FIRECRACKER` / `$VMKIT_CLOUD_HYPERVISOR` or on `PATH`;
+- vmkit's `vmkit-sandbox` helper and its AppArmor profile, as for the namespace executor;
+- `pasta` and `nft` for steps with `network = true`;
+- a vmkit kernel: `--kernel` or `$POTTER_KERNEL`
+  (`oras pull ghcr.io/alfonsocampodonico/vmkit-kernels/base:6.18.54-<arch>`);
+- a static kiln-init speaking protocol version 3 (kiln 72c8257 or later, built for
+  `<arch>-unknown-linux-musl`): `--kiln-init` or `$POTTER_KILN_INIT`.
+
+#### What a VM build step can't do
+
+A step runs under kiln's step isolation, which is stricter than `docker build`:
+- no `CAP_MKNOD`, so no device nodes;
+- `/dev` is read-only with only `null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts` and `shm`
+  (no loop, fuse or block devices), and mounts are `nodev`;
+- `/proc` is read-only and partly masked (`sysctl -w` fails), and `/sys` is read-only;
+- no user namespaces: `unshare -U`, rootless podman or buildah and bubblewrap fail, and so does Chrome's
+  sandbox (pass `--no-sandbox` to headless Chrome in build steps);
+- only `user.*` (not `user.overlay.*`) and `security.capability` extended attributes reach a layer;
+- exit 125 with a `kiln-init:` line means the step's own setup failed (a secret, cache or `/etc`
+  target the image makes impossible), not the command.
 
 `$POTTER_HOME` (default `~/.local/share/potter`) holds the cache index (`cache/<tenant>/index/`),
-unpacked layers (`unpacked/`), cache mounts (`mounts/<tenant>/`) and tenant keys. Layer blobs live in
-`$KILN_HOME`.
+unpacked layers (`unpacked/`), cache mounts (`mounts/<tenant>/`), VM cache disks (`vm-mounts/<tenant>/`) and tenant keys. Layer
+blobs live in `$KILN_HOME`.
 
 ### Layer budget
 
@@ -287,7 +313,7 @@ flowchart LR
 
 | Option | Meaning |
 |---|---|
-| `--executor ns\|vm` | Required. `vm` exits 4 until kiln's build mode lands |
+| `--executor ns\|vm` | Required. `vm` also needs `--kernel` and `--kiln-init` (or `$POTTER_KERNEL`, `$POTTER_KILN_INIT`); `--vmm firecracker\|cloud-hypervisor` picks the VMM (default `firecracker`) |
 | `--target T` | Only build these targets (repeatable; default all) |
 | `--tag REF` | Tag the image (default `potter/<target>:latest`); needs exactly one `--target` |
 | `--tenant ID` | Whose cache this build uses (default `local`) |

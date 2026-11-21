@@ -1389,6 +1389,7 @@ dependencies = [
  "kiln-image",
  "kiln-oci",
  "kiln-registry",
+ "kiln-run",
  "kiln-store",
  "potter-cache",
  "potter-catalog",

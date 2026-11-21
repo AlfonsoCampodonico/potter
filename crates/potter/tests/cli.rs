@@ -181,20 +181,74 @@ fn max_layers_out_of_range_is_a_usage_error() {
     }
 }
 
+fn bare() -> assert_cmd::Command {
+    let mut c = potter();
+    c.env_remove("POTTER_KERNEL")
+        .env_remove("POTTER_KILN_INIT")
+        .env_remove("POTTER_VMM");
+    c
+}
+
 #[test]
-fn build_never_picks_the_namespace_executor_by_itself() {
-    potter()
+fn build_never_picks_an_executor_by_itself() {
+    bare()
         .args(["build"])
         .arg(fixture("explicit-go"))
         .assert()
         .code(4)
-        .stderr(predicate::str::contains("--executor ns"));
-    potter()
+        .stderr(predicate::str::contains("--executor vm").and(predicate::str::contains("--executor ns")));
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn a_vm_build_off_linux_exits_4_and_says_why() {
+    bare()
         .args(["build", "--executor", "vm"])
         .arg(fixture("explicit-go"))
         .assert()
         .code(4)
-        .stderr(predicate::str::contains("kiln build mode (kiln M3e)"));
+        .stderr(predicate::str::contains("VM builds need Linux with KVM"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_vm_build_without_a_kernel_or_kiln_init_exits_4_naming_the_flag() {
+    bare()
+        .args(["build", "--executor", "vm"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("--kernel <path> or set POTTER_KERNEL"));
+    bare()
+        .args(["build", "--executor", "vm", "--kernel", "/nonexistent"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("--kiln-init <path> or set POTTER_KILN_INIT"));
+    bare()
+        .args([
+            "build",
+            "--executor",
+            "vm",
+            "--kernel",
+            "/nonexistent",
+            "--kiln-init",
+            "/nonexistent",
+        ])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("the kernel /nonexistent is not a file"));
+}
+
+#[test]
+fn an_unknown_vmm_is_a_usage_error() {
+    bare()
+        .args(["build", "--executor", "vm", "--vmm", "qemu"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown VMM"));
 }
 
 fn build_fails(args: &[&str], code: i32, message: &str) {

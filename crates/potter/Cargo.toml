@@ -6,12 +6,13 @@ license.workspace = true
 description = "Build kiln microVM images from source"
 
 [dependencies]
+kiln-run = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "72c82570e6306c9ec2d60ae0473065110a8889d2" }
 kiln-oci = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "72c82570e6306c9ec2d60ae0473065110a8889d2" }
 kiln-registry = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "72c82570e6306c9ec2d60ae0473065110a8889d2" }
 kiln-store = { git = "https://github.com/AlfonsoCampodonico/kiln", rev = "72c82570e6306c9ec2d60ae0473065110a8889d2" }
 potter-cache = { path = "../potter-cache" }
 potter-catalog = { path = "../potter-catalog" }
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 potter-config = { path = "../potter-config" }
 potter-detect = { path = "../potter-detect" }
 potter-exec = { path = "../potter-exec" }
