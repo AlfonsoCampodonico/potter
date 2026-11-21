@@ -46,6 +46,7 @@
 | kiln | Spec: cancel the rev 2.7 native RUN-free Dockerfile backend. M3c becomes backend dispatch, with `--builder auto` trying potter, then BuildKit, then Podman/Buildah. Update the `kiln-build-backends` memory | Before M3c planning |
 | kiln | kiln-proto `Config.mode = Build`, the build-mode messages, kiln-init build mode (spec §9.3) | potter P4 |
 | vmkit | A generalised `sandbox` that runs any process, with nested userns; tap-less `net` for a bare netns (spec §4, §9.4) | potter P2 |
+| kiln | A typed guest-violation error from `BuildVm::run_step` (today potter matches message text, `kiln_map::GUEST_VIOLATIONS`) | potter P4b |
 | vmkit | Inbound port publishing in `net` (`pasta -t`) | Standalone `kiln run` (not used under the shim) |
 | kiln | kiln-proto exec (`ExecStart`/`ExecExited`, `proc` on stdio, signal and window messages), `Stats`/`OomKill`, `FileUpdate` | kiln-shim S1 |
 | kiln | Layer media type and erofs profile accepted by containerd 2.3's native EROFS layers | kiln-shim S2 |

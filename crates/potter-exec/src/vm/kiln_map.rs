@@ -122,20 +122,57 @@ pub fn start_error(e: kiln_run::Error) -> BuildError {
     BuildError::Infra(format!("the build VM did not start: {e}"))
 }
 
-/// A refusal of step `step` before it was sent (D2, D3).
-pub fn refusal(step: u32, e: kiln_run::Error) -> BuildError {
-    match e {
-        kiln_run::Error::TooManyLowers { .. } => BuildError::Infra(format!(
-            "step {step}: {e} (potter counts lowers and restarts before kiln's cap: this is a potter bug)"
-        )),
-        e => BuildError::Plan(format!("step {step}: {e}")),
+/// Prefixes `text` with the step unless kiln's message already starts with it.
+fn named(step: u32, text: String) -> String {
+    if text.starts_with("step ") {
+        text
+    } else {
+        format!("step {step}: {text}")
     }
 }
+
+/// A refusal of step `step` before it was sent (D2, D3). The match is exhaustive on purpose: a
+/// new kiln error must be classified here, not silently become a plan error.
+pub fn refusal(step: u32, e: kiln_run::Error) -> BuildError {
+    use kiln_run::Error as E;
+    match e {
+        E::TooManyLowers { .. } => BuildError::Infra(format!(
+            "{} (potter counts lowers and restarts before kiln's cap: this is a potter bug)",
+            named(step, e.to_string())
+        )),
+        E::Refused(_) | E::Proto(_) | E::Invalid { .. } => BuildError::Plan(named(step, e.to_string())),
+        E::Image(_) | E::Store(_) | E::Io(_) | E::Interrupted => BuildError::Infra(named(step, e.to_string())),
+        #[cfg(target_os = "linux")]
+        E::Vmm(_) => BuildError::Infra(named(step, e.to_string())),
+    }
+}
+
+/// What kiln's build VM says (kiln 72c82570, `kiln-run/src/linux/build.rs`) when the guest
+/// breaks the protocol or misuses a vsock port: exit 3. kiln has no typed variant, so the
+/// text is the only handle (a kiln follow-up, see the HANDOFF).
+/// - `guest protocol violation: ..`: `step_turn`, a message out of order.
+/// - `guest protocol error: ..`: `read_control`, a bad or oversized frame.
+/// - `a second connection on the control port`: the accept loop.
+/// - `an unexpected connection on vsock port ..`: `step_turn`, an output stream nobody expects.
+/// - `the guest is not reading its control channel`: `write_control`, a stalled send.
+/// - `StepSealed for step`: `BuildProtocol::accept` (`build.rs`), an impossible seal range.
+///
+/// Left out on purpose: `the guest closed the control connection` and `the VM ended` (a guest
+/// crash is not proof of hostility), and `version_refusal` (kiln-init too old: a boot error, so
+/// `start_error`, never mid-VM).
+const GUEST_VIOLATIONS: &[&str] = &[
+    "guest protocol violation",
+    "guest protocol error",
+    "a second connection on the control port",
+    "an unexpected connection on vsock port",
+    "the guest is not reading its control channel",
+    "StepSealed for step",
+];
 
 /// An error from `run_step` after the step was sent: the VM is gone (D4).
 pub fn vm_error(e: kiln_run::Error) -> BuildError {
     let text = e.to_string();
-    if text.contains("guest protocol violation") || text.contains("StepSealed for step") {
+    if GUEST_VIOLATIONS.iter().any(|v| text.contains(v)) {
         BuildError::Hostile(text)
     } else {
         BuildError::Infra(text)
@@ -296,12 +333,43 @@ mod tests {
         assert_eq!(vm_error(v).exit_code(), 3);
         let seal = kiln_run::Error::Refused("step 3: StepSealed for step 3: range 8192+4096 is refused: x".into());
         assert_eq!(vm_error(seal).exit_code(), 3);
+        for text in [
+            "guest protocol error: frame of 99999999 bytes",
+            "a second connection on the control port",
+            "an unexpected connection on vsock port 5001",
+            "the guest is not reading its control channel",
+        ] {
+            let e = vm_error(kiln_run::Error::Refused(text.into()));
+            assert_eq!(e.exit_code(), 3, "{text}");
+        }
+        let closed = kiln_run::Error::Refused("step 3: the guest closed the control connection".into());
+        assert_eq!(vm_error(closed).exit_code(), 4);
         let gone = kiln_run::Error::Refused("step 3: the VM ended (Exited)".into());
         assert_eq!(vm_error(gone).exit_code(), 4);
         assert_eq!(
             start_error(kiln_run::Error::Refused("Hello 2 (build mode needs version 3)".into())).exit_code(),
             4
         );
+    }
+
+    #[test]
+    fn refusals_name_the_step_once_and_other_kiln_errors_are_infra() {
+        let k = kiln_spec(&spec(), &cfg()).unwrap();
+        let mut bad = step(7);
+        bad.lowers_added = vec![9];
+        let e = Mirror::default().check(&k, &kiln_step(&bad)).unwrap_err();
+        assert!(e.to_string().starts_with("step 7: layer 9"), "{e}");
+        assert_eq!(e.to_string().matches("step 7").count(), 1, "{e}");
+        let full = Mirror {
+            stacked: BTreeSet::new(),
+            sealed: MAX_BUILD_LOWERS,
+        };
+        let e = full.check(&k, &kiln_step(&step(2))).unwrap_err();
+        assert_eq!(e.to_string().matches("step 2").count(), 1, "{e}");
+        let unnamed = refusal(5, kiln_run::Error::Refused("no cache disk".into()));
+        assert_eq!(unnamed.to_string(), "step 5: no cache disk");
+        assert_eq!(refusal(5, kiln_run::Error::Interrupted).exit_code(), 4);
+        assert_eq!(refusal(5, std::io::Error::other("x").into()).exit_code(), 4);
     }
 
     #[test]
