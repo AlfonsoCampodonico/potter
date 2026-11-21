@@ -611,9 +611,9 @@ pub fn run_steps(
                         step_env
                             .entry("HOME".into())
                             .or_insert_with(|| if uid == 0 { "/root".into() } else { "/".into() });
-                        // A VM has network for all its steps or none: a step that differs gets a new
-                        // VM, booted from the prefix so far.
-                        if session.as_ref().is_some_and(|vm| vm.network() != *network) {
+                        // A VM booted without a NIC (a segment break came before this step's
+                        // segment was seen) can't open egress: a networked step gets a new VM.
+                        if *network && session.as_ref().is_some_and(|vm| !vm.network()) {
                             end_session(session, &mut *ctx.progress);
                         }
                         // kiln caps a VM's lowers: past it, a new VM boots from the prefix (D2).
@@ -623,10 +623,13 @@ pub fn run_steps(
                         if session.is_none() {
                             // Every disk is attached at boot: the layers of the inputs and copies
                             // ahead, up to the next step that needs another VM, are built now.
+                            // The VM has a NIC when any step of the segment needs network; kiln
+                            // opens and closes egress per step (D1).
+                            let mut vm_network = *network;
                             let mut later = Vec::new();
                             for (j, s) in steps.iter().enumerate().skip(i + 1) {
                                 match s {
-                                    Step::Run { network: n, .. } if n != network => break,
+                                    Step::Run { network: n, .. } => vm_network |= *n,
                                     Step::Inputs { .. } | Step::CopyFrom { .. } if !buildable_ahead(s) => break,
                                     Step::Inputs { .. } | Step::CopyFrom { .. } => {
                                         let l = match prebuilt.get(&j) {
@@ -646,7 +649,7 @@ pub fn run_steps(
                                 ctx.home,
                                 &state.layers,
                                 &later,
-                                *network,
+                                vm_network,
                             )?);
                         }
                         (ctx.progress)(Progress::Step {

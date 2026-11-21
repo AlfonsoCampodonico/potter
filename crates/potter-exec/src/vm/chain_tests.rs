@@ -502,16 +502,17 @@ fn inputs_owned_by_a_name_wait_for_the_steps_before_them() {
     assert_eq!((f.specs[1].root, f.specs[1].layers.len()), (3, 3));
 }
 
+fn net(name: &str, on: bool) -> Step {
+    let mut s = run(name);
+    if let Step::Run { network, .. } = &mut s {
+        *network = on;
+    }
+    s
+}
+
 #[test]
-fn steps_with_and_without_network_never_share_a_vm() {
+fn steps_with_and_without_network_share_one_networked_vm() {
     let w = world();
-    let net = |name: &str, on: bool| {
-        let mut s = run(name);
-        if let Step::Run { network, .. } = &mut s {
-            *network = on;
-        }
-        s
-    };
     let t = target(
         &w,
         vec![net("a", false), net("b", true), net("c", true), net("d", false)],
@@ -525,11 +526,30 @@ fn steps_with_and_without_network_never_share_a_vm() {
     );
     vm(&w, &t, &fake).unwrap();
     let f = fake.state();
-    let vms: Vec<bool> = f.specs.iter().map(|s| s.network).collect();
-    assert_eq!(vms, [false, true, false]);
-    let steps: Vec<bool> = f.steps.iter().map(|s| s.network).collect();
-    assert_eq!(steps, [false, true, true, false]);
-    assert_eq!(f.finished, 3);
+    assert_eq!(f.specs.iter().map(|s| s.network).collect::<Vec<_>>(), [true]);
+    assert_eq!(
+        f.steps.iter().map(|s| s.network).collect::<Vec<_>>(),
+        [false, true, true, false]
+    );
+    assert_eq!(f.finished, 1);
+}
+
+#[test]
+fn a_chain_without_network_steps_boots_without_a_nic() {
+    let w = world();
+    let t = target(&w, vec![net("a", false), net("b", false)]);
+    let fake = FakeBackend::new(
+        31,
+        ["a", "b"]
+            .iter()
+            .map(|n| Script::files(&[(&format!("app/{n}"), "1")]))
+            .collect(),
+    );
+    vm(&w, &t, &fake).unwrap();
+    assert_eq!(
+        fake.state().specs.iter().map(|s| s.network).collect::<Vec<_>>(),
+        [false]
+    );
 }
 
 #[test]
