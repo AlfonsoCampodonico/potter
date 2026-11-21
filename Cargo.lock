@@ -1130,7 +1130,7 @@ dependencies = [
 [[package]]
 name = "kiln-erofs"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=72c82570e6306c9ec2d60ae0473065110a8889d2#72c82570e6306c9ec2d60ae0473065110a8889d2"
 dependencies = [
  "tar",
  "tempfile",
@@ -1140,11 +1140,12 @@ dependencies = [
 [[package]]
 name = "kiln-image"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=72c82570e6306c9ec2d60ae0473065110a8889d2#72c82570e6306c9ec2d60ae0473065110a8889d2"
 dependencies = [
  "flate2",
  "kiln-erofs",
  "kiln-oci",
+ "kiln-proto",
  "kiln-registry",
  "kiln-store",
  "serde",
@@ -1157,7 +1158,7 @@ dependencies = [
 [[package]]
 name = "kiln-oci"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=72c82570e6306c9ec2d60ae0473065110a8889d2#72c82570e6306c9ec2d60ae0473065110a8889d2"
 dependencies = [
  "kiln-registry",
  "kiln-store",
@@ -1168,9 +1169,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-proto"
+version = "0.1.0"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=72c82570e6306c9ec2d60ae0473065110a8889d2#72c82570e6306c9ec2d60ae0473065110a8889d2"
+dependencies = [
+ "base64 0.23.1",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "kiln-registry"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=72c82570e6306c9ec2d60ae0473065110a8889d2#72c82570e6306c9ec2d60ae0473065110a8889d2"
 dependencies = [
  "base64 0.23.1",
  "kiln-store",
@@ -1183,9 +1195,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-run"
+version = "0.1.0"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=72c82570e6306c9ec2d60ae0473065110a8889d2#72c82570e6306c9ec2d60ae0473065110a8889d2"
+dependencies = [
+ "kiln-image",
+ "kiln-proto",
+ "kiln-registry",
+ "kiln-store",
+ "rustix",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "thiserror",
+ "vmkit",
+]
+
+[[package]]
 name = "kiln-store"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=b96a9a6bd8f6b34e840cffbf2703288295342e31#b96a9a6bd8f6b34e840cffbf2703288295342e31"
+source = "git+https://github.com/AlfonsoCampodonico/kiln?rev=72c82570e6306c9ec2d60ae0473065110a8889d2#72c82570e6306c9ec2d60ae0473065110a8889d2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1449,7 +1478,9 @@ dependencies = [
  "kiln-erofs",
  "kiln-image",
  "kiln-oci",
+ "kiln-proto",
  "kiln-registry",
+ "kiln-run",
  "kiln-store",
  "potter-cache",
  "potter-catalog",
@@ -2166,6 +2197,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "signature"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2313,7 +2364,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -2551,7 +2602,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vmkit"
 version = "0.1.0"
-source = "git+https://github.com/AlfonsoCampodonico/vmkit?rev=b1baf3a0712209dbe7c7659186ad02b702524d3e#b1baf3a0712209dbe7c7659186ad02b702524d3e"
+source = "git+https://github.com/AlfonsoCampodonico/vmkit?rev=924ae248ee09d7969bb865085d4b6a19e1736eee#924ae248ee09d7969bb865085d4b6a19e1736eee"
 dependencies = [
  "libc",
  "rustix",
