@@ -54,26 +54,63 @@ pub fn clean_target(what: &str, raw: &str, file: bool) -> Result<String, BuildEr
     Ok(out)
 }
 
+/// The most bytes of one stream [`Lines`] holds without a newline: past it, they are passed on as
+/// a line of their own, so a step that never writes a newline can't exhaust potter's memory.
+pub const LINE_CAP: usize = 64 << 10;
+
 /// Joins a step's output chunks into lines, per stream; potter redacts and reports whole lines.
+/// A line longer than [`LINE_CAP`] is passed on in pieces of at most that size, never cut inside
+/// one of the texts it was given to keep whole (the redactor's secrets).
 #[derive(Default)]
 pub struct Lines {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    keep_whole: Vec<Vec<u8>>,
+    /// The longest of `keep_whole`, less one: what a piece cut at the cap must see past the cap.
+    overlap: usize,
 }
 
 impl Lines {
+    /// Lines that are never cut inside any of `keep_whole`.
+    pub fn new(keep_whole: Vec<Vec<u8>>) -> Self {
+        let keep_whole: Vec<Vec<u8>> = keep_whole.into_iter().filter(|k| !k.is_empty()).collect();
+        let overlap = keep_whole.iter().map(|k| k.len() - 1).max().unwrap_or(0);
+        Self {
+            keep_whole,
+            overlap,
+            ..Self::default()
+        }
+    }
+
     /// Adds `bytes` from `stream`, passing each line it completes to `line`.
     pub fn feed(&mut self, stream: Stream, bytes: &[u8], line: &mut dyn FnMut(&str)) {
         let buf = match stream {
             Stream::Stdout => &mut self.stdout,
             Stream::Stderr => &mut self.stderr,
         };
+        // What was already held has no newline: only the new bytes are searched.
+        let fed = buf.len();
         buf.extend_from_slice(bytes);
-        while let Some(n) = buf.iter().position(|&b| b == b'\n') {
-            let rest = buf.split_off(n + 1);
-            line(&String::from_utf8_lossy(&buf[..n]));
-            *buf = rest;
+        let newline = |buf: &[u8], from: usize| buf[from..].iter().position(|&b| b == b'\n').map(|i| from + i);
+        let mut start = 0;
+        let mut next = newline(buf, fed);
+        loop {
+            match next {
+                Some(end) if end - start <= LINE_CAP => {
+                    line(&String::from_utf8_lossy(&buf[start..end]));
+                    start = end + 1;
+                    next = newline(buf, start);
+                }
+                // Cut only once the text a kept-whole one could span past the cap is here.
+                _ if buf.len() - start > LINE_CAP + self.overlap => {
+                    let cut = start + cut_at(&buf[start..], &self.keep_whole);
+                    line(&String::from_utf8_lossy(&buf[start..cut]));
+                    start = cut;
+                }
+                _ => break,
+            }
         }
+        buf.drain(..start);
     }
 
     /// Passes on what is left without a newline.
@@ -85,6 +122,58 @@ impl Lines {
             }
         }
     }
+}
+
+/// Where to cut `pending`, longer than [`LINE_CAP`] plus the longest of `keep`: at the cap, off a
+/// UTF-8 continuation byte, then back to the start of any of `keep` that spans the cut. A kept
+/// text that starts at 0 and spans the cut is longer than the cap: it is cut anyway.
+fn cut_at(pending: &[u8], keep: &[Vec<u8>]) -> usize {
+    let mut cut = LINE_CAP;
+    while LINE_CAP - cut < 3 && pending[cut] & 0xC0 == 0x80 {
+        cut -= 1;
+    }
+    while let Some(p) = keep.iter().filter_map(|k| spanning(pending, k, cut)).min() {
+        if p == 0 {
+            break;
+        }
+        cut = p;
+    }
+    cut
+}
+
+/// The first start of `needle` in `hay` that is before `cut` and ends after it (Knuth-Morris-Pratt
+/// over the 2 × len − 1 bytes around `cut`).
+fn spanning(hay: &[u8], needle: &[u8], cut: usize) -> Option<usize> {
+    let n = needle.len();
+    if n < 2 {
+        return None;
+    }
+    let lo = cut.saturating_sub(n - 1);
+    let hi = (cut + n - 1).min(hay.len());
+    let mut fail = vec![0usize; n];
+    let mut k = 0;
+    for i in 1..n {
+        while k > 0 && needle[i] != needle[k] {
+            k = fail[k - 1];
+        }
+        if needle[i] == needle[k] {
+            k += 1;
+        }
+        fail[i] = k;
+    }
+    let mut k = 0;
+    for (i, &b) in hay[lo..hi].iter().enumerate() {
+        while k > 0 && b != needle[k] {
+            k = fail[k - 1];
+        }
+        if b == needle[k] {
+            k += 1;
+        }
+        if k == n {
+            return Some(lo + i + 1 - n);
+        }
+    }
+    None
 }
 
 /// What a VM boots with.
@@ -310,5 +399,106 @@ impl Drop for Session {
             caches::discard(&self.caches);
         }
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(test)]
+mod lines_tests {
+    use super::*;
+
+    fn collect(lines: &mut Lines, chunks: &[(Stream, &[u8])]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (s, c) in chunks {
+            lines.feed(*s, c, &mut |l| out.push(l.to_string()));
+        }
+        lines.flush(&mut |l| out.push(l.to_string()));
+        out
+    }
+
+    #[test]
+    fn ordinary_lines_are_joined_per_stream_and_split_at_newlines() {
+        let mut l = Lines::default();
+        let out = collect(
+            &mut l,
+            &[
+                (Stream::Stdout, b"one\ntw"),
+                (Stream::Stderr, b"err"),
+                (Stream::Stdout, b"o\n\nthree"),
+                (Stream::Stderr, b"or\n"),
+            ],
+        );
+        assert_eq!(out, ["one", "two", "", "error", "three"]);
+    }
+
+    #[test]
+    fn a_stream_without_newlines_stays_bounded_and_comes_out_in_capped_pieces() {
+        let mut l = Lines::default();
+        let chunk = vec![b'x'; 10_000];
+        let mut pieces = Vec::new();
+        for _ in 0..100 {
+            l.feed(Stream::Stdout, &chunk, &mut |p| pieces.push(p.len()));
+            assert!(l.stdout.len() <= LINE_CAP, "{}", l.stdout.len());
+        }
+        l.flush(&mut |p| pieces.push(p.len()));
+        assert!(pieces.iter().all(|&n| n > 0 && n <= LINE_CAP), "{pieces:?}");
+        assert_eq!(pieces.iter().sum::<usize>(), 1_000_000);
+        assert_eq!(pieces[0], LINE_CAP);
+    }
+
+    #[test]
+    fn a_long_line_before_a_newline_is_capped_too() {
+        let mut l = Lines::default();
+        let mut big = vec![b'y'; LINE_CAP * 2 + 5];
+        big.extend_from_slice(b"\nend\n");
+        let out = collect(&mut l, &[(Stream::Stdout, &big)]);
+        let lens: Vec<usize> = out.iter().map(String::len).collect();
+        assert_eq!(lens, [LINE_CAP, LINE_CAP, 5, 3]);
+    }
+
+    #[test]
+    fn a_capped_cut_never_splits_a_secret_and_redaction_still_works() {
+        let values = vec![("tok".to_string(), b"s3cr3t-token".to_vec())];
+        let redact = crate::chain::redactor(&values);
+        let mut l = Lines::new(crate::chain::keep_whole(&values));
+        // The secret starts 4 bytes before the cap.
+        let mut data = vec![b'a'; LINE_CAP - 4];
+        data.extend_from_slice(b"s3cr3t-token");
+        data.extend_from_slice(&vec![b'b'; 100]);
+        let mut out = Vec::new();
+        // Fed in small chunks, so the secret also crosses a chunk boundary.
+        for c in data.chunks(7) {
+            l.feed(Stream::Stdout, c, &mut |p| out.push(redact(p)));
+        }
+        l.flush(&mut |p| out.push(redact(p)));
+        assert!(
+            out.iter().all(|p| !p.contains("s3cr") && !p.contains("token")),
+            "{:?}",
+            out.iter().map(|p| &p[p.len().saturating_sub(20)..]).collect::<Vec<_>>()
+        );
+        assert!(out.iter().any(|p| p.contains("***")));
+        assert_eq!(out[0].len(), LINE_CAP - 4);
+    }
+
+    #[test]
+    fn redaction_works_across_a_chunk_boundary_inside_a_line() {
+        let values = vec![("tok".to_string(), b"hunter2".to_vec())];
+        let redact = crate::chain::redactor(&values);
+        let mut l = Lines::new(crate::chain::keep_whole(&values));
+        let mut out = Vec::new();
+        for c in [&b"pass=hun"[..], b"ter2 ok\n"] {
+            l.feed(Stream::Stdout, c, &mut |p| out.push(redact(p)));
+        }
+        assert_eq!(out, ["pass=*** ok"]);
+    }
+
+    #[test]
+    fn a_capped_cut_moves_off_a_utf8_continuation_byte() {
+        let mut l = Lines::default();
+        let mut data = vec![b'a'; LINE_CAP - 1];
+        data.extend_from_slice("é".as_bytes());
+        data.extend_from_slice(&[b'z'; 10]);
+        let out = collect(&mut l, &[(Stream::Stdout, &data)]);
+        assert_eq!(out[0].len(), LINE_CAP - 1);
+        assert!(out[1].starts_with('é'), "{:?}", &out[1][..4]);
     }
 }

@@ -354,6 +354,7 @@ impl Ctx {
             secrets: vec![],
             timeout,
             run_dir: runs.join("run"),
+            keep_whole: vec![],
             log: &mut log,
         })
         .unwrap();

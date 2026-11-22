@@ -732,7 +732,7 @@ pub fn run_steps(
                                     line,
                                 })
                             };
-                            let mut lines = crate::vm::Lines::default();
+                            let mut lines = crate::vm::Lines::new(keep_whole(&values));
                             let outcome = vm.run(run_step, &sname, &mut |stream, bytes| {
                                 lines.feed(stream, bytes, &mut line)
                             });
@@ -877,6 +877,7 @@ pub fn run_steps(
                             secrets: secret_mounts.clone(),
                             timeout,
                             run_dir: run.join("run"),
+                            keep_whole: keep_whole(&values),
                             log: &mut log,
                         };
                         let skip = mount_points(&step_run);
@@ -1123,6 +1124,16 @@ fn input<'a>(
 /// Replaces each secret value in a log line with `***`: the whole value and, for values that
 /// span lines or end in a newline, each of their lines (best effort, spec §5.4).
 pub fn redactor(values: &[(String, Vec<u8>)]) -> impl Fn(&str) -> String + '_ {
+    let needles = needles(values);
+    move |line: &str| {
+        needles
+            .iter()
+            .fold(line.to_string(), |l, n| l.replace(n.as_str(), "***"))
+    }
+}
+
+/// The texts [`redactor`] replaces: each secret value and each of its lines, longest first.
+fn needles(values: &[(String, Vec<u8>)]) -> Vec<String> {
     let mut needles: Vec<String> = Vec::new();
     for (_, v) in values {
         let v = String::from_utf8_lossy(v);
@@ -1133,11 +1144,12 @@ pub fn redactor(values: &[(String, Vec<u8>)]) -> impl Fn(&str) -> String + '_ {
     // Longer values first, so a line inside a longer value does not break it up.
     needles.sort_by_key(|n| std::cmp::Reverse(n.len()));
     needles.dedup();
-    move |line: &str| {
-        needles
-            .iter()
-            .fold(line.to_string(), |l, n| l.replace(n.as_str(), "***"))
-    }
+    needles
+}
+
+/// Texts a line must not be cut inside, so the redactor still sees them whole (`Lines`).
+pub fn keep_whole(values: &[(String, Vec<u8>)]) -> Vec<Vec<u8>> {
+    needles(values).into_iter().map(String::into_bytes).collect()
 }
 
 fn cache_err(e: potter_cache::CacheError) -> BuildError {
