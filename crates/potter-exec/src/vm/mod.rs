@@ -426,14 +426,7 @@ impl Session {
                 if !matches!(e, BuildError::Plan(_)) {
                     self.failed = true;
                 }
-                // kiln numbers a refused step by its id; the plan names it.
-                return Err(match e {
-                    BuildError::Plan(m) => match m.strip_prefix(&format!("step {id}: ")) {
-                        Some(rest) => BuildError::Plan(format!("step {name}: {rest}")),
-                        None => BuildError::Plan(m),
-                    },
-                    e => e,
-                });
+                return Err(named(e, id, name));
             }
         };
         self.lowers += added + usize::from(outcome.sealed.is_some());
@@ -453,6 +446,22 @@ impl Session {
     }
 }
 
+/// `e` with kiln's per-VM `step {id}: ` prefix, for the id this session gave the step, replaced
+/// by the plan's step name, whatever the error's class.
+fn named(e: BuildError, id: u32, name: &str) -> BuildError {
+    let prefix = format!("step {id}: ");
+    let rename = |m: String| match m.strip_prefix(&prefix) {
+        Some(rest) => format!("step {name}: {rest}"),
+        None => m,
+    };
+    match e {
+        BuildError::Plan(m) => BuildError::Plan(rename(m)),
+        BuildError::Infra(m) => BuildError::Infra(rename(m)),
+        BuildError::Hostile(m) => BuildError::Hostile(rename(m)),
+        e => e,
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         if let Some(vm) = self.vm.take()
@@ -467,6 +476,33 @@ impl Drop for Session {
             caches::discard(&self.caches);
         }
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(test)]
+mod named_tests {
+    use super::*;
+
+    #[test]
+    fn kilns_step_id_becomes_the_step_name_in_every_error_class() {
+        let cases: [(fn(String) -> BuildError, u8); 3] =
+            [(BuildError::Plan, 2), (BuildError::Infra, 4), (BuildError::Hostile, 3)];
+        for (make, code) in cases {
+            let e = named(make("step 7: the VM ended (Killed)".into()), 7, "build");
+            assert_eq!(e.exit_code(), code);
+            assert!(e.to_string().contains("step build: the VM ended"), "{e}");
+            assert!(!e.to_string().contains("step 7"), "{e}");
+        }
+    }
+
+    #[test]
+    fn only_the_exact_prefix_for_the_sessions_id_is_replaced() {
+        for text in ["step 17: x", "step 7 x", "the guest said step 7: x"] {
+            let e = named(BuildError::Infra(text.into()), 7, "build");
+            assert_eq!(e.to_string(), text);
+        }
+        let other = named(BuildError::StepOutput("step 7: too big".into()), 7, "build");
+        assert_eq!(other.to_string(), "step 7: too big");
     }
 }
 

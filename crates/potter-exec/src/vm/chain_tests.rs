@@ -1006,6 +1006,21 @@ fn a_panic_mid_step_discards_the_cache_disks() {
 }
 
 #[test]
+fn a_vm_error_names_the_step_by_its_plan_name() {
+    for (why, code) in [
+        ("the VM ended (Killed)", 4),
+        ("guest protocol violation: StepExited for step 9 out of order", 3),
+    ] {
+        let w = world();
+        let fake = FakeBackend::new(31, vec![Script::Dies { why: why.into() }]);
+        let e = vm(&w, &target(&w, vec![run("compile")]), &fake).unwrap_err();
+        assert_eq!(e.exit_code(), code, "{e}");
+        assert!(e.to_string().contains("step compile: "), "{e}");
+        assert!(!e.to_string().contains("step 1:"), "{e}");
+    }
+}
+
+#[test]
 fn a_refused_step_keeps_the_cache_disks() {
     let w = world();
     let mut a = cached("a", &[("npm", "/root/.npm")]);
