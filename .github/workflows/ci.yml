@@ -85,7 +85,13 @@ jobs:
           KILN_KEEP_RUN_DIR: "1"
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          scripts/vm-tests.sh out/vmlinux-*-x86_64 -- --test-threads=$(( $(nproc) > 1 ? $(nproc) / 2 : 1 ))
+          shopt -s nullglob
+          kernels=(out/vmlinux-*-x86_64)
+          if [ "${#kernels[@]}" -ne 1 ]; then
+            echo "expected exactly one out/vmlinux-*-x86_64, found ${#kernels[@]}: ${kernels[*]}" >&2
+            exit 1
+          fi
+          scripts/vm-tests.sh "${kernels[0]}" -- --test-threads=$(( $(nproc) > 1 ? $(nproc) / 2 : 1 ))
       - name: Collect the console and VMM logs of the kept run directories
         if: failure() || cancelled()
         run: |

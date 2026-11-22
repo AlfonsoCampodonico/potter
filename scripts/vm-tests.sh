@@ -5,7 +5,19 @@
 # passt and nftables, the musl target for this arch, and vmkit-sandbox's AppArmor profile at
 # $CARGO_TARGET_DIR/debug/vmkit-sandbox (the script prints the install command if it is missing).
 set -euo pipefail
+# Exactly one kernel: an unquoted glob that matched several would hand the rest to cargo.
+if [ $# -lt 1 ] || [ ! -f "$1" ]; then
+    echo "vm-tests: the first argument must be the kernel file (got ${1:-nothing})" >&2
+    exit 2
+fi
 kernel=$(realpath "$1"); shift
+for arg in "$@"; do
+    [ "$arg" = -- ] && break
+    if [ -f "$arg" ]; then
+        echo "vm-tests: more than one kernel ($kernel, $arg ...): name exactly one" >&2
+        exit 2
+    fi
+done
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 target=$(realpath -m "${CARGO_TARGET_DIR:-$root/target}")
