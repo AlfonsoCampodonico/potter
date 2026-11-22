@@ -38,3 +38,74 @@ jobs:
         env:
           VMKIT_SANDBOX: /usr/local/bin/vmkit-sandbox
           POTTER_REQUIRE_SANDBOX_TESTS: "1"
+  # VM builds end to end: kiln build mode on Firecracker, x86_64 KVM (hosted arm64 runners have no
+  # /dev/kvm; aarch64 runs in the Lima VM). kiln-init and vmkit come from the pinned revs.
+  vm-x86_64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Allow KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - run: sudo apt-get update && sudo apt-get install -y uidmap busybox-static passt nftables jq flex bison bc libelf-dev libssl-dev
+      - name: A subordinate id range for the runner user
+        run: |
+          grep -q "^$USER:" /etc/subuid || echo "$USER:200000:65536" | sudo tee -a /etc/subuid
+          grep -q "^$USER:" /etc/subgid || echo "$USER:200000:65536" | sudo tee -a /etc/subgid
+      - name: Find the pinned vmkit
+        id: vmkit
+        run: |
+          vmkit=$(cargo metadata --locked --format-version 1 | jq -c '.packages[] | select(.name == "vmkit")')
+          echo "dir=$(dirname "$(jq -r .manifest_path <<<"$vmkit")")" >> "$GITHUB_OUTPUT"
+          echo "rev=$(jq -r .source <<<"$vmkit" | sed 's/.*#//')" >> "$GITHUB_OUTPUT"
+      - run: '"${{ steps.vmkit.outputs.dir }}/scripts/install-vmms.sh" "$HOME/.local/bin"'
+      - uses: actions/cache@v4
+        with:
+          path: out/vmlinux-*-x86_64
+          key: vmkit-kernel-x86_64-${{ steps.vmkit.outputs.rev }}
+      - name: Build vmkit's kernel (cached per vmkit revision)
+        run: ls out/vmlinux-*-x86_64 2>/dev/null || "${{ steps.vmkit.outputs.dir }}/kernels/build.sh" x86_64 out
+      - name: vmkit's sandbox helper and its AppArmor profile
+        run: |
+          cargo build --locked --manifest-path "${{ steps.vmkit.outputs.dir }}/Cargo.toml" --bin vmkit-sandbox --target-dir target
+          "${{ steps.vmkit.outputs.dir }}/scripts/install-apparmor.sh" "$PWD/target/debug/vmkit-sandbox"
+      - name: VM builds end to end
+        # About half the CPUs: every test boots its own VMs. The egress test is opt-in and needs a
+        # host that serves plain HTTP. KILN_KEEP_RUN_DIR keeps every kiln run directory (console,
+        # VMM log, run.json) for the step below; potter's own scratch is gone with each test.
+        env:
+          POTTER_TEST_NETWORK: "1"
+          POTTER_TEST_EGRESS_HOST: captive.apple.com
+          KILN_KEEP_RUN_DIR: "1"
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          shopt -s nullglob
+          kernels=(out/vmlinux-*-x86_64)
+          if [ "${#kernels[@]}" -ne 1 ]; then
+            echo "expected exactly one out/vmlinux-*-x86_64, found ${#kernels[@]}: ${kernels[*]}" >&2
+            exit 1
+          fi
+          scripts/vm-tests.sh "${kernels[0]}" -- --test-threads=$(( $(nproc) > 1 ? $(nproc) / 2 : 1 ))
+      - name: Collect the console and VMM logs of the kept run directories
+        if: failure() || cancelled()
+        run: |
+          logs="$RUNNER_TEMP/kiln-logs"
+          runs=${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/kiln}
+          for dir in "${TMPDIR:-/tmp}"/kiln-run-* "${runs:-/tmp/kiln-$(id -u)}"/*; do
+            [ -d "$dir" ] || continue
+            mkdir -p "$logs/$(basename "$dir")"
+            find "$dir" -maxdepth 2 -type f \( -name '*.log' -o -name '*.stderr' -o -name run.json \) \
+              -exec cp {} "$logs/$(basename "$dir")/" \;
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure() || cancelled()
+        with:
+          name: vm-x86_64-logs
+          path: ${{ runner.temp }}/kiln-logs
+          if-no-files-found: ignore

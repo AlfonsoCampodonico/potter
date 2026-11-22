@@ -3,7 +3,7 @@
 //! capability over the sandbox's network namespace or its policy.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{BufRead, BufReader};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::mpsc;
@@ -36,7 +36,11 @@ pub struct StepRun<'a> {
     pub timeout: Duration,
     /// Holds the sandbox's own files and the step's `resolv.conf`.
     pub run_dir: PathBuf,
-    /// Called with each line of the step's output.
+    /// Texts masked in every line before `log` sees it, on both sides of a cut too
+    /// (`chain::keep_whole`; see `vm::Lines`).
+    pub keep_whole: Vec<Vec<u8>>,
+    /// Called with each line of the step's output: a longer one in pieces of `vm::LINE_CAP` bytes,
+    /// whose text can be up to 4 bytes longer where a part of a secret at an end became `***`.
     pub log: &'a mut dyn FnMut(&str),
 }
 
@@ -155,13 +159,23 @@ pub fn run_step(r: StepRun) -> Result<StepOutcome, BuildError> {
     .flatten()
     .map(|stream| {
         let tx = tx.clone();
+        let keep = r.keep_whole.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stream).split(b'\n') {
-                let Ok(line) = line else { break };
-                if tx.send(String::from_utf8_lossy(&line).into_owned()).is_err() {
-                    break;
+            // One `Lines` per stream thread, so either stream slot will do.
+            let mut lines = crate::vm::Lines::new(keep);
+            let mut send = |l: &str| {
+                let _ = tx.send(l.to_owned());
+            };
+            let mut stream = stream;
+            let mut chunk = vec![0u8; 16 << 10];
+            loop {
+                match stream.read(&mut chunk) {
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => lines.feed(crate::vm::backend::Stream::Stdout, &chunk[..n], &mut send),
                 }
             }
+            lines.flush(&mut send);
         })
     })
     .collect();

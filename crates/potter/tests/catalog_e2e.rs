@@ -158,6 +158,7 @@ fn run_in(ctx: &Ctx, image: &str, process: &[String], script: &str) -> (bool, Ve
         secrets: vec![],
         timeout: Duration::from_secs(180),
         run_dir: runs.join("run"),
+        keep_whole: vec![],
         log: &mut log,
     })
     .unwrap();

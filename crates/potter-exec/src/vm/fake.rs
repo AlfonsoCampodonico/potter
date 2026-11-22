@@ -6,8 +6,12 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use kiln_run::VmmKind;
+use kiln_run::build as kb;
+
 use super::backend::{BuildBackend, BuildSpec, BuildVm, Exit, RunStep, StepOutcome, Stream};
 use super::ingest::{ALIGN, StepSealed};
+use super::kiln_map::{Mirror, VmConfig, kiln_spec, kiln_step, start_error, vm_error};
 use crate::error::BuildError;
 
 /// How a scripted report lies.
@@ -32,8 +36,13 @@ pub enum Script {
     },
     /// The step exits with `code`, printing `lines`.
     Fail { code: i32, lines: Vec<String> },
-    /// The step runs past its timeout.
+    /// The step runs past its timeout. kiln kills the VM then, so it is dead afterwards.
     Hang,
+    /// kiln-init fails to set the step up: exit 125, `line` on stderr (a test passes a line
+    /// starting `kiln-init: `).
+    SetupFail { line: String },
+    /// The VM dies under the step: `run_step` errors and the VM is dead from then on.
+    Dies { why: String },
 }
 
 impl Script {
@@ -55,6 +64,8 @@ pub struct FakeState {
     pub specs: Vec<BuildSpec>,
     pub steps: Vec<RunStep>,
     pub finished: usize,
+    /// `finish` fails.
+    pub finish_fails: bool,
 }
 
 #[derive(Clone)]
@@ -85,6 +96,9 @@ impl BuildBackend for FakeBackend {
     }
 
     fn start(&self, spec: BuildSpec) -> Result<Box<dyn BuildVm>, BuildError> {
+        let cfg = VmConfig::new(VmmKind::Firecracker, "/fake/kernel".into(), "/fake/init".into());
+        let kspec = kiln_spec(&spec, &cfg)?;
+        kspec.check(self.max_devices as u32).map_err(start_error)?;
         let output = spec.output.clone();
         self.state().specs.push(spec);
         Ok(Box::new(FakeVm {
@@ -92,6 +106,9 @@ impl BuildBackend for FakeBackend {
             output,
             cursor: 0,
             last: 0,
+            kspec,
+            mirror: Mirror::default(),
+            dead: None,
         }))
     }
 }
@@ -101,6 +118,10 @@ struct FakeVm {
     output: PathBuf,
     cursor: u64,
     last: u64,
+    kspec: kb::BuildSpec,
+    mirror: Mirror,
+    /// Why the VM has ended, once it has.
+    dead: Option<String>,
 }
 
 /// Sends `line` and its newline in two chunks split mid-line, as a pipe may deliver them.
@@ -147,12 +168,81 @@ pub fn diff_tar(files: &[(String, Vec<u8>)]) -> (Vec<u8>, u64) {
 impl BuildVm for FakeVm {
     fn run_step(&mut self, step: RunStep, sink: &mut dyn FnMut(Stream, &[u8])) -> Result<StepOutcome, BuildError> {
         let id = step.id;
+        if let Some(why) = &self.dead {
+            return Err(BuildError::Infra(format!("the build VM has ended: {why}")));
+        }
+        let kstep = kiln_step(&step);
+        self.mirror.check(&self.kspec, &kstep)?;
+        // kiln runs such a step with no egress at all (`egress: step.network && spec.network`),
+        // so the step would fail on the network in a way potter never meant: potter must boot a
+        // VM with a NIC for it. The fake refuses it, sending nothing, to catch that.
+        if step.network && !self.kspec.network {
+            return Err(BuildError::Infra(format!(
+                "step {id} asks for the network in a VM booted without a NIC"
+            )));
+        }
         let script = {
             let mut s = self.state.lock().unwrap();
             s.steps.push(step);
             s.script.pop_front().expect("the fake VM ran out of script")
         };
+        let result = self.play(id, script, sink)?;
+        self.mirror.record(&kstep, &kiln_outcome(&result));
+        Ok(result)
+    }
+
+    fn finish(self: Box<Self>) -> Result<(), BuildError> {
+        if let Some(why) = &self.dead {
+            return Err(BuildError::Infra(format!("the build VM has ended: {why}")));
+        }
+        let mut s = self.state.lock().unwrap();
+        s.finished += 1;
+        if s.finish_fails {
+            return Err(BuildError::Infra("the guest did not end within 30s of Finish".into()));
+        }
+        Ok(())
+    }
+}
+
+/// kiln's view of an outcome, for the mirror.
+fn kiln_outcome(o: &StepOutcome) -> kb::StepOutcome {
+    kb::StepOutcome {
+        exit: match o.exit {
+            Exit::Code(c) => kb::Exit::Code(c),
+            Exit::Signal(s) => kb::Exit::Signal(s),
+            Exit::TimedOut => kb::Exit::TimedOut,
+        },
+        sealed: o.sealed.as_ref().map(|s| kiln_proto::StepSealed {
+            id: s.id,
+            offset: s.offset,
+            len: s.len,
+            sha256: s.sha256.clone(),
+            entries: s.entries,
+        }),
+    }
+}
+
+impl FakeVm {
+    fn play(
+        &mut self,
+        id: u32,
+        script: Script,
+        sink: &mut dyn FnMut(Stream, &[u8]),
+    ) -> Result<StepOutcome, BuildError> {
         match script {
+            Script::SetupFail { line } => {
+                send(sink, Stream::Stderr, &line);
+                Ok(StepOutcome {
+                    exit: Exit::Code(125),
+                    sealed: None,
+                })
+            }
+            Script::Dies { why } => {
+                // Returns before the caller's `Mirror::record`: the VM is gone, nothing more is sent.
+                let e = vm_error(kiln_run::Error::Refused(format!("step {id}: {why}")));
+                self.dead = Some(why);
+                Err(e)
+            }
             Script::Fail { code, lines } => {
                 lines.iter().for_each(|l| send(sink, Stream::Stderr, l));
                 Ok(StepOutcome {
@@ -160,10 +250,13 @@ impl BuildVm for FakeVm {
                     sealed: None,
                 })
             }
-            Script::Hang => Ok(StepOutcome {
-                exit: Exit::TimedOut,
-                sealed: None,
-            }),
+            Script::Hang => {
+                self.dead = Some(format!("step {id} timed out and kiln killed it"));
+                Ok(StepOutcome {
+                    exit: Exit::TimedOut,
+                    sealed: None,
+                })
+            }
             Script::Diff { files, lines, lie } => {
                 lines.iter().for_each(|l| send(sink, Stream::Stdout, l));
                 let (tar, entries) = diff_tar(&files);
@@ -195,11 +288,6 @@ impl BuildVm for FakeVm {
             }
         }
     }
-
-    fn finish(self: Box<Self>) -> Result<(), BuildError> {
-        self.state.lock().unwrap().finished += 1;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -228,37 +316,41 @@ mod tests {
         }
     }
 
-    #[test]
-    fn scripted_diffs_ingest_and_lies_do_not() {
+    /// A 31-device fake, a spec with a 1 MiB output file, and the directory holding it.
+    fn one_vm(script: Vec<Script>) -> (FakeBackend, BuildSpec, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("store")).unwrap();
         let out = dir.path().join("output");
         std::fs::File::create(&out).unwrap().set_len(1 << 20).unwrap();
-        let fake = FakeBackend::new(
-            31,
-            vec![
-                Script::files(&[("app/a.txt", "a")]),
-                Script::Diff {
-                    files: vec![("b".into(), b"b".to_vec())],
-                    lines: vec!["hello".into()],
-                    lie: Lie::Sha,
-                },
-                Script::Fail {
-                    code: 2,
-                    lines: vec!["boom".into()],
-                },
-            ],
-        );
         let spec = BuildSpec {
             layers: vec![],
             root: 0,
             cache_disks: vec![],
-            output: out.clone(),
+            output: out,
             output_size: 1 << 20,
             network: false,
             memory_mib: 4096,
             cpus: 2,
+            source_date_epoch: None,
         };
+        (FakeBackend::new(31, script), spec, dir)
+    }
+
+    #[test]
+    fn scripted_diffs_ingest_and_lies_do_not() {
+        let (fake, spec, dir) = one_vm(vec![
+            Script::files(&[("app/a.txt", "a")]),
+            Script::Diff {
+                files: vec![("b".into(), b"b".to_vec())],
+                lines: vec!["hello".into()],
+                lie: Lie::Sha,
+            },
+            Script::Fail {
+                code: 2,
+                lines: vec!["boom".into()],
+            },
+        ]);
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let out = spec.output.clone();
         let mut vm = fake.start(spec.clone()).unwrap();
         let mut disk = OutputDisk::new(&out, 1 << 20);
         let mut out = Vec::new();
@@ -287,5 +379,82 @@ mod tests {
         vm.finish().unwrap();
         let s = fake.state();
         assert_eq!((s.specs.as_slice(), s.steps.len(), s.finished), (&[spec][..], 3, 1));
+    }
+
+    #[test]
+    fn a_timed_out_or_dead_vm_refuses_more_steps_and_finish() {
+        for (dies, script) in [
+            (false, Script::Hang),
+            (
+                true,
+                Script::Dies {
+                    why: "the VM ended (Killed)".into(),
+                },
+            ),
+        ] {
+            let (fake, spec, _dir) = one_vm(vec![script, Script::files(&[("a", "1")])]);
+            let mut vm = fake.start(spec).unwrap();
+            let first = vm.run_step(step(1), &mut |_, _| {});
+            match (&dies, first) {
+                (false, r) => assert_eq!(r.unwrap().exit, Exit::TimedOut),
+                (true, r) => assert_eq!(r.unwrap_err().exit_code(), 4),
+            }
+            let later = vm.run_step(step(2), &mut |_, _| {}).unwrap_err();
+            assert_eq!(later.exit_code(), 4);
+            assert!(later.to_string().contains("has ended"), "{later}");
+            assert!(vm.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn the_fake_refuses_what_kiln_refuses_and_stays_usable() {
+        let (fake, spec, _dir) = one_vm(vec![Script::files(&[("a", "1")])]);
+        let mut vm = fake.start(spec).unwrap();
+        let mut bad = step(1);
+        bad.env.insert("A=B".into(), "x".into());
+        assert_eq!(vm.run_step(bad, &mut |_, _| {}).unwrap_err().exit_code(), 2);
+        assert!(fake.state().steps.is_empty(), "nothing was sent");
+        assert!(vm.run_step(step(2), &mut |_, _| {}).unwrap().exit.success());
+    }
+
+    #[test]
+    fn a_networked_step_in_a_vm_without_a_nic_is_refused() {
+        let (fake, spec, _dir) = one_vm(vec![Script::files(&[("a", "1")])]);
+        let mut vm = fake.start(spec).unwrap();
+        let mut networked = step(1);
+        networked.network = true;
+        let e = vm.run_step(networked, &mut |_, _| {}).unwrap_err();
+        assert!(e.to_string().contains("without a NIC"), "{e}");
+        assert!(fake.state().steps.is_empty(), "nothing was sent");
+    }
+
+    #[test]
+    fn a_spec_over_the_device_budget_does_not_boot() {
+        let (fake, mut spec, _dir) = one_vm(vec![]);
+        spec.layers = vec!["/l".into(); 40];
+        spec.root = 40;
+        assert_eq!(fake.start(spec).err().unwrap().exit_code(), 4);
+    }
+
+    #[test]
+    fn setup_failure_and_finish_failure_are_scripted() {
+        let (fake, spec, _dir) = one_vm(vec![
+            Script::SetupFail {
+                line: "kiln-init: no mount".into(),
+            },
+            Script::files(&[("a", "1")]),
+        ]);
+        fake.state().finish_fails = true;
+        let mut vm = fake.start(spec).unwrap();
+        let mut err = Vec::new();
+        let o = vm.run_step(step(1), &mut |_, b| err.extend_from_slice(b)).unwrap();
+        assert_eq!(o.exit, Exit::Code(125));
+        assert_eq!(err, b"kiln-init: no mount\n");
+        assert!(
+            vm.run_step(step(2), &mut |_, _| {}).unwrap().exit.success(),
+            "the VM keeps working after 125"
+        );
+        assert!(vm.finish().is_err());
+        assert_eq!(fake.state().finished, 1);
     }
 }

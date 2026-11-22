@@ -34,11 +34,14 @@ pub struct BuildSpec {
     /// The output disk potter created: a sparse raw file of `output_size` bytes.
     pub output: PathBuf,
     pub output_size: u64,
-    /// Whether the VM has a NIC, with the egress policy of spec §9.5. Every step of a VM has
-    /// the same network: steps without one run in a VM without one.
+    /// Whether the VM has a NIC, with the egress policy of spec §9.5. Egress starts closed and
+    /// each step opens it with `RunStep::network`, so a VM booted with a NIC runs networked and
+    /// non-networked steps alike.
     pub network: bool,
     pub memory_mib: u32,
     pub cpus: u32,
+    /// Clamps every sealed entry's mtime to at most this (kiln's `source_date_epoch`).
+    pub source_date_epoch: Option<u64>,
 }
 
 /// A secret value, which no `Debug` output shows.
@@ -68,7 +71,8 @@ pub struct RunStep {
     pub mounts: Vec<String>,
     /// Secret targets and values: written by the guest to a tmpfs, never to the upper.
     pub secrets: Vec<(String, Secret)>,
-    /// Egress for this step, within a VM that has network.
+    /// Egress for this step: kiln opens it for this step only, and closes it again after (no
+    /// DNS, connections cut). Needs a VM booted with `BuildSpec::network`.
     pub network: bool,
     pub timeout: Duration,
 }

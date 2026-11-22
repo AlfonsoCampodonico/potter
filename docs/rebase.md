@@ -6,9 +6,9 @@ Cloud Native Buildpacks' `rebase` does (design spec §16). A security fix in `de
 byte for byte unless they depend on the base.
 
 ```sh
-potter build . --executor ns
+potter build . --executor <ns|vm>
 # ... the base's tag is rebuilt upstream with a fix ...
-potter rebase potter/app:latest --executor ns
+potter rebase potter/app:latest --executor <ns|vm>
 ```
 
 ## What the run base is
@@ -120,7 +120,7 @@ kiln's gates decide (kiln `docs/format.md`, kiln spec §16.3). A rebase is refus
 
 | Option | Meaning |
 |---|---|
-| `--executor ns` | Required, as for `potter build`: the runtime steps run in Linux namespaces |
+| `--executor ns\|vm` | Required, as for `potter build`: the runtime steps run in Linux namespaces or a microVM (`vm` also takes `--kernel`, `--kiln-init` and `--vmm`) |
 | `--base REF` | Rebase onto another OCI image instead of resolving the recorded reference again |
 | `--tag NAME` | Tag the result (default: `IMAGE`, when it's a name; a digest needs `--tag` to tag anything) |
 | `--tenant ID` | Whose cache the runtime steps use (default `local`) |

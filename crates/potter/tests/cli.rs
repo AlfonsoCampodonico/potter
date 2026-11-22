@@ -181,20 +181,74 @@ fn max_layers_out_of_range_is_a_usage_error() {
     }
 }
 
+fn bare() -> assert_cmd::Command {
+    let mut c = potter();
+    c.env_remove("POTTER_KERNEL")
+        .env_remove("POTTER_KILN_INIT")
+        .env_remove("POTTER_VMM");
+    c
+}
+
 #[test]
-fn build_never_picks_the_namespace_executor_by_itself() {
-    potter()
+fn build_never_picks_an_executor_by_itself() {
+    bare()
         .args(["build"])
         .arg(fixture("explicit-go"))
         .assert()
         .code(4)
-        .stderr(predicate::str::contains("--executor ns"));
-    potter()
+        .stderr(predicate::str::contains("--executor vm").and(predicate::str::contains("--executor ns")));
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn a_vm_build_off_linux_exits_4_and_says_why() {
+    bare()
         .args(["build", "--executor", "vm"])
         .arg(fixture("explicit-go"))
         .assert()
         .code(4)
-        .stderr(predicate::str::contains("kiln build mode (kiln M3e)"));
+        .stderr(predicate::str::contains("VM builds need Linux with KVM"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_vm_build_without_a_kernel_or_kiln_init_exits_4_naming_the_flag() {
+    bare()
+        .args(["build", "--executor", "vm"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("--kernel <path> or set POTTER_KERNEL"));
+    bare()
+        .args(["build", "--executor", "vm", "--kernel", "/nonexistent"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("--kiln-init <path> or set POTTER_KILN_INIT"));
+    bare()
+        .args([
+            "build",
+            "--executor",
+            "vm",
+            "--kernel",
+            "/nonexistent",
+            "--kiln-init",
+            "/nonexistent",
+        ])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("the kernel /nonexistent is not a file"));
+}
+
+#[test]
+fn an_unknown_vmm_is_a_usage_error() {
+    bare()
+        .args(["build", "--executor", "vm", "--vmm", "qemu"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown VMM"));
 }
 
 fn build_fails(args: &[&str], code: i32, message: &str) {
@@ -205,6 +259,21 @@ fn build_fails(args: &[&str], code: i32, message: &str) {
         .assert()
         .code(code)
         .stderr(predicate::str::contains(message));
+}
+
+#[test]
+fn a_tag_without_one_target_is_a_usage_error_before_any_home_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_dir = dir.path().join("file");
+    std::fs::write(&not_a_dir, b"x").unwrap();
+    potter()
+        .args(["build", "--executor", "ns", "--tag", "x"])
+        .arg(fixture("nestjs"))
+        .env("POTTER_HOME", &not_a_dir)
+        .env("KILN_HOME", &not_a_dir)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--tag needs exactly one --target"));
 }
 
 #[test]
@@ -355,4 +424,63 @@ fn key_generate_then_verify_a_published_image() {
         .assert()
         .code(3)
         .stdout(predicate::str::contains("provenance: FAILED"));
+}
+
+#[test]
+fn the_vmm_comes_from_the_flag_or_the_environment() {
+    // Accepted values get past parsing: off Linux they stop at the platform check, on Linux at
+    // the missing kernel, both exit 4 and never the usage error 2.
+    for (env, flag) in [
+        (Some("cloud-hypervisor"), None),
+        (Some("qemu"), Some("firecracker")),
+        (None, Some("cloud-hypervisor")),
+        (None, None),
+    ] {
+        let mut c = bare();
+        if let Some(e) = env {
+            c.env("POTTER_VMM", e);
+        }
+        c.args(["build", "--executor", "vm"]);
+        if let Some(f) = flag {
+            c.args(["--vmm", f]);
+        }
+        c.arg(fixture("explicit-go")).assert().code(4);
+    }
+    bare()
+        .env("POTTER_VMM", "qemu")
+        .args(["build", "--executor", "vm"])
+        .arg(fixture("explicit-go"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown VMM"));
+}
+
+#[test]
+fn the_default_vmm_is_firecracker() {
+    bare()
+        .args(["build", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[default: firecracker]"));
+}
+
+#[test]
+fn a_rebase_dry_run_needs_no_vm_setup() {
+    let kiln = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let run = |extra: &[&str]| {
+        bare()
+            .env("KILN_HOME", kiln.path())
+            .env("POTTER_HOME", home.path())
+            .args(["rebase", "--dry-run"])
+            .args(extra)
+            .arg("potter/none:latest")
+            .output()
+            .unwrap()
+    };
+    let with_vm = run(&["--executor", "vm"]);
+    let without = run(&[]);
+    assert_eq!(with_vm.status.code(), without.status.code());
+    assert_eq!(with_vm.stderr, without.stderr);
+    assert!(!String::from_utf8_lossy(&with_vm.stderr).contains("VM builds need"));
 }

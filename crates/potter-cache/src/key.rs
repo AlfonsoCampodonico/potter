@@ -174,6 +174,11 @@ mod tests {
             "parent"
         );
         assert_ne!(k, step_key(&parent, &input(&run("make all"), &env)).unwrap(), "command");
+        let mut offline = step.clone();
+        if let Step::Run { network, .. } = &mut offline {
+            *network = false;
+        }
+        assert_ne!(k, step_key(&parent, &input(&offline, &env)).unwrap(), "network alone");
         let env2: BTreeMap<_, _> = [("A".to_string(), "1".to_string())].into();
         assert_ne!(k, step_key(&parent, &input(&step, &env2)).unwrap(), "env");
         let mut i = input(&step, &env);

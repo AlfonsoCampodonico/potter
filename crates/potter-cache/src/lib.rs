@@ -117,6 +117,11 @@ impl PotterHome {
         self.root.join("mounts").join(tenant.as_str())
     }
 
+    /// `tenant`'s persistent cache disks of VM builds, apart from `mounts` (decision D7).
+    pub fn vm_mounts(&self, tenant: &Tenant) -> PathBuf {
+        self.root.join("vm-mounts").join(tenant.as_str())
+    }
+
     /// Scratch for running steps, on the same filesystem as `unpacked`.
     pub fn runs(&self) -> PathBuf {
         self.root.join("runs")

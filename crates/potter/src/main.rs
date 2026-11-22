@@ -48,6 +48,8 @@ enum Cmd {
         /// Where steps run; required, because the namespace executor isolates less than a VM
         #[arg(long, value_enum)]
         executor: Option<Executor>,
+        #[command(flatten)]
+        vm: VmArgs,
         /// Whose cache this build uses
         #[arg(long, default_value = "local")]
         tenant: String,
@@ -109,6 +111,8 @@ enum Cmd {
         /// Where the runtime steps run on the new base
         #[arg(long, value_enum)]
         executor: Option<Executor>,
+        #[command(flatten)]
+        vm: VmArgs,
         /// Whose cache the runtime steps use
         #[arg(long, default_value = "local")]
         tenant: String,
@@ -273,6 +277,24 @@ enum Executor {
     Ns,
 }
 
+/// What a `--executor vm` build boots (decision D11).
+#[derive(clap::Args, Clone)]
+struct VmArgs {
+    /// The VMM for `--executor vm`: firecracker or cloud-hypervisor
+    #[arg(long, env = "POTTER_VMM", default_value = "firecracker", value_parser = parse_vmm)]
+    vmm: kiln_run::VmmKind,
+    /// A vmkit kernel for `--executor vm`
+    #[arg(long, env = "POTTER_KERNEL")]
+    kernel: Option<PathBuf>,
+    /// A static kiln-init for `--executor vm`
+    #[arg(long = "kiln-init", env = "POTTER_KILN_INIT")]
+    kiln_init: Option<PathBuf>,
+}
+
+fn parse_vmm(s: &str) -> Result<kiln_run::VmmKind, String> {
+    s.parse::<kiln_run::VmmKind>()
+}
+
 /// `--max-layers`: a budget potter-plan accepts.
 fn max_layers_arg(s: &str) -> Result<u32, String> {
     let n: u32 = s.parse().map_err(|_| format!("expected a number, not {s:?}"))?;
@@ -313,6 +335,7 @@ fn main() -> ExitCode {
             base,
             tag,
             executor,
+            vm,
             tenant,
             json,
             catalog_index,
@@ -322,6 +345,7 @@ fn main() -> ExitCode {
             base.as_deref(),
             tag.as_deref(),
             executor,
+            &vm,
             &tenant,
             json,
             catalog_index.as_deref(),
@@ -340,6 +364,7 @@ fn main() -> ExitCode {
             path,
             target,
             executor,
+            vm,
             tenant,
             no_cache,
             tags,
@@ -370,6 +395,7 @@ fn main() -> ExitCode {
                 &path,
                 &target,
                 executor,
+                &vm,
                 &tenant,
                 no_cache,
                 &tags,
@@ -681,31 +707,74 @@ fn read_secrets(flags: &[String]) -> Result<std::collections::BTreeMap<String, V
     Ok(out)
 }
 
-const VM: &str = "VM builds need kiln build mode (kiln M3e), which this potter does not have yet";
-
-/// Refuses every executor but `ns` on Linux, with the reason.
-fn check_executor(executor: Option<Executor>) -> Result<(), ExitCode> {
+/// Refuses what cannot run, with the reason; a VM build returns the config to boot it with.
+fn executor_config(
+    executor: Option<Executor>,
+    vm: &VmArgs,
+) -> Result<Option<potter_exec::vm::kiln_map::VmConfig>, String> {
+    let arch = std::env::consts::ARCH;
     match executor {
-        None => {
-            return Err(fail(
-                &format!(
-                    "choose an executor: {VM}; pass --executor ns to build in Linux namespaces, which isolate less than a VM"
-                ),
-                4,
-            ));
-        }
+        None => Err(String::from(
+            "choose an executor: --executor vm builds in a microVM (Linux with KVM, --kernel and --kiln-init), \
+             --executor ns in Linux namespaces, which isolate less than a VM",
+        )),
         Some(Executor::Vm) => {
-            return Err(fail(
-                &format!("{VM}; pass --executor ns to build in Linux namespaces"),
-                4,
-            ));
+            if !cfg!(target_os = "linux") {
+                return Err(
+                    "VM builds need Linux with KVM: run potter in a Linux VM (on macOS, Lima), where --executor ns works too"
+                        .into(),
+                );
+            }
+            let Some(kernel) = vm.kernel.clone() else {
+                return Err(format!(
+                    "VM builds need a vmkit kernel: pass --kernel <path> or set POTTER_KERNEL (oras pull ghcr.io/alfonsocampodonico/vmkit-kernels/base:6.18.54-{arch}), or pass --executor ns"
+                ));
+            };
+            let Some(init) = vm.kiln_init.clone() else {
+                return Err(format!(
+                    "VM builds need a static kiln-init speaking protocol version 3 (kiln 72c8257 or later, built for {arch}-unknown-linux-musl): pass --kiln-init <path> or set POTTER_KILN_INIT, or pass --executor ns"
+                ));
+            };
+            Ok(Some(potter_exec::vm::kiln_map::VmConfig::new(vm.vmm, kernel, init)))
         }
-        Some(Executor::Ns) => {}
+        Some(Executor::Ns) => {
+            if !cfg!(target_os = "linux") {
+                return Err("the namespace executor needs Linux".into());
+            }
+            Ok(None)
+        }
     }
-    if !cfg!(target_os = "linux") {
-        return Err(fail("the namespace executor needs Linux", 4));
+}
+
+/// `executor_config`, reporting a refusal as exit 4.
+fn check_executor(
+    executor: Option<Executor>,
+    vm: &VmArgs,
+) -> Result<Option<potter_exec::vm::kiln_map::VmConfig>, ExitCode> {
+    executor_config(executor, vm).map_err(|e| fail(&e, 4))
+}
+
+/// The VM backend for a `--executor vm` build: Linux only, which `check_executor` has ensured.
+#[cfg(target_os = "linux")]
+fn kiln_backend(
+    store: &kiln_store::Store,
+    cfg: Option<potter_exec::vm::kiln_map::VmConfig>,
+) -> Result<Option<Box<dyn potter_exec::vm::backend::BuildBackend>>, ExitCode> {
+    match cfg {
+        None => Ok(None),
+        Some(cfg) => match potter_exec::vm::kiln_backend::KilnBackend::new(store, cfg) {
+            Ok(b) => Ok(Some(Box::new(b))),
+            Err(e) => Err(fail(&e.to_string(), e.exit_code())),
+        },
     }
-    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kiln_backend(
+    _store: &kiln_store::Store,
+    _cfg: Option<potter_exec::vm::kiln_map::VmConfig>,
+) -> Result<Option<Box<dyn potter_exec::vm::backend::BuildBackend>>, ExitCode> {
+    Ok(None)
 }
 
 /// The kiln store, potter's home and potter itself (the sandbox's helper).
@@ -753,6 +822,7 @@ fn rebase(
     base: Option<&str>,
     tag: Option<&str>,
     executor: Option<Executor>,
+    vm: &VmArgs,
     tenant: &str,
     json: bool,
     catalog_index: Option<&str>,
@@ -760,12 +830,21 @@ fn rebase(
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     // A dry run runs nothing, so it needs no executor.
-    if let Err(code) = check_executor(executor).or_else(|code| if dry_run { Ok(()) } else { Err(code) }) {
-        return code;
-    }
+    let vm_cfg = match executor_config(executor, vm) {
+        Ok(c) => c,
+        Err(_) if dry_run => None,
+        Err(e) => return fail(&e, 4),
+    };
     let (store, home, potter) = match open_homes() {
         Ok(s) => s,
         Err(e) => return fail(&e, 4),
+    };
+    let backend = match dry_run {
+        true => None,
+        false => match kiln_backend(&store, vm_cfg) {
+            Ok(b) => b,
+            Err(code) => return code,
+        },
     };
     let tenant = match potter_cache::Tenant::new(tenant) {
         Ok(t) => t,
@@ -830,8 +909,11 @@ fn rebase(
         platform: kiln_oci::Platform::host(),
         no_cache: false,
         auth: kiln_registry::DockerConfig::from_env(),
-        executor: potter_cache::ExecutorClass::Ns,
-        backend: None,
+        executor: match backend {
+            Some(_) => potter_cache::ExecutorClass::Vm,
+            None => potter_cache::ExecutorClass::Ns,
+        },
+        backend: backend.as_deref(),
         secrets: &secrets,
         tenant_key,
         cache_from: None,
@@ -969,6 +1051,7 @@ fn build(
     path: &Path,
     only: &[String],
     executor: Option<Executor>,
+    vm: &VmArgs,
     tenant: &str,
     no_cache: bool,
     tags: &[String],
@@ -983,12 +1066,23 @@ fn build(
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
-    if let Err(code) = check_executor(executor) {
-        return code;
-    }
+    // A usage error comes first: neither the executor nor a home that fails to open masks it.
     if !tags.is_empty() && only.len() != 1 {
         return fail("--tag needs exactly one --target", 2);
     }
+    let vm_cfg = match check_executor(executor, vm) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    // A VM misconfiguration is reported before planning can mask it.
+    let (store, home, potter) = match open_homes() {
+        Ok(s) => s,
+        Err(e) => return fail(&e, 4),
+    };
+    let backend = match kiln_backend(&store, vm_cfg) {
+        Ok(b) => b,
+        Err(code) => return code,
+    };
     let mut planned = match potter_config::plan_repo(path, None) {
         Ok(p) => p,
         Err(e) => return fail(&e.to_string(), if e.is_infrastructure() { 4 } else { 2 }),
@@ -1027,10 +1121,6 @@ fn build(
         Err(e) => return fail(&e.to_string(), e.exit_code()),
     };
     let targets: Vec<&potter_plan::Target> = order.iter().map(|&i| &planned.plan.targets[i]).collect();
-    let (store, home, potter) = match open_homes() {
-        Ok(s) => s,
-        Err(e) => return fail(&e, 4),
-    };
     let tenant = match potter_cache::Tenant::new(tenant) {
         Ok(t) => t,
         Err(e) => return fail(&e.to_string(), 2),
@@ -1116,8 +1206,11 @@ fn build(
         platform: kiln_oci::Platform::host(),
         no_cache,
         auth: kiln_registry::DockerConfig::from_env(),
-        executor: potter_cache::ExecutorClass::Ns,
-        backend: None,
+        executor: match backend {
+            Some(_) => potter_cache::ExecutorClass::Vm,
+            None => potter_cache::ExecutorClass::Ns,
+        },
+        backend: backend.as_deref(),
         secrets: &secrets,
         tenant_key,
         cache_from: cache_from.as_ref(),

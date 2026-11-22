@@ -132,10 +132,10 @@ fn with_ctx<R>(
         runs: w.home.runs(),
     };
     let mut lines = Vec::new();
-    let mut progress = |p: Progress| {
-        if let Progress::Log { line, .. } = p {
-            lines.push(line);
-        }
+    let mut progress = |p: Progress| match p {
+        Progress::Log { line, .. } => lines.push(line),
+        Progress::Warning(w) => lines.push(format!("warning: {w}")),
+        _ => {}
     };
     let mut ctx = BuildCtx {
         store: &w.store,
@@ -338,23 +338,7 @@ fn a_vm_build_without_a_backend_fails_with_4() {
     let (r, _) = chain(&w, &t, ExecutorClass::Vm, None, &BTreeMap::new());
     let e = r.unwrap_err();
     assert_eq!(e.exit_code(), 4, "{e}");
-    assert!(e.to_string().contains("M3e"), "{e}");
-}
-
-#[test]
-fn cache_mounts_in_a_vm_build_are_refused_until_p4b() {
-    let w = world();
-    let mut step = run("a");
-    if let Step::Run { cache_mounts, .. } = &mut step {
-        cache_mounts.push(CacheMount {
-            id: "npm".into(),
-            target: "/root/.npm".into(),
-            sharing: Default::default(),
-        });
-    }
-    let fake = FakeBackend::new(31, vec![]);
-    let e = vm(&w, &target(&w, vec![step]), &fake).unwrap_err();
-    assert_eq!(e.exit_code(), 2, "{e}");
+    assert!(e.to_string().contains("--kernel"), "{e}");
 }
 
 #[test]
@@ -400,7 +384,20 @@ fn a_full_device_budget_restarts_the_vm_and_builds_the_same_layers() {
     // other; the second finds no slot, so step b boots a new VM from the whole prefix.
     let tight = world();
     let narrow = FakeBackend::new(6, script());
-    let s = vm(&tight, &target(&tight, steps), &narrow).unwrap();
+    narrow.state().finish_fails = true;
+    let (s, lines) = chain(
+        &tight,
+        &target(&tight, steps),
+        ExecutorClass::Vm,
+        Some(&narrow),
+        &BTreeMap::new(),
+    );
+    let s = s.unwrap();
+    let warnings = lines
+        .iter()
+        .filter(|l| l.starts_with("warning: the build VM did not shut down cleanly"))
+        .count();
+    assert_eq!(warnings, 2, "the replaced VM and the last one both warn: {lines:?}");
     let f = narrow.state();
     assert_eq!((f.specs.len(), f.finished), (2, 2));
     assert_eq!(f.specs[0].layers.len(), 2, "the base and the first inputs");
@@ -502,16 +499,17 @@ fn inputs_owned_by_a_name_wait_for_the_steps_before_them() {
     assert_eq!((f.specs[1].root, f.specs[1].layers.len()), (3, 3));
 }
 
+fn net(name: &str, on: bool) -> Step {
+    let mut s = run(name);
+    if let Step::Run { network, .. } = &mut s {
+        *network = on;
+    }
+    s
+}
+
 #[test]
-fn steps_with_and_without_network_never_share_a_vm() {
+fn steps_with_and_without_network_share_one_networked_vm() {
     let w = world();
-    let net = |name: &str, on: bool| {
-        let mut s = run(name);
-        if let Step::Run { network, .. } = &mut s {
-            *network = on;
-        }
-        s
-    };
     let t = target(
         &w,
         vec![net("a", false), net("b", true), net("c", true), net("d", false)],
@@ -525,11 +523,30 @@ fn steps_with_and_without_network_never_share_a_vm() {
     );
     vm(&w, &t, &fake).unwrap();
     let f = fake.state();
-    let vms: Vec<bool> = f.specs.iter().map(|s| s.network).collect();
-    assert_eq!(vms, [false, true, false]);
-    let steps: Vec<bool> = f.steps.iter().map(|s| s.network).collect();
-    assert_eq!(steps, [false, true, true, false]);
-    assert_eq!(f.finished, 3);
+    assert_eq!(f.specs.iter().map(|s| s.network).collect::<Vec<_>>(), [true]);
+    assert_eq!(
+        f.steps.iter().map(|s| s.network).collect::<Vec<_>>(),
+        [false, true, true, false]
+    );
+    assert_eq!(f.finished, 1);
+}
+
+#[test]
+fn a_chain_without_network_steps_boots_without_a_nic() {
+    let w = world();
+    let t = target(&w, vec![net("a", false), net("b", false)]);
+    let fake = FakeBackend::new(
+        31,
+        ["a", "b"]
+            .iter()
+            .map(|n| Script::files(&[(&format!("app/{n}"), "1")]))
+            .collect(),
+    );
+    vm(&w, &t, &fake).unwrap();
+    assert_eq!(
+        fake.state().specs.iter().map(|s| s.network).collect::<Vec<_>>(),
+        [false]
+    );
 }
 
 #[test]
@@ -554,4 +571,480 @@ fn output_chunks_are_joined_into_lines_per_stream() {
     let (r, lines) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
     assert_eq!(r.unwrap_err().exit_code(), 1);
     assert_eq!(lines, ["first line", "second", "an error"]);
+}
+
+#[test]
+fn a_chain_past_the_lowers_cap_restarts_from_its_prefix() {
+    let w = world();
+    let names: Vec<String> = (0..235).map(|i| format!("s{i}")).collect();
+    let t = target(&w, names.iter().map(|n| run(n)).collect());
+    let fake = FakeBackend::new(
+        31,
+        names
+            .iter()
+            .map(|n| Script::files(&[(&format!("app/{n}"), "1")]))
+            .collect(),
+    );
+    let state = vm(&w, &t, &fake).unwrap();
+    assert_eq!(state.executed, 235);
+    let f = fake.state();
+    assert_eq!(f.specs.len(), 2, "one restart");
+    assert_eq!(f.specs[0].root, 1);
+    assert!(
+        f.specs[1].root <= 27,
+        "the new VM boots from the squashed prefix: {}",
+        f.specs[1].root
+    );
+    assert_eq!(f.steps.len(), 235, "kiln refused nothing");
+    // The root is 1 lower, so exactly 230 steps fit under the cap: the 231st opens a new VM.
+    assert_eq!(f.steps[229].id, 230, "the first VM ran 230 steps");
+    assert_eq!(f.steps[230].id, 1, "the 231st step is the second VM's first");
+    assert!(
+        f.specs
+            .iter()
+            .all(|s| s.source_date_epoch == f.specs[0].source_date_epoch)
+    );
+    assert_eq!(f.finished, 2);
+}
+
+#[test]
+fn every_vm_clamps_mtimes_to_source_date_epoch() {
+    let w = world();
+    let t = target(&w, vec![run("a")]);
+    let fake = FakeBackend::new(31, vec![Script::files(&[("app/a", "1")])]);
+    vm(&w, &t, &fake).unwrap();
+    assert_eq!(fake.state().specs[0].source_date_epoch, Some(crate::tarball::epoch()));
+}
+
+#[test]
+fn a_failed_finish_after_a_good_chain_is_a_warning() {
+    let w = world();
+    let t = target(&w, vec![run("a")]);
+    let fake = FakeBackend::new(31, vec![Script::files(&[("app/a", "1")])]);
+    fake.state().finish_fails = true;
+    let (r, lines) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    r.unwrap();
+    let warning = lines
+        .iter()
+        .find(|l| l.starts_with("warning: the build VM did not shut down cleanly"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!(warning.matches("did not shut down cleanly").count(), 1, "{warning}");
+}
+
+#[test]
+fn a_vm_that_dies_mid_step_fails_with_4_and_a_violation_with_3() {
+    for (why, code) in [
+        ("the VM ended (Killed)", 4),
+        ("guest protocol violation: Running out of order", 3),
+    ] {
+        let w = world();
+        let t = target(&w, vec![run("a")]);
+        let fake = FakeBackend::new(31, vec![Script::Dies { why: why.into() }]);
+        let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+        assert_eq!(r.unwrap_err().exit_code(), code, "{why}");
+        assert_eq!(index_entries(&w), 0);
+        assert_eq!(runs_left(&w), 0);
+    }
+}
+
+#[test]
+fn a_setup_failure_exits_1_and_says_kiln_init_could_not_set_the_step_up() {
+    let w = world();
+    let t = target(&w, vec![run("a")]);
+    let line = "kiln-init: set up the step's mounts: /run/secrets/x: not a directory";
+    let fake = FakeBackend::new(31, vec![Script::SetupFail { line: line.into() }]);
+    let (r, lines) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    let e = r.unwrap_err();
+    assert_eq!(e.exit_code(), 1);
+    assert!(
+        e.to_string()
+            .contains("exit status: 125 (kiln-init could not set the step up)"),
+        "{e}"
+    );
+    assert!(lines.iter().any(|l| l == line));
+}
+
+#[test]
+fn secrets_over_a_frame_fail_with_2_before_the_step_is_sent() {
+    let w = world();
+    let mut s = run("a");
+    if let Step::Run { secrets, .. } = &mut s {
+        secrets.push(SecretRef {
+            id: "big".into(),
+            target: "/run/secrets/big".into(),
+        });
+    }
+    let t = target(&w, vec![s]);
+    let fake = FakeBackend::new(31, vec![]);
+    let secrets = BTreeMap::from([("big".to_string(), vec![b'x'; 50 << 10])]);
+    let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &secrets);
+    let e = r.unwrap_err();
+    assert_eq!(e.exit_code(), 2, "{e}");
+    assert!(e.to_string().contains("step a"), "{e}");
+    assert!(fake.state().steps.is_empty());
+}
+
+#[test]
+fn targets_are_cleaned_and_a_secret_target_ending_in_a_slash_is_refused() {
+    assert_eq!(
+        crate::vm::clean_target("t", "/run//secrets/./npm", true).unwrap(),
+        "/run/secrets/npm"
+    );
+    assert_eq!(
+        crate::vm::clean_target("t", "/root//.cache/", false).unwrap(),
+        "/root/.cache"
+    );
+    for (raw, file) in [
+        ("/run/secrets/x/", true),
+        ("/", false),
+        ("//", false),
+        ("/a/../b", false),
+    ] {
+        assert_eq!(
+            crate::vm::clean_target("t", raw, file).unwrap_err().exit_code(),
+            2,
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn a_125_without_a_kiln_init_line_is_a_plain_exit_status() {
+    let w = world();
+    let t = target(&w, vec![run("a")]);
+    let fake = FakeBackend::new(
+        31,
+        vec![Script::Fail {
+            code: 125,
+            lines: vec!["make: *** [a] Error".into()],
+        }],
+    );
+    let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    let e = r.unwrap_err();
+    assert_eq!(e.exit_code(), 1);
+    assert!(e.to_string().contains("exit status: 125"), "{e}");
+    assert!(!e.to_string().contains("kiln-init could not"), "{e}");
+}
+
+#[test]
+fn a_bad_secret_target_is_refused_before_any_vm_boots() {
+    let w = world();
+    let mut s = run("a");
+    if let Step::Run { secrets, .. } = &mut s {
+        secrets.push(SecretRef {
+            id: "k".into(),
+            target: "/run/secrets/k/".into(),
+        });
+    }
+    let t = target(&w, vec![s]);
+    let fake = FakeBackend::new(31, vec![]);
+    let secrets = BTreeMap::from([("k".to_string(), b"v".to_vec())]);
+    let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &secrets);
+    assert_eq!(r.unwrap_err().exit_code(), 2);
+    assert!(fake.state().specs.is_empty());
+}
+
+fn cached(name: &str, mounts: &[(&str, &str)]) -> Step {
+    let mut s = run(name);
+    if let Step::Run { cache_mounts, .. } = &mut s {
+        *cache_mounts = mounts
+            .iter()
+            .map(|(id, target)| CacheMount {
+                id: id.to_string(),
+                target: target.to_string(),
+                sharing: Sharing::Exclusive,
+            })
+            .collect();
+    }
+    s
+}
+
+fn scripts(names: &[&str]) -> Vec<Script> {
+    names
+        .iter()
+        .map(|n| Script::files(&[(&format!("app/{n}"), "1")]))
+        .collect()
+}
+
+#[test]
+fn cache_mounts_attach_one_ext4_disk_per_id_and_steps_name_their_targets() {
+    let w = world();
+    let t = target(
+        &w,
+        vec![
+            cached("a", &[("npm", "/root//.npm/")]),
+            cached("b", &[("npm", "/root/.npm")]),
+        ],
+    );
+    let fake = FakeBackend::new(31, scripts(&["a", "b"]));
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    assert_eq!(f.specs.len(), 1);
+    let disk = w.home.vm_mounts(&Tenant::local()).join("npm.ext4");
+    assert_eq!(f.specs[0].cache_disks, [(disk.clone(), "/root/.npm".to_string())]);
+    assert_eq!(
+        f.steps.iter().map(|s| s.mounts.clone()).collect::<Vec<_>>(),
+        vec![vec!["/root/.npm".to_string()]; 2]
+    );
+    assert_eq!(
+        std::fs::metadata(&disk).unwrap().len(),
+        crate::vm::caches::CACHE_DISK_BYTES
+    );
+    assert_eq!(runs_left(&w), 0);
+    assert!(
+        !w.home.vm_mounts(&Tenant::local()).join("npm.dirty").exists(),
+        "a clean run leaves no marker"
+    );
+}
+
+#[test]
+fn cache_ids_past_the_device_budget_split_the_chain_instead_of_failing() {
+    // 4 fixed devices, a layer disk and two cache disks.
+    let w = world();
+    let t = target(
+        &w,
+        vec![
+            cached("a", &[("c1", "/1")]),
+            cached("b", &[("c2", "/2")]),
+            cached("c", &[("c3", "/3")]),
+        ],
+    );
+    let fake = FakeBackend::new(7, scripts(&["a", "b", "c"]));
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    let ids: Vec<Vec<String>> = f
+        .specs
+        .iter()
+        .map(|s| s.cache_disks.iter().map(|(_, t)| t.clone()).collect())
+        .collect();
+    assert_eq!(ids, [vec!["/1".to_string(), "/2".to_string()], vec!["/3".to_string()]]);
+}
+
+#[test]
+fn a_networked_step_whose_nic_would_crowd_out_the_layer_disk_starts_a_new_vm() {
+    // Two cache disks fit beside 4 fixed devices and a layer disk; a NIC leaves room for one.
+    let w = world();
+    let mut b = cached("b", &[("c2", "/2")]);
+    if let Step::Run { network, .. } = &mut b {
+        *network = true;
+    }
+    let t = target(&w, vec![cached("a", &[("c1", "/1")]), b]);
+    let fake = FakeBackend::new(7, scripts(&["a", "b"]));
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    assert_eq!(f.specs.iter().map(|s| s.network).collect::<Vec<_>>(), [false, true]);
+}
+
+#[test]
+fn a_step_with_more_cache_disks_than_the_vmm_holds_fails_with_4() {
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("c1", "/1"), ("c2", "/2"), ("c3", "/3")])]);
+    let fake = FakeBackend::new(7, vec![]);
+    let e = vm(&w, &t, &fake).unwrap_err();
+    assert_eq!(e.exit_code(), 4, "{e}");
+    assert!(e.to_string().contains("step a mounts 3 cache disks"), "{e}");
+    assert!(fake.state().specs.is_empty());
+}
+
+#[test]
+fn one_id_at_two_targets_splits_the_chain_into_two_vms() {
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("c", "/x")]), cached("b", &[("c", "/y")])]);
+    let fake = FakeBackend::new(31, scripts(&["a", "b"]));
+    vm(&w, &t, &fake).unwrap();
+    let f = fake.state();
+    let targets: Vec<Vec<String>> = f
+        .specs
+        .iter()
+        .map(|s| s.cache_disks.iter().map(|(_, t)| t.clone()).collect())
+        .collect();
+    assert_eq!(targets, [vec!["/x".to_string()], vec!["/y".to_string()]]);
+    assert_eq!(f.finished, 2);
+}
+
+#[test]
+fn two_ids_at_one_target_split_the_chain_and_a_step_that_maps_them_itself_is_refused() {
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("c", "/x")]), cached("b", &[("d", "/x")])]);
+    let fake = FakeBackend::new(31, scripts(&["a", "b"]));
+    vm(&w, &t, &fake).unwrap();
+    assert_eq!(fake.state().specs.len(), 2);
+
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("c", "/x"), ("c", "/y")])]);
+    let fake = FakeBackend::new(31, vec![]);
+    let e = vm(&w, &t, &fake).unwrap_err();
+    assert_eq!(e.exit_code(), 2, "{e}");
+    assert!(e.to_string().contains("step a"), "{e}");
+    assert!(fake.state().specs.is_empty());
+}
+
+#[test]
+fn a_cache_break_before_a_networked_step_boots_the_first_vm_without_a_nic() {
+    let w = world();
+    let mut b = cached("b", &[("c", "/y")]);
+    if let Step::Run { network, .. } = &mut b {
+        *network = true;
+    }
+    let t = target(&w, vec![cached("a", &[("c", "/x")]), b]);
+    let fake = FakeBackend::new(31, scripts(&["a", "b"]));
+    vm(&w, &t, &fake).unwrap();
+    assert_eq!(
+        fake.state().specs.iter().map(|s| s.network).collect::<Vec<_>>(),
+        [false, true]
+    );
+}
+
+#[test]
+fn a_cache_disk_in_use_by_another_build_gives_an_empty_one_and_a_warning() {
+    let w = world();
+    let root = w.home.vm_mounts(&Tenant::local());
+    std::fs::create_dir_all(&root).unwrap();
+    let lock = std::fs::File::create(root.join("npm.lock")).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let t = target(&w, vec![cached("a", &[("npm", "/root/.npm")])]);
+    let fake = FakeBackend::new(31, vec![Script::files(&[("app/a", "1")])]);
+    let (r, lines) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    r.unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("cache mount npm is in use by another build")),
+        "{lines:?}"
+    );
+    assert!(!fake.state().specs[0].cache_disks[0].0.starts_with(&root));
+    assert!(!root.join("npm.ext4").exists());
+    assert_eq!(runs_left(&w), 0, "the empty disk went with the VM's directory");
+}
+
+#[test]
+fn a_vm_that_dies_or_times_out_discards_its_cache_disks_and_a_failed_step_keeps_them() {
+    for (script, kept) in [
+        (Script::Hang, false),
+        (
+            Script::Dies {
+                why: "the VM ended (Killed)".into(),
+            },
+            false,
+        ),
+        (Script::Fail { code: 1, lines: vec![] }, true),
+    ] {
+        let w = world();
+        let t = target(&w, vec![cached("a", &[("npm", "/root/.npm")])]);
+        let fake = FakeBackend::new(31, vec![script]);
+        let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+        assert!(r.is_err());
+        assert_eq!(w.home.vm_mounts(&Tenant::local()).join("npm.ext4").exists(), kept);
+        assert!(!w.home.vm_mounts(&Tenant::local()).join("npm.dirty").exists());
+    }
+}
+
+#[test]
+fn a_failed_shutdown_after_a_good_chain_discards_the_cache_disks() {
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("npm", "/root/.npm")])]);
+    let fake = FakeBackend::new(31, vec![Script::files(&[("app/a", "1")])]);
+    fake.state().finish_fails = true;
+    let (r, lines) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    r.unwrap();
+    assert!(lines.iter().any(|l| l.starts_with("warning: ")), "{lines:?}");
+    let root = w.home.vm_mounts(&Tenant::local());
+    assert!(!root.join("npm.ext4").exists(), "an unsynced disk is not reused");
+    assert!(!root.join("npm.dirty").exists());
+    // A clean shutdown keeps it.
+    let t = target(&w, vec![cached("b", &[("npm", "/root/.npm")])]);
+    let fake = FakeBackend::new(31, vec![Script::files(&[("app/b", "1")])]);
+    let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    r.unwrap();
+    assert!(root.join("npm.ext4").exists());
+}
+
+/// A backend whose VM panics in its first step.
+struct Panics;
+
+struct PanicVm;
+
+impl BuildBackend for Panics {
+    fn max_devices(&self) -> usize {
+        31
+    }
+
+    fn start(&self, _: super::backend::BuildSpec) -> Result<Box<dyn super::backend::BuildVm>, BuildError> {
+        Ok(Box::new(PanicVm))
+    }
+}
+
+impl super::backend::BuildVm for PanicVm {
+    fn run_step(
+        &mut self,
+        _: super::backend::RunStep,
+        _: &mut dyn FnMut(super::backend::Stream, &[u8]),
+    ) -> Result<super::backend::StepOutcome, BuildError> {
+        panic!("a bug mid-step");
+    }
+
+    fn finish(self: Box<Self>) -> Result<(), BuildError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_panic_mid_step_discards_the_cache_disks() {
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("npm", "/root/.npm")])]);
+    let root = w.home.vm_mounts(&Tenant::local());
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        chain(&w, &t, ExecutorClass::Vm, Some(&Panics), &BTreeMap::new())
+    }));
+    assert!(unwound.is_err());
+    assert!(
+        root.join("npm.lock").exists(),
+        "the session got as far as the cache disks"
+    );
+    assert!(!root.join("npm.ext4").exists());
+    assert!(!root.join("npm.dirty").exists());
+}
+
+#[test]
+fn a_vm_error_names_the_step_by_its_plan_name() {
+    for (why, code) in [
+        ("the VM ended (Killed)", 4),
+        ("guest protocol violation: StepExited for step 9 out of order", 3),
+    ] {
+        let w = world();
+        let fake = FakeBackend::new(31, vec![Script::Dies { why: why.into() }]);
+        let e = vm(&w, &target(&w, vec![run("compile")]), &fake).unwrap_err();
+        assert_eq!(e.exit_code(), code, "{e}");
+        assert!(e.to_string().contains("step compile: "), "{e}");
+        assert!(!e.to_string().contains("step 1:"), "{e}");
+    }
+}
+
+#[test]
+fn a_refused_step_keeps_the_cache_disks() {
+    let w = world();
+    let mut a = cached("a", &[("npm", "/root/.npm")]);
+    if let Step::Run { env, .. } = &mut a {
+        env.insert("A=B".into(), "x".into());
+    }
+    let fake = FakeBackend::new(31, vec![]);
+    let e = vm(&w, &target(&w, vec![a]), &fake).unwrap_err();
+    assert_eq!(e.exit_code(), 2, "{e}");
+    assert!(w.home.vm_mounts(&Tenant::local()).join("npm.ext4").exists());
+}
+
+#[test]
+fn a_bad_cache_mount_is_refused_before_any_vm_boots() {
+    for (id, target) in [("..", "/x"), ("c", "/a/../b"), ("c", "/")] {
+        let w = world();
+        let t = target_of(&w, cached("a", &[(id, target)]));
+        let fake = FakeBackend::new(31, vec![]);
+        let e = vm(&w, &t, &fake).unwrap_err();
+        assert_eq!(e.exit_code(), 2, "{id} {target}: {e}");
+        assert!(fake.state().specs.is_empty());
+    }
+}
+
+fn target_of(w: &World, step: Step) -> Target {
+    target(w, vec![step])
 }

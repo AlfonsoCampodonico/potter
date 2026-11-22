@@ -10,7 +10,7 @@ use kiln_registry::DockerConfig;
 use kiln_store::{Digest, Store};
 use potter_cache::{Entry, ExecutorClass, Index, PotterHome, StepInput, Tenant, base_key, step_key};
 use potter_catalog::{Arch, Location, Resolution, Verified, fetch_layer, is_php_only, resolve};
-use potter_plan::{Base, CatalogRef, Chain, Step, Target};
+use potter_plan::{Base, CacheMount, CatalogRef, Chain, Step, Target};
 
 use crate::base::{BaseImage, layer_reader, resolve_base};
 use crate::error::{BuildError, io};
@@ -369,23 +369,12 @@ pub fn run_steps(
 ) -> Result<ChainState, BuildError> {
     check_base(&chain.base, tname)?;
     check_steps(tname, &chain.steps)?;
-    if ctx.executor == ExecutorClass::Vm {
-        if ctx.backend.is_none() {
-            return Err(BuildError::Infra(
-                "VM builds need kiln build mode (kiln M3e), which this potter does not have yet; pass --executor ns"
-                    .into(),
-            ));
-        }
-        if let Some(Step::Run { name, .. }) = chain
-            .steps
-            .iter()
-            .find(|s| matches!(s, Step::Run { cache_mounts, .. } if !cache_mounts.is_empty()))
-        {
-            return Err(unsupported(
-                format!("the cache mounts of step {name} of {tname} in a VM build"),
-                "P4b (kiln build mode)",
-            ));
-        }
+    if ctx.executor == ExecutorClass::Vm && ctx.backend.is_none() {
+        return Err(BuildError::Infra(
+            "VM builds need a build VM backend: pass --executor vm with --kernel and --kiln-init (potter's CLI \
+             does this), or --executor ns"
+                .into(),
+        ));
     }
     let (lowered, steps) = lower_base(chain, role)?;
     let (base, base_ref, resolution) = match lowered {
@@ -480,7 +469,7 @@ pub fn run_steps(
                     if let Some(vm) = session.as_mut()
                         && !vm.reached(i)
                     {
-                        *session = None;
+                        end_session(session, &mut *ctx.progress);
                     }
                 }
                 Step::Run {
@@ -506,6 +495,18 @@ pub fn run_steps(
                         })?;
                         values.push((s.id.clone(), value.clone()));
                     }
+                    // Targets are checked before any lookup or boot: a bad one is a plan error
+                    // a cache hit can't mask.
+                    let secret_targets = secrets
+                        .iter()
+                        .map(|s| crate::vm::clean_target(&format!("step {sname}: secret {}", s.id), &s.target, true))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // A VM build's cache disks, one per id (D9).
+                    let uses = if ctx.executor == ExecutorClass::Vm {
+                        cache_uses(&sname, cache_mounts)?
+                    } else {
+                        Vec::new()
+                    };
                     let secrets_key = potter_cache::secrets_digest(&ctx.tenant_key, &values);
                     let parent = key;
                     // One key per class this build may use, most preferred first (spec §8.4).
@@ -611,18 +612,57 @@ pub fn run_steps(
                         step_env
                             .entry("HOME".into())
                             .or_insert_with(|| if uid == 0 { "/root".into() } else { "/".into() });
-                        // A VM has network for all its steps or none: a step that differs gets a new
-                        // VM, booted from the prefix so far.
-                        if session.as_ref().is_some_and(|vm| vm.network() != *network) {
-                            *session = None;
+                        // A VM booted without a NIC (a segment break came before this step's
+                        // segment was seen) can't open egress, and one booted without this step's
+                        // cache disks can't mount them: the step gets a new VM.
+                        if session
+                            .as_ref()
+                            .is_some_and(|vm| (*network && !vm.network()) || !vm.serves(&uses))
+                        {
+                            end_session(session, &mut *ctx.progress);
+                        }
+                        // kiln caps a VM's lowers: past it, a new VM boots from the prefix (D2).
+                        if session.as_ref().is_some_and(|vm| !vm.has_room()) {
+                            end_session(session, &mut *ctx.progress);
                         }
                         if session.is_none() {
                             // Every disk is attached at boot: the layers of the inputs and copies
                             // ahead, up to the next step that needs another VM, are built now.
+                            // The VM has a NIC when any step of the segment needs network; kiln
+                            // opens and closes egress per step (D1). It has a cache disk per id
+                            // of the segment, which ends at a step mapping an id or a target
+                            // another way (D9), or at one whose new ids would leave no room for a
+                            // layer disk.
+                            let backend = ctx.backend.expect("checked before the chain");
+                            let room = cache_room(backend.max_devices(), *network);
+                            if uses.len() > room {
+                                return Err(BuildError::Infra(format!(
+                                    "step {sname} mounts {} cache disks, and this VMM has room for {room} beside \
+                                     its fixed devices and a layer disk",
+                                    uses.len()
+                                )));
+                            }
+                            let mut vm_network = *network;
+                            let mut vm_caches = uses.clone();
                             let mut later = Vec::new();
                             for (j, s) in steps.iter().enumerate().skip(i + 1) {
                                 match s {
-                                    Step::Run { network: n, .. } if n != network => break,
+                                    Step::Run {
+                                        name,
+                                        network: n,
+                                        cache_mounts: m,
+                                        ..
+                                    } => {
+                                        let net = vm_network || *n;
+                                        let mut more = vm_caches.clone();
+                                        if !crate::vm::caches::add_uses(&mut more, &cache_uses(name, m)?)
+                                            || more.len() > cache_room(backend.max_devices(), net)
+                                        {
+                                            break;
+                                        }
+                                        vm_caches = more;
+                                        vm_network = net;
+                                    }
                                     Step::Inputs { .. } | Step::CopyFrom { .. } if !buildable_ahead(s) => break,
                                     Step::Inputs { .. } | Step::CopyFrom { .. } => {
                                         let l = match prebuilt.get(&j) {
@@ -635,14 +675,19 @@ pub fn run_steps(
                                     _ => {}
                                 }
                             }
-                            let backend = ctx.backend.expect("checked before the chain");
+                            let progress = &mut *ctx.progress;
                             *session = Some(crate::vm::Session::start(
                                 backend,
                                 ctx.store,
                                 ctx.home,
-                                &state.layers,
-                                &later,
-                                *network,
+                                crate::vm::Boot {
+                                    prefix: &state.layers,
+                                    later: &later,
+                                    caches: &vm_caches,
+                                    cache_root: ctx.home.vm_mounts(ctx.tenant),
+                                    network: vm_network,
+                                },
+                                &mut |w| progress(Progress::Warning(format!("step {sname}: {w}"))),
                             )?);
                         }
                         (ctx.progress)(Progress::Step {
@@ -663,10 +708,9 @@ pub fn run_steps(
                             gid: u32::try_from(gid)
                                 .map_err(|_| BuildError::Plan(format!("step {sname}: gid {gid}")))?,
                             lowers_added: vec![],
-                            mounts: vec![],
-                            secrets: secrets
-                                .iter()
-                                .map(|s| s.target.clone())
+                            mounts: uses.iter().map(|u| u.target.clone()).collect(),
+                            secrets: secret_targets
+                                .into_iter()
                                 .zip(values.iter().map(|(_, v)| crate::vm::backend::Secret(v.clone())))
                                 .collect(),
                             network: *network,
@@ -688,8 +732,10 @@ pub fn run_steps(
                                     line,
                                 })
                             };
-                            let mut lines = crate::vm::Lines::default();
-                            let outcome = vm.run(run_step, &mut |stream, bytes| lines.feed(stream, bytes, &mut line));
+                            let mut lines = crate::vm::Lines::new(keep_whole(&values));
+                            let outcome = vm.run(run_step, &sname, &mut |stream, bytes| {
+                                lines.feed(stream, bytes, &mut line)
+                            });
                             lines.flush(&mut line);
                             outcome?
                         };
@@ -699,8 +745,12 @@ pub fn run_steps(
                                 step: sname.clone(),
                                 state: StepState::Failed,
                             });
+                            let setup_failed = tail.iter().any(|l| l.starts_with("kiln-init: "));
                             let status = match outcome.exit {
                                 crate::vm::backend::Exit::TimedOut => format!("timed out after {}s", timeout.as_secs()),
+                                e @ crate::vm::backend::Exit::Code(125) if setup_failed => {
+                                    format!("{e} (kiln-init could not set the step up)")
+                                }
                                 e => e.to_string(),
                             };
                             return Err(BuildError::StepFailed {
@@ -743,12 +793,7 @@ pub fn run_steps(
                         // Held until the step ends: exclusive mounts (spec §8.5).
                         let mut held = Vec::new();
                         for m in cache_mounts {
-                            if !potter_plan::is_name(&m.id) {
-                                return Err(BuildError::Plan(format!(
-                                    "step {sname}: the cache mount id {:?} is not a name",
-                                    m.id
-                                )));
-                            }
+                            check_cache_id(&sname, &m.id)?;
                             let root = ctx.home.mounts(ctx.tenant);
                             std::fs::create_dir_all(&root).map_err(io(format!("creating {}", root.display())))?;
                             let lock_path = root.join(format!("{}.lock", m.id));
@@ -832,6 +877,7 @@ pub fn run_steps(
                             secrets: secret_mounts.clone(),
                             timeout,
                             run_dir: run.join("run"),
+                            keep_whole: keep_whole(&values),
                             log: &mut log,
                         };
                         let skip = mount_points(&step_run);
@@ -909,11 +955,69 @@ pub fn run_steps(
         }
         Ok(())
     })();
+    // A chain that succeeded verified and stored every diff: the VM's shutdown is a warning.
+    // After a failure the session is just dropped.
+    if result.is_ok() {
+        end_session(&mut vm_session, &mut *ctx.progress);
+    }
     drop(vm_session);
     for run in runs {
         let _ = ctx.sandbox.remove(&run);
     }
     result.map(|()| state)
+}
+
+/// Ends the build VM, if any. An unclean shutdown after the diffs were verified and stored
+/// can't corrupt the build, so it is a warning (decision D5).
+fn end_session(session: &mut Option<crate::vm::Session>, progress: &mut dyn FnMut(Progress)) {
+    if let Some(vm) = session.take()
+        && let Err(e) = vm.finish()
+    {
+        progress(Progress::Warning(format!(
+            "the build VM did not shut down cleanly: {e}"
+        )));
+    }
+}
+
+/// The most cache disks a VM can hold on a VMM with `max_devices`, with a NIC when `network`,
+/// and still boot with one layer disk (D9, D14).
+fn cache_room(max_devices: usize, network: bool) -> usize {
+    max_devices
+        .saturating_sub(crate::vm::backend::fixed_devices(network) + 1)
+        .min(kiln_proto::MAX_LAYERS as usize - 1)
+}
+
+/// Refuses a cache mount id that can't name a file or directory under the cache root: not a plan
+/// name, or `.` or `..` (which `is_name` allows).
+fn check_cache_id(sname: &str, id: &str) -> Result<(), BuildError> {
+    if !potter_plan::is_name(id) || id == "." || id == ".." {
+        return Err(BuildError::Plan(format!(
+            "step {sname}: the cache mount id {id:?} is not a name"
+        )));
+    }
+    Ok(())
+}
+
+/// The cache disks step `sname` mounts in a VM, by id and cleaned target (D9, D10), each once.
+/// A step mapping one id to two targets, or two ids to one target, is refused.
+fn cache_uses(sname: &str, mounts: &[CacheMount]) -> Result<Vec<crate::vm::caches::CacheUse>, BuildError> {
+    let mut uses = Vec::new();
+    for m in mounts {
+        check_cache_id(sname, &m.id)?;
+        let target = crate::vm::clean_target(&format!("step {sname}: cache mount {}", m.id), &m.target, false)?;
+        let u = crate::vm::caches::CacheUse {
+            id: m.id.clone(),
+            target,
+        };
+        if !crate::vm::caches::add_uses(&mut uses, std::slice::from_ref(&u)) {
+            return Err(BuildError::Plan(format!(
+                "step {sname}: the cache mount {} at {:?} conflicts with another of its cache mounts (an id at two \
+                 targets, or two ids at one target)",
+                u.id, u.target
+            )));
+        }
+    }
+    Ok(uses)
 }
 
 /// The layer of an `Inputs` or `CopyFrom` step, built on the host over `layers`, stored.
@@ -1020,6 +1124,16 @@ fn input<'a>(
 /// Replaces each secret value in a log line with `***`: the whole value and, for values that
 /// span lines or end in a newline, each of their lines (best effort, spec §5.4).
 pub fn redactor(values: &[(String, Vec<u8>)]) -> impl Fn(&str) -> String + '_ {
+    let needles = needles(values);
+    move |line: &str| {
+        needles
+            .iter()
+            .fold(line.to_string(), |l, n| l.replace(n.as_str(), "***"))
+    }
+}
+
+/// The texts [`redactor`] replaces: each secret value and each of its lines, longest first.
+fn needles(values: &[(String, Vec<u8>)]) -> Vec<String> {
     let mut needles: Vec<String> = Vec::new();
     for (_, v) in values {
         let v = String::from_utf8_lossy(v);
@@ -1030,11 +1144,24 @@ pub fn redactor(values: &[(String, Vec<u8>)]) -> impl Fn(&str) -> String + '_ {
     // Longer values first, so a line inside a longer value does not break it up.
     needles.sort_by_key(|n| std::cmp::Reverse(n.len()));
     needles.dedup();
-    move |line: &str| {
-        needles
-            .iter()
-            .fold(line.to_string(), |l, n| l.replace(n.as_str(), "***"))
+    needles
+}
+
+/// The texts `vm::Lines` masks, on both sides of a cut too: each secret's raw bytes and raw lines, and
+/// the redactor's lossy [`needles`], so a secret is matched both as the step wrote it and as the
+/// redactor sees it.
+pub fn keep_whole(values: &[(String, Vec<u8>)]) -> Vec<Vec<u8>> {
+    let mut keep: Vec<Vec<u8>> = needles(values).into_iter().map(String::into_bytes).collect();
+    for (_, v) in values {
+        keep.push(v.clone());
+        for l in v.split(|&b| b == b'\n') {
+            keep.push(l.strip_suffix(b"\r").unwrap_or(l).to_vec());
+        }
     }
+    keep.retain(|k| !k.iter().all(u8::is_ascii_whitespace));
+    keep.sort_by_key(|k| std::cmp::Reverse(k.len()));
+    keep.dedup();
+    keep
 }
 
 fn cache_err(e: potter_cache::CacheError) -> BuildError {
