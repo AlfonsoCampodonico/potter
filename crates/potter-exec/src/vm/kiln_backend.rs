@@ -70,9 +70,8 @@ impl BuildVm for KilnVm {
     }
 
     fn finish(self: Box<Self>) -> Result<(), BuildError> {
-        self.vm
-            .finish()
-            .map_err(|e| BuildError::Infra(format!("the build VM did not shut down cleanly: {e}")))
+        // `chain::end_session` says what failed: kiln's error is passed on as it is.
+        self.vm.finish().map_err(|e| BuildError::Infra(e.to_string()))
     }
 }
 

@@ -198,7 +198,7 @@ impl BuildVm for FakeVm {
         let mut s = self.state.lock().unwrap();
         s.finished += 1;
         if s.finish_fails {
-            return Err(BuildError::Infra("the build VM did not shut down cleanly".into()));
+            return Err(BuildError::Infra("the guest did not end within 30s of Finish".into()));
         }
         Ok(())
     }

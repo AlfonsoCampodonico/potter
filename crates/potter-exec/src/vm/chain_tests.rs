@@ -624,12 +624,11 @@ fn a_failed_finish_after_a_good_chain_is_a_warning() {
     fake.state().finish_fails = true;
     let (r, lines) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
     r.unwrap();
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("warning: the build VM did not shut down cleanly")),
-        "{lines:?}"
-    );
+    let warning = lines
+        .iter()
+        .find(|l| l.starts_with("warning: the build VM did not shut down cleanly"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!(warning.matches("did not shut down cleanly").count(), 1, "{warning}");
 }
 
 #[test]
