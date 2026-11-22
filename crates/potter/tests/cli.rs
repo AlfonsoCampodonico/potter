@@ -262,6 +262,21 @@ fn build_fails(args: &[&str], code: i32, message: &str) {
 }
 
 #[test]
+fn a_tag_without_one_target_is_a_usage_error_before_any_home_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_dir = dir.path().join("file");
+    std::fs::write(&not_a_dir, b"x").unwrap();
+    potter()
+        .args(["build", "--executor", "ns", "--tag", "x"])
+        .arg(fixture("nestjs"))
+        .env("POTTER_HOME", &not_a_dir)
+        .env("KILN_HOME", &not_a_dir)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--tag needs exactly one --target"));
+}
+
+#[test]
 fn output_flags_are_checked_before_anything_runs() {
     build_fails(&["--output", "oci=x"], 2, "--output: expected registry=<ref>");
     build_fails(&["--output", "registry=Bad Ref"], 2, "--output");

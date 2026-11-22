@@ -1066,6 +1066,10 @@ fn build(
 ) -> ExitCode {
     use potter_exec::chain::{BuildCtx, Progress, StepState};
     use serde_json::json;
+    // A usage error comes first: neither the executor nor a home that fails to open masks it.
+    if !tags.is_empty() && only.len() != 1 {
+        return fail("--tag needs exactly one --target", 2);
+    }
     let vm_cfg = match check_executor(executor, vm) {
         Ok(c) => c,
         Err(code) => return code,
@@ -1079,9 +1083,6 @@ fn build(
         Ok(b) => b,
         Err(code) => return code,
     };
-    if !tags.is_empty() && only.len() != 1 {
-        return fail("--tag needs exactly one --target", 2);
-    }
     let mut planned = match potter_config::plan_repo(path, None) {
         Ok(p) => p,
         Err(e) => return fail(&e.to_string(), if e.is_infrastructure() { 4 } else { 2 }),
