@@ -195,7 +195,8 @@ pub struct Boot<'a> {
 /// (bottom ones squashed when they don't fit) and as many of the chain's later inputs and
 /// copies as fit, stacked when their step is reached, and one cache disk per cache id of its
 /// segment. Dropping it tears the VM down, deletes its output disk, discards its persistent cache
-/// disks if the VM died mid-step (D8) and releases their locks.
+/// disks if the VM died mid-step, did not shut down cleanly or the thread is panicking (D8), and
+/// releases their locks.
 pub struct Session {
     vm: Option<Box<dyn BuildVm>>,
     pub disk: OutputDisk,
@@ -308,16 +309,17 @@ impl Session {
 
     /// Shuts the VM down and reports how that went. Dropping a session does the same and
     /// ignores the result.
+    /// A failed shutdown discards the persistent cache disks: the guest may not have synced them
+    /// (D8).
     pub fn finish(mut self) -> Result<(), BuildError> {
-        match self.vm.take() {
-            // A VM that failed is dead or dying: its shutdown says nothing worth reporting.
-            Some(vm) if self.failed => {
-                let _ = vm.finish();
-                Ok(())
-            }
-            Some(vm) => vm.finish(),
-            None => Ok(()),
+        let Some(vm) = self.vm.take() else { return Ok(()) };
+        let was_failed = self.failed;
+        let result = vm.finish();
+        if result.is_err() {
+            self.failed = true;
         }
+        // A VM that failed is dead or dying: its shutdown says nothing worth reporting.
+        if was_failed { Ok(()) } else { result }
     }
 
     pub fn network(&self) -> bool {
@@ -390,12 +392,15 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(vm) = self.vm.take() {
-            let _ = vm.finish();
+        if let Some(vm) = self.vm.take()
+            && vm.finish().is_err()
+        {
+            self.failed = true;
         }
-        // A VM killed mid-step may have left its ext4 disks inconsistent (D8). The locks are
+        // A VM killed mid-step, or shut down uncleanly, may have left its ext4 disks
+        // inconsistent (D8); so may one whose build is unwinding from a panic. The locks are
         // released after, when the fields drop.
-        if self.failed {
+        if self.failed || std::thread::panicking() {
             caches::discard(&self.caches);
         }
         let _ = std::fs::remove_dir_all(&self.dir);

@@ -940,6 +940,72 @@ fn a_vm_that_dies_or_times_out_discards_its_cache_disks_and_a_failed_step_keeps_
 }
 
 #[test]
+fn a_failed_shutdown_after_a_good_chain_discards_the_cache_disks() {
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("npm", "/root/.npm")])]);
+    let fake = FakeBackend::new(31, vec![Script::files(&[("app/a", "1")])]);
+    fake.state().finish_fails = true;
+    let (r, lines) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    r.unwrap();
+    assert!(lines.iter().any(|l| l.starts_with("warning: ")), "{lines:?}");
+    let root = w.home.vm_mounts(&Tenant::local());
+    assert!(!root.join("npm.ext4").exists(), "an unsynced disk is not reused");
+    assert!(!root.join("npm.dirty").exists());
+    // A clean shutdown keeps it.
+    let t = target(&w, vec![cached("b", &[("npm", "/root/.npm")])]);
+    let fake = FakeBackend::new(31, vec![Script::files(&[("app/b", "1")])]);
+    let (r, _) = chain(&w, &t, ExecutorClass::Vm, Some(&fake), &BTreeMap::new());
+    r.unwrap();
+    assert!(root.join("npm.ext4").exists());
+}
+
+/// A backend whose VM panics in its first step.
+struct Panics;
+
+struct PanicVm;
+
+impl BuildBackend for Panics {
+    fn max_devices(&self) -> usize {
+        31
+    }
+
+    fn start(&self, _: super::backend::BuildSpec) -> Result<Box<dyn super::backend::BuildVm>, BuildError> {
+        Ok(Box::new(PanicVm))
+    }
+}
+
+impl super::backend::BuildVm for PanicVm {
+    fn run_step(
+        &mut self,
+        _: super::backend::RunStep,
+        _: &mut dyn FnMut(super::backend::Stream, &[u8]),
+    ) -> Result<super::backend::StepOutcome, BuildError> {
+        panic!("a bug mid-step");
+    }
+
+    fn finish(self: Box<Self>) -> Result<(), BuildError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_panic_mid_step_discards_the_cache_disks() {
+    let w = world();
+    let t = target(&w, vec![cached("a", &[("npm", "/root/.npm")])]);
+    let root = w.home.vm_mounts(&Tenant::local());
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        chain(&w, &t, ExecutorClass::Vm, Some(&Panics), &BTreeMap::new())
+    }));
+    assert!(unwound.is_err());
+    assert!(
+        root.join("npm.lock").exists(),
+        "the session got as far as the cache disks"
+    );
+    assert!(!root.join("npm.ext4").exists());
+    assert!(!root.join("npm.dirty").exists());
+}
+
+#[test]
 fn a_refused_step_keeps_the_cache_disks() {
     let w = world();
     let mut a = cached("a", &[("npm", "/root/.npm")]);
