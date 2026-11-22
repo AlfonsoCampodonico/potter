@@ -94,6 +94,17 @@ pub fn busybox_root() -> Vec<u8> {
 
 /// [`busybox_root`] with `motd` as `/etc/motd`: a patched build of the same root.
 pub fn busybox_root_with_motd(motd: &[u8]) -> Vec<u8> {
+    busybox_root_with(motd, &[])
+}
+
+/// The busybox root for VM builds: [`busybox_root`] plus the `unshare`, `wget` and `nslookup`
+/// applets the VM tests run.
+pub fn vm_busybox_root() -> Vec<u8> {
+    busybox_root_with(b"hello\n", &["unshare", "wget", "nslookup"])
+}
+
+/// [`busybox_root_with_motd`] with `extra` applets besides the usual ones.
+fn busybox_root_with(motd: &[u8], extra: &[&str]) -> Vec<u8> {
     use kiln_erofs::testtar::{Opts, TarBuilder};
     let dir = Opts::default().mode(0o755);
     let file = Opts::default().mode(0o644);
@@ -107,7 +118,10 @@ pub fn busybox_root_with_motd(motd: &[u8]) -> Vec<u8> {
     t.file("bin/busybox", &busybox, &Opts::default().mode(0o755));
     for applet in [
         "sh", "mkdir", "echo", "rm", "id", "pwd", "test", "sleep", "cat", "ls", "touch", "chown", "wc", "env", "printf",
-    ] {
+    ]
+    .iter()
+    .chain(extra)
+    {
         t.symlink(&format!("bin/{applet}"), "busybox", &dir);
     }
     t.file(
@@ -122,6 +136,16 @@ pub fn busybox_root_with_motd(motd: &[u8]) -> Vec<u8> {
 
 /// The busybox root as an image on kiln's in-process registry; returns the reference.
 pub fn serve_busybox() -> (kiln_registry::testregistry::TestRegistry, tempfile::TempDir, String) {
+    serve_root(busybox_root())
+}
+
+/// [`vm_busybox_root`] on kiln's in-process registry, as [`serve_busybox`].
+pub fn serve_vm_busybox() -> (kiln_registry::testregistry::TestRegistry, tempfile::TempDir, String) {
+    serve_root(vm_busybox_root())
+}
+
+/// `root` as a one-layer image on kiln's in-process registry; returns the reference.
+fn serve_root(root: Vec<u8>) -> (kiln_registry::testregistry::TestRegistry, tempfile::TempDir, String) {
     use kiln_oci::testlayout::{LayoutBuilder, TestLayer};
     let dir = tempfile::tempdir().unwrap();
     let mut layout = LayoutBuilder::new(dir.path());
@@ -129,7 +153,7 @@ pub fn serve_busybox() -> (kiln_registry::testregistry::TestRegistry, tempfile::
         env: Some(vec!["PATH=/bin".into()]),
         ..Default::default()
     };
-    let image = layout.image(&kiln_oci::Platform::host(), &[TestLayer::tar(busybox_root())], config);
+    let image = layout.image(&kiln_oci::Platform::host(), &[TestLayer::tar(root)], config);
     layout.add(image, Some("1"));
     let path = layout.finish();
     let reg = kiln_registry::testregistry::TestRegistry::serve_layout(&path, Default::default());
@@ -368,4 +392,118 @@ pub fn xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
     let n = rustix::fs::lgetxattr(path, name, &mut buf).ok()?;
     buf.truncate(n);
     Some(buf)
+}
+
+/// What a VM build needs besides the sandbox helper: vmkit's kernel and a static kiln-init.
+pub struct VmEnv {
+    pub kernel: PathBuf,
+    pub init: PathBuf,
+}
+
+/// `POTTER_TEST_KERNEL` and `POTTER_TEST_KILN_INIT`; `None` (the VM tests skip) when either is
+/// unset, unless `POTTER_REQUIRE_VM_TESTS=1`.
+pub fn vm_env() -> Option<&'static VmEnv> {
+    static ENV: std::sync::OnceLock<Option<VmEnv>> = std::sync::OnceLock::new();
+    ENV.get_or_init(|| {
+        let kernel = std::env::var_os("POTTER_TEST_KERNEL");
+        let init = std::env::var_os("POTTER_TEST_KILN_INIT");
+        match (kernel, init) {
+            (Some(kernel), Some(init)) => Some(VmEnv {
+                kernel: kernel.into(),
+                init: init.into(),
+            }),
+            _ => {
+                assert!(
+                    std::env::var_os("POTTER_REQUIRE_VM_TESTS").is_none_or(|v| v != "1"),
+                    "POTTER_REQUIRE_VM_TESTS is set but POTTER_TEST_KERNEL/POTTER_TEST_KILN_INIT are not"
+                );
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+
+/// A backend that counts the VMs it boots.
+pub struct Counting<'a> {
+    pub inner: &'a dyn potter_exec::vm::backend::BuildBackend,
+    pub boots: std::cell::Cell<usize>,
+}
+
+impl<'a> Counting<'a> {
+    pub fn new(inner: &'a dyn potter_exec::vm::backend::BuildBackend) -> Self {
+        Self {
+            inner,
+            boots: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl potter_exec::vm::backend::BuildBackend for Counting<'_> {
+    fn max_devices(&self) -> usize {
+        self.inner.max_devices()
+    }
+
+    fn start(
+        &self,
+        spec: potter_exec::vm::backend::BuildSpec,
+    ) -> Result<Box<dyn potter_exec::vm::backend::BuildVm>, BuildError> {
+        self.boots.set(self.boots.get() + 1);
+        self.inner.start(spec)
+    }
+}
+
+impl Ctx {
+    /// Runs `target`'s chain in build VMs from `backend`, collecting log and warning lines.
+    pub fn vm_chain(
+        &self,
+        target: &potter_plan::Target,
+        repo: &Path,
+        backend: &dyn potter_exec::vm::backend::BuildBackend,
+    ) -> (Result<potter_exec::chain::ChainState, BuildError>, Vec<String>) {
+        self.vm_chain_with(target, repo, backend, false, &[])
+    }
+
+    /// [`Ctx::vm_chain`] with `--no-cache` and build secrets.
+    pub fn vm_chain_with(
+        &self,
+        target: &potter_plan::Target,
+        repo: &Path,
+        backend: &dyn potter_exec::vm::backend::BuildBackend,
+        no_cache: bool,
+        secrets: &[(&str, &[u8])],
+    ) -> (Result<potter_exec::chain::ChainState, BuildError>, Vec<String>) {
+        let tenant = potter_cache::Tenant::local();
+        let index = self.home.index(&tenant).unwrap();
+        let secrets: std::collections::BTreeMap<String, Vec<u8>> =
+            secrets.iter().map(|(k, v)| (k.to_string(), v.to_vec())).collect();
+        let mut lines = Vec::new();
+        let mut progress = |p: potter_exec::chain::Progress| match p {
+            potter_exec::chain::Progress::Log { line, .. } => lines.push(line),
+            potter_exec::chain::Progress::Warning(w) => lines.push(format!("warning: {w}")),
+            potter_exec::chain::Progress::Step { .. } => {}
+        };
+        let mut ctx = potter_exec::chain::BuildCtx {
+            store: &self.store,
+            home: &self.home,
+            tenant: &tenant,
+            index: &index,
+            sandbox: &self.sandbox,
+            platform: kiln_oci::Platform::host(),
+            no_cache,
+            auth: kiln_registry::DockerConfig::anonymous(),
+            executor: potter_cache::ExecutorClass::Vm,
+            backend: Some(backend),
+            secrets: &secrets,
+            tenant_key: [7u8; 32],
+            cache_from: None,
+            cache_to: None,
+            deps: Default::default(),
+            catalog: None,
+            progress: &mut progress,
+        };
+        let r = potter_exec::chain::run_chain(&mut ctx, target, repo);
+        drop(ctx);
+        (r, lines)
+    }
 }

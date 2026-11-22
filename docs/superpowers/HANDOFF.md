@@ -169,8 +169,8 @@ Deferred minors:
 - A VM has network for all its steps or none: a `Run` step whose `network` differs from the VM's gets a new VM. `BuildSpec.network` is exact; the NIC counts toward the fixed devices only then (4 + NIC).
 - Trust ordering (§8.4, P3): the class is in every `Run` key; `ExecutorClass::lookup_order` makes vm builds look up vm keys only and ns builds fall back to vm. Host-built steps key with a fixed class so ns builds can follow vm chains.
 - Not yet: cache mounts in vm builds (refused, exit 2 — need ext4 mount disks from M3e); the real backend. `--executor vm` exits 4 naming kiln M3e.
-- **P4b** = pin the M3e kiln rev, implement `BuildBackend` over `kiln_run::build`, add KVM e2e tests. Asked of M3e (via the kiln session): accept a host-created output disk; report `max_virtio_devices`; attach every layer disk at boot, the first `BuildSpec.root` as the root and the rest stacked when a `RunStep.lowers_added` names their index; output chunks per stream (`FnMut(Stream, &[u8])`, potter splits lines and redacts); inline secrets only on a tmpfs; kiln-init `mkdir -p` + `cd` the step's workdir; `StepSealed.id` echoes the `RunStep.id` (a mismatch is a violation); `StepSealed.entries` counts logical tar entries (pax/GNU long-name headers not counted); diffs never name absolute or `..` paths, and nothing but zeros follows the end-of-archive marker in the reported range; the guest flushes the output disk before `StepSealed` (the host reads the file directly); `run_step` returns within the step timeout plus a grace period (`Exit::TimedOut`) — potter does not enforce a host-side deadline on the backend.
-- **M3e prototype signatures (kiln session, 2026-10-11; kiln branch `m3e-proto` d549c36, not merged; full notes `playground/.scratch-notes/m3e-findings.txt`).** P4b adapts to these:
+- **P4b** is done: see the P4b section below.
+- **M3e prototype signatures** (kiln session, 2026-10-11; kiln branch `m3e-proto` d549c36). **Superseded by kiln 72c8257** (merged build mode, kiln-proto version 3), which P4b pins; kept for history:
   - `kiln_run::build::BuildVm` is a concrete type (Linux only): `start(&Store, BuildSpec)`, `run_step(&mut self, RunStep, &mut dyn FnMut(Stream, &[u8])) -> Result<StepOutcome>`, `output_path()`, `run_dir()`, `finish(self)`; Drop kills the VM and removes its run/scratch dirs. The adapter wraps it in potter's `BuildVm` trait.
   - `max_devices(&dyn Vmm, network) -> usize` already subtracts the fixed devices (4, +1 NIC). potter's `BuildBackend::max_devices()` is the VMM total (potter subtracts `fixed_devices(network)` itself), so the adapter returns `kiln max_devices(vmm, false) + FIXED_DEVICES`. Don't subtract twice.
   - kiln's `BuildSpec` adds `vmm`, `kernel`, `init` (static kiln-init), `scratch_bytes`, `boot_timeout`, and (coming) `source_date_epoch: Option<u64>` that clamps diff mtimes; `cpus` is `u8`. `RunStep` is potter's contract verbatim (`Command` maps to `kiln_proto::Command::{Argv, Shell}`).
@@ -180,3 +180,44 @@ Deferred minors:
   - Overlay copy-ups of mount-point parents (e.g. `/root` for a cache at `/root/.cache`) appear in diffs, as with BuildKit.
   - Secrets are 0400 owned by the step's uid:gid; each `RunStep` must fit one 64 KiB frame (~44 KiB of secrets), kiln refuses more before sending.
   - Coming in real M3e: a minimal `/dev` without block devices in steps (potter still hashes each diff before the next step), and per-step egress via vmkit `Vm::set_egress`. Order: kiln M3b-2, then M3d (services), then M3e.
+
+**P4b (2026-11-21):** the VM executor on kiln's merged build mode, on branch `p4b-kiln-build`. Plan: `docs/superpowers/plans/2026-11-21-potter-p4b-kiln-backend.md`; ledger in `.superpowers/sdd/2026-11-21-potter-p4b-kiln-backend/`. Spec rev 1.8 (§9.3).
+- **Pins:** every kiln crate at 72c8257 (`72c82570e6306c9ec2d60ae0473065110a8889d2`, kiln-proto version 3), every vmkit dependency at 924ae24 (the rev kiln pins). `Cargo.lock` holds one `vmkit`.
+- **Code:** `potter-exec/src/vm/kiln_map.rs` (the mapping and error classes, cross-platform), `kiln_backend.rs` (`KilnBackend` over `kiln_run::BuildVm`, Linux), `caches.rs` (ext4 cache disks), the fake following kiln's rules; CLI `--executor vm` with `--kernel`, `--kiln-init`, `--vmm` (`POTTER_KERNEL`, `POTTER_KILN_INIT`, `POTTER_VMM`).
+- **Decisions** (full text in the plan):
+  - D1: one VM per chain segment, egress opened and closed per step (`RunStep.egress`); the NIC exists only when a step in the segment needs it.
+  - D2: potter counts lowers (`root + stacked + sealed`) and boots a new VM before kiln's 230; kiln's `TooManyLowers` is a potter bug, exit 4.
+  - D3: pre-send refusals are classified by potter through `BuildSpec::proto_step`: exit 2 naming the step; every `run_step` error after that means the VM is gone.
+  - D4: guest protocol violations are exit 3, matched on kiln's message text (`GUEST_VIOLATIONS`); other post-send errors are 4.
+  - D5: `finish()` failing after a successful chain is a warning; after a failure it is ignored.
+  - D6: `source_date_epoch` is always `Some(SOURCE_DATE_EPOCH or 0)`, so hosts seal identical bytes.
+  - D7: persistent cache disks at `$POTTER_HOME/vm-mounts/<tenant>/<id>.ext4`, `flock`ed; a busy one becomes an empty scratch disk with a warning.
+  - D8: a cache disk is discarded when its VM dies abnormally (a `run_step` error or a timeout); a dirty marker also catches a killed potter.
+  - D9: cache disks attach at boot for the whole segment (8 GiB, no hotplug); an id or target conflict ends the segment.
+  - D10: mount and secret targets are cleaned before kiln (`clean_target`); cache keys keep the raw strings.
+  - D11: kernel, kiln-init and VMM come from flags or the environment; no auto-fetch yet.
+  - D12: still no default executor: `potter build` without `--executor` exits 4 naming both.
+  - D13: Firecracker is the default VMM (Cloud Hypervisor 53 stalls under nested virtualization on aarch64).
+  - D14: `max_devices()` is the VMM's available devices, capped at 128 + the fixed devices; potter subtracts the fixed devices itself.
+  - D15: exit 125 with a `kiln-init: ` line reports `(kiln-init could not set the step up)`.
+  - D16: every `BuildVm::start` error is exit 4 (`the build VM did not start: …`).
+- **KVM end-to-end suite:** `crates/potter/tests/vm.rs` (8 tests: CLI build and vm-class cache hits, identical layers across `--no-cache` builds with mtimes 0, a persistent cache mount, per-step egress in one VM, failing and 125 setup-failure tails, the timeout bound, secrets kept out of layers, user namespaces refused). It skips without `POTTER_TEST_KERNEL` and `POTTER_TEST_KILN_INIT`; `POTTER_REQUIRE_VM_TESTS=1` makes that a failure. `scripts/vm-tests.sh <kernel>` builds a static kiln-init and `vmkit-sandbox` from the pinned checkouts and runs `vm.rs` plus potter-exec's tests; `POTTER_TEST_NETWORK=1` adds the egress test, `POTTER_TEST_VMM=cloud-hypervisor` switches VMM.
+  - Lima (aarch64, nested KVM): the target directory must match the installed glob profile `/home/*/target-*/debug/vmkit-sandbox`, and the test scratch is best kept off the 7.8 GB `/tmp` tmpfs:
+    `limactl shell vmkit -- sg kvm -c 'cd <worktree> && PATH=$HOME/bin:$PATH CARGO_TARGET_DIR=$HOME/target-p4b9 CARGO_INCREMENTAL=0 TMPDIR=$HOME/tmp-p4b9 POTTER_TEST_VM_MEMORY_MIB=512 POTTER_TEST_NETWORK=1 scripts/vm-tests.sh /Users/alfonso/Github/Personal/playground/vmkit/out/vmlinux-6.18.54-aarch64'`
+  - **Lima boot time grows with guest memory** (Firecracker, aarch64 nested on Apple silicon): about 2 s at 512 MiB, 35 s at 2 GiB, and 50 to 125 s at potter's 4096 MiB, against `BOOT_TIMEOUT` 60 s. kiln's own build tests boot 512 MiB guests, which is why they never saw it. `POTTER_TEST_VM_MEMORY_MIB` lowers the memory of the `vm_chain` tests' VMs; the CLI test always boots 4096 MiB (potter has no `--step-mem` yet), so it is the slow, timing-sensitive one there. On x86_64 KVM (CI) this is unmeasured.
+  - example.com did not resolve on this Mac or in Lima on 2026-11-22 (SERVFAIL upstream), so the egress test was run with `POTTER_TEST_EGRESS_HOST=captive.apple.com` (any host serving plain HTTP 200).
+  - CI: job `vm-x86_64` in `.github/workflows/ci.yml` (Firecracker on ubuntu-24.04 with KVM, vmkit's kernel built and cached per vmkit rev, as kiln's `boot-x86_64`).
+- **Follow-ups for kiln** (its own session):
+  - A typed guest-violation error from `BuildVm::run_step` (D4). Until then a guest can pick exit 3 or 4 through `InitFailed` text that contains a matched phrase.
+  - Pin a kernel and publish a kiln-init, by digest, so potter can fetch both and make `vm` the default executor (D11, D12).
+  - A `max_devices` that reports the VMM's raw available devices; potter reads `capabilities().available_devices()` and caps it itself (D14), because kiln's `max_devices(vmm, net)` already subtracts the fixed devices.
+- **Follow-ups for potter:**
+  - `services`: kiln 72c8257 includes M3d, so the refusal in `check_supported` can go; a milestone of its own.
+  - Cache disks: size flags, and gc of `vm-mounts/`.
+  - `--step-mem` / `--step-cpus` (spec §10) for VM builds: the VM memory is fixed at 4096 MiB (`vm::MEMORY_MIB`), which boots past the 60 s timeout in Lima at times (see above). A configurable memory or a boot timeout scaled to it would fix that.
+  - D4's test strings are hand-written, not produced by kiln: pin them end to end once a hostile-guest e2e exists.
+  - Minor findings deferred from the task reviews:
+    - `caches.rs`: a failed discard still removes the dirty marker; a reset deletes the disk before checking the marker's type; a panic unwind clears the marker without a discard; the `vm-mounts` root symlink is followed; the busy-disk warning names the booting step, not the declaring one; a pre-send `TooManyLowers` discards the disks.
+    - Plan validation still accepts `.` and `..` as cache ids; a secret target `/x/.` is accepted while `/x/` is refused.
+    - Tests: no test that changing only `network` changes the step key; none of the exact step-name rewrite in `Session::run`; `Mirror::record`'s carry-over across steps isn't exercised through the fake; the kiln_backend test name "before any vmm lookup" claims what it can't prove.
+    - `KilnBackend::new`'s "is not a file" message is misleading for an unreadable path; `Mirror::check` runs before the dead-VM check after a `TimedOut` (unreachable today); `potter-exec/Cargo.toml` lists kiln-proto and kiln-run out of order.

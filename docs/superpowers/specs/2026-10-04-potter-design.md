@@ -1,7 +1,7 @@
 # potter — Design Spec
 
 **Date:** 2026-10-04
-**Status:** Approved rev 1.7 (2026-11-02)
+**Status:** Approved rev 1.7 (2026-11-02); rev 1.8 (2026-11-22) records the VM executor as built
 **Scope:** `potter`, a source-to-image builder that turns a repository (zero-config, `potter.toml` or Dockerfile) into a `kiln` microVM image.
 **Related:** the kiln spec (`kiln/docs/superpowers/specs/2026-09-30-kiln-design.md`, rev 2.7 on `docs/m3a-plan-spec-2.6`), and `ROADMAP.md` in the playground root.
 
@@ -38,6 +38,7 @@
   - **The index (§7, §8.1):** an OCI image manifest with `artifactType` `application/vnd.potter.catalog.index.v1+json` and one layer, the canonical index JSON (`potter.catalog/v1`). The annotations `dev.potter.catalog.signature` (base64 ed25519 over the index blob's SHA-256) and `dev.potter.catalog.key` (key id) sign it; it is tagged `index` and `index-<hex>`. Trusted keys are compiled in; `POTTER_CATALOG` and `POTTER_CATALOG_KEY` override the location and add a key, each printing a `note:`. A verified serial is remembered per location and a lower one refused unless pinned.
   - **Layers (§7):** ordinary OCI layer blobs (deterministic tar, zstd), as every potter chain layer is, which kiln converts to erofs with the image. Each entry carries `env`, applied bottom first (`PATH` entries prepended, others override), because a composite replaces the image config.
   - **Publishing (§7):** each architecture builds on the published index; the two layouts merge into one index one serial up, signed once.
+- **rev 1.8 (2026-11-22):** P4b, the VM executor on kiln's build mode (kiln 72c8257, potter plan `docs/superpowers/plans/2026-11-21-potter-p4b-kiln-backend.md`). §9.3 now follows kiln-proto version 3: `Hello` (version 3), `Stage` 3–6, `Running`, then `StepExited` and `StepSealed` per step, and `Finish` (not `Shutdown`) to end. A VM has a NIC only when a step in its segment needs the network, and egress opens and closes per step. Cache-mount disks are ext4, one per id, persistent per tenant. potter restarts the VM before kiln's 230-lower cap. Sealing clamps mtimes to `source_date_epoch` and keeps kiln's xattr allowlist. Firecracker is the default VMM; Cloud Hypervisor stays available.
 - **rev 1.5 (2026-10-06):** P1b refinements (implementation level).
   - **Catalog lines refreshed to current releases (§7):**
     - python 3.12/3.13/3.14 (default 3.13);
@@ -547,32 +548,37 @@ trait Executor {
 
 ### 9.3 `VmExecutor`
 
-- **VM shape:** one VM per target chain, starting at the first miss.
-  - Root is an overlay of the lowers: the composite base erofs, then each hit-prefix layer and pending inputs layer as a read-only erofs virtio-blk disk, then the init layer.
-  - The upper is on an ext4 scratch disk.
-  - There's an **output disk**: a raw sparse file sized to the build's output cap (default 8 GiB).
-  - There are cache-mount disks, a vsock and a net device.
+kiln's build mode (kiln-proto version 3, `kiln_run::BuildVm`, kiln 72c8257) runs the VM; kiln's `docs/format.md` is the normative wire description. potter owns the disks it attaches, the steps it sends and the ingest of what comes back.
+
+- **VM shape:** one VM per chain segment, starting at the first miss.
+  - The root is an overlay of the lowers: the composite base erofs, then each hit-prefix layer and pending inputs layer as a read-only erofs virtio-blk disk, then the init layer.
+  - The upper is on an ext4 scratch disk (8 GiB).
+  - There's an **output disk**: a raw sparse file sized to the build's output cap (default 8 GiB), created by potter.
+  - **Cache-mount disks:** ext4, one per cache id, persistent per tenant at `$POTTER_HOME/vm-mounts/<tenant>/<id>.ext4` (8 GiB, sparse), locked for the VM's life; a disk another build holds is replaced by an empty scratch one, with a warning. They are attached at boot for the whole segment (no hotplug). A disk whose VM died mid-step (a timeout, a dead VMM) or that a killed build left dirty is discarded and recreated empty.
+  - A vsock, and a **NIC only when a step in the segment needs the network**.
+- **Segments:** a VM ends, and the next one boots from the current prefix, when the device budget runs out, when a step's cache id or target conflicts with one already attached, or before the overlay would pass kiln's **230 lowers** (base layers + stacked layers + one sealed upper per step): potter counts lowers itself and restarts before kiln would refuse the step.
 - **Device budget:**
-  - The fixed devices are init, scratch, output, vsock and net.
-  - The layer and mount disks must fit in `Capabilities.max_virtio_devices` minus the fixed devices. When they don't, the bottom hit-prefix layers are squashed into one erofs with kiln's squash, cached by their digests.
+  - The fixed devices are init, scratch, output and vsock, plus the NIC when the VM has one.
+  - The layer and cache disks must fit in the VMM's available devices (capped at kiln-proto's 128 disks) minus the fixed devices. When they don't, the bottom hit-prefix layers are squashed into one erofs with kiln's squash, cached by their digests.
   - If a chain needs more inputs layers than the budget allows, the VM ends at that point and a new one boots from the extended prefix.
-  - Cloud Hypervisor (31) is the recommended builder VMM; Firecracker works with squashing (17 on x86_64).
-- **Protocol (kiln-proto, build mode):**
-  - The host sends `Config{mode: Build, …}` with the layer and mount table and limits. The guest replies `Hello`, then `Ready`.
-  - For each step, the host sends `RunStep{id, argv|shell, env, workdir, user, lowers_added, mounts, secrets, timeout_ms}`. `lowers_added` names the pending inputs-layer disks to stack before the step runs. Secrets are sent inline and written by kiln-init to a tmpfs that is never part of the upper.
-  - The guest streams stdout and stderr using the existing stdio messages, then `Exited{code|signal}`.
-  - On exit 0, the guest seals the step and sends `StepSealed{id, offset, len, sha256, entries}`.
+  - **Firecracker is the default VMM** (17 devices on x86_64, with squashing). Cloud Hypervisor (31 devices) is available through `--vmm cloud-hypervisor`, but version 53 stalls block and net I/O under nested virtualization on aarch64 and can't grow a disk online past about 8 GiB.
+- **Protocol (kiln-proto version 3, build mode):**
+  - The host sends `Config{mode: Build, disks, sourceDateEpoch, …}`. The guest sends `Hello` (version 3; an older kiln-init is refused build mode), `Stage` 3 to 6, then `Running`.
+  - For each step, the host sends `RunStep{id, command, env, workdir, uid, gid, lowersAdded, mounts, secrets, egress, timeoutMs}`. `lowersAdded` names the pending inputs-layer disks to stack before the step runs. Secrets travel inline (one frame, about 44 KiB together) and kiln-init writes them to a tmpfs that is never part of the upper.
+  - The guest streams stdout and stderr on per-step connections, then sends `StepExited{id, code|signal}` and, after code 0, `StepSealed{id, offset, len, sha256, entries}`.
+  - A step whose own setup is impossible (a secret under a regular file, a cache target that is a file) ends with code 125 and a `kiln-init: ` line on its stderr; the VM goes on.
 - **Sealing, in kiln-init:**
-  - It kills the step's process group and any stragglers, then unmounts the root overlay.
-  - It converts the upper into an OCI tar diff: overlay char-0/0 whiteouts become `.wh.<name>`, and opaque directories (`trusted.overlay.opaque`) become `.wh..wh..opq`.
-  - It appends the diff to the output disk at the next 4 KiB-aligned offset.
-  - Then it remounts with the sealed upper as the topmost lower dir on scratch, plus a fresh upper. Mounts use per-layer `lowerdir+` or mount(2), never one long `lowerdir` string (see the kiln M1b-1 finding).
+  - When the command exits, every other process in the guest is killed and the output drained.
+  - The upper becomes an OCI tar diff: overlay char-0/0 whiteouts become `.wh.<name>`, opaque directories become `.wh..wh..opq`. Only `user.*` (except `user.overlay.*`) and `security.capability` xattrs are kept. Every mtime is clamped to `sourceDateEpoch`: potter always sends one, `SOURCE_DATE_EPOCH` or 0, so two hosts seal the same bytes.
+  - The diff goes to the output disk right after the previous one, padded to 4 KiB, and the disk is flushed before `StepSealed`.
+  - The sealed upper becomes the topmost lower, under a fresh upper.
 - **Host ingest (P4):**
-  - The host ignores `sha256`, `len` and `entries` for trust purposes.
-  - It reads `[offset, offset + len)`, checks the range lies within the disk and after the previous diff, hashes it itself, and streams it through `kiln-erofs` tarstream ingest, applying kiln's limits (bytes, entries, path depth, name length).
-  - A mismatch with the guest's report fails the build as a protocol violation.
-- **Network:** a vmkit net namespace and tap, with the egress policy of §9.5.
-- **Teardown:** after the last step, or on any failure, the host sends `Shutdown`, kills the VM after a grace period, and deletes the scratch and output disks.
+  - kiln refuses a `StepSealed` with the wrong id, a range not aligned to 4096, outside the disk or not contiguous with the previous seal.
+  - potter still ignores `sha256`, `len` and `entries` for trust purposes. It reads `[offset, offset + len)`, checks the range itself, hashes it itself, and streams it through `kiln-erofs` tarstream ingest with kiln's limits.
+  - A mismatch with the guest's report fails the build as a protocol violation (exit 3).
+- **Network:** a vmkit net namespace with the egress policy of §9.5. Egress starts closed and is opened and closed per step (`RunStep.egress`): closed means no DNS and cuts connections opened earlier, and no process outlives its step.
+- **Timeouts:** at the step's timeout kiln signals the step, and kills the VM 10 seconds later; the step fails (exit 1) and the VM is not used again.
+- **Teardown:** after the last step the host sends `Finish`; the guest syncs and ends the VM, and kiln kills it if it hasn't ended in 30 seconds. An unclean end after a successful chain is a warning (every diff was already verified and stored). On any failure the VM is killed, and the scratch and output disks are deleted.
 
 ### 9.4 `NsExecutor`
 
