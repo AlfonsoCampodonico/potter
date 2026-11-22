@@ -528,8 +528,8 @@ mod named_tests {
 
     #[test]
     fn kilns_step_id_becomes_the_step_name_in_every_error_class() {
-        let cases: [(fn(String) -> BuildError, u8); 3] =
-            [(BuildError::Plan, 2), (BuildError::Infra, 4), (BuildError::Hostile, 3)];
+        type Make = fn(String) -> BuildError;
+        let cases: [(Make, u8); 3] = [(BuildError::Plan, 2), (BuildError::Infra, 4), (BuildError::Hostile, 3)];
         for (make, code) in cases {
             let e = named(make("step 7: the VM ended (Killed)".into()), 7, "build");
             assert_eq!(e.exit_code(), code);
