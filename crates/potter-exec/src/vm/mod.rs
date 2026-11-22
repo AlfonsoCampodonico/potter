@@ -61,36 +61,86 @@ pub const LINE_CAP: usize = 64 << 10;
 /// What replaces a kept-whole text (a secret) in a line.
 const MASK: &[u8] = b"***";
 
+/// The shortest kept-whole text [`Lines`] masks and keeps whole. A 1 or 2 byte secret line holds
+/// at most 16 bits, too little to be worth guessing from a log, and masking every occurrence of
+/// such a short run would mangle ordinary output. The redactor still replaces them in each line.
+const MIN_KEEP: usize = 3;
+
 /// Joins a step's output chunks into lines, per stream; potter redacts and reports whole lines.
 ///
 /// `keep_whole` holds the secrets, raw and as the redactor sees them (`chain::keep_whole`). Every
-/// raw occurrence of one in a line is replaced by `***` before the line is decoded, so the
-/// redactor's lossy matching is not the only guard. A line longer than [`LINE_CAP`] is passed on
-/// in pieces of at most that size, never cut inside a kept-whole text: the cut moves back to its
-/// start, and one that starts the piece and is longer than the cap is passed on as `***` alone.
+/// raw occurrence of one in a line is masked with `***` before the line is decoded (overlapping
+/// ones as one run), so the redactor's lossy matching is not the only guard. A line longer than
+/// [`LINE_CAP`] is passed on in pieces of at most that size, never cut inside a kept-whole text:
+/// the cut moves back to its start, and one that starts the piece and is longer than the cap is
+/// passed on as `***` alone. Masking a piece is one linear pass per kept-whole text.
 #[derive(Default)]
 pub struct Lines {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    /// Longest first; none empty or holding a newline (the lines of a multi-line secret are
-    /// separate entries, and a line never holds a newline).
-    keep_whole: Vec<Vec<u8>>,
+    /// Longest first; none shorter than [`MIN_KEEP`] or holding a newline (the lines of a
+    /// multi-line secret are separate entries, and a line never holds a newline).
+    keep_whole: Vec<Needle>,
     /// The longest of `keep_whole`, less one: what a cut at the cap must see past the cap.
     overlap: usize,
+}
+
+/// A kept-whole text and its Knuth-Morris-Pratt failure table, computed once.
+struct Needle {
+    bytes: Vec<u8>,
+    fail: Vec<usize>,
+}
+
+impl Needle {
+    fn new(bytes: Vec<u8>) -> Self {
+        let mut fail = vec![0usize; bytes.len()];
+        let mut k = 0;
+        for i in 1..bytes.len() {
+            while k > 0 && bytes[i] != bytes[k] {
+                k = fail[k - 1];
+            }
+            if bytes[i] == bytes[k] {
+                k += 1;
+            }
+            fail[i] = k;
+        }
+        Self { bytes, fail }
+    }
+
+    /// Calls `found` with the start of each occurrence in `hay[from..]`, in order, until it
+    /// returns false. Linear in the bytes scanned.
+    fn each(&self, hay: &[u8], from: usize, found: &mut dyn FnMut(usize) -> bool) {
+        let n = self.bytes.len();
+        let mut k = 0;
+        for (i, &b) in hay.iter().enumerate().skip(from) {
+            while k > 0 && b != self.bytes[k] {
+                k = self.fail[k - 1];
+            }
+            if b == self.bytes[k] {
+                k += 1;
+            }
+            if k == n {
+                if !found(i + 1 - n) {
+                    return;
+                }
+                k = self.fail[k - 1];
+            }
+        }
+    }
 }
 
 impl Lines {
     /// Lines that never pass on, or cut inside, any of `keep_whole`.
     pub fn new(keep_whole: Vec<Vec<u8>>) -> Self {
-        let mut keep_whole: Vec<Vec<u8>> = keep_whole
+        let mut keep: Vec<Vec<u8>> = keep_whole
             .into_iter()
-            .filter(|k| !k.is_empty() && !k.contains(&b'\n'))
+            .filter(|k| k.len() >= MIN_KEEP && !k.contains(&b'\n'))
             .collect();
-        keep_whole.sort_by_key(|k| std::cmp::Reverse(k.len()));
-        keep_whole.dedup();
-        let overlap = keep_whole.first().map_or(0, |k| k.len() - 1);
+        keep.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        keep.dedup();
+        let overlap = keep.first().map_or(0, |k| k.len() - 1);
         Self {
-            keep_whole,
+            keep_whole: keep.into_iter().map(Needle::new).collect(),
             overlap,
             ..Self::default()
         }
@@ -142,7 +192,7 @@ impl Lines {
 }
 
 /// Passes on the first piece of `pending`, longer than [`LINE_CAP`], and returns its length.
-fn piece(pending: &[u8], keep: &[Vec<u8>], line: &mut dyn FnMut(&str)) -> usize {
+fn piece(pending: &[u8], keep: &[Needle], line: &mut dyn FnMut(&str)) -> usize {
     match cut_at(pending, keep) {
         Cut::At(cut) => {
             line(&masked(&pending[..cut], keep));
@@ -155,14 +205,36 @@ fn piece(pending: &[u8], keep: &[Vec<u8>], line: &mut dyn FnMut(&str)) -> usize 
     }
 }
 
-/// `bytes` with every occurrence of `keep` (longest first) replaced by `***`, decoded lossily.
-fn masked(bytes: &[u8], keep: &[Vec<u8>]) -> String {
-    let mut out = bytes.to_vec();
+/// `bytes` with every byte inside an occurrence of any of `keep` masked, each run of masked bytes
+/// (overlapping occurrences included) becoming one `***`, decoded lossily. One linear pass per
+/// needle marks the covered ranges, and one more builds the output: nothing is spliced in place.
+fn masked(bytes: &[u8], keep: &[Needle]) -> String {
+    if keep.is_empty() {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // +1 at an occurrence's start, -1 just past its end.
+    let mut cover = vec![0i32; bytes.len() + 1];
     for k in keep {
-        let mut from = 0;
-        while let Some(p) = find(&out, k, from) {
-            out.splice(p..p + k.len(), MASK.iter().copied());
-            from = p + MASK.len();
+        let n = k.bytes.len();
+        k.each(bytes, 0, &mut |p| {
+            cover[p] += 1;
+            cover[p + n] -= 1;
+            true
+        });
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut depth = 0;
+    let mut in_mask = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        depth += cover[i];
+        if depth > 0 {
+            if !in_mask {
+                out.extend_from_slice(MASK);
+                in_mask = true;
+            }
+        } else {
+            in_mask = false;
+            out.push(b);
         }
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -178,14 +250,14 @@ enum Cut {
 /// Where to cut `pending`, longer than [`LINE_CAP`] and holding all of any of `keep` that spans
 /// the cap (all of the stream, or the cap plus the longest of `keep`): at the cap, off a UTF-8
 /// continuation byte, then back to the start of any of `keep` that spans the cut.
-fn cut_at(pending: &[u8], keep: &[Vec<u8>]) -> Cut {
+fn cut_at(pending: &[u8], keep: &[Needle]) -> Cut {
     let mut cut = LINE_CAP;
     while LINE_CAP - cut < 3 && pending[cut] & 0xC0 == 0x80 {
         cut -= 1;
     }
     while let Some((p, len)) = keep
         .iter()
-        .filter_map(|k| spanning(pending, k, cut).map(|p| (p, k.len())))
+        .filter_map(|k| spanning(pending, k, cut).map(|p| (p, k.bytes.len())))
         .min()
     {
         if p == 0 {
@@ -196,47 +268,18 @@ fn cut_at(pending: &[u8], keep: &[Vec<u8>]) -> Cut {
     Cut::At(cut)
 }
 
-/// The first start of `needle` in `hay` that is before `cut` and ends after it.
-fn spanning(hay: &[u8], needle: &[u8], cut: usize) -> Option<usize> {
-    let n = needle.len();
-    if n < 2 {
-        return None;
-    }
+/// The first start of `needle` in `hay` that is before `cut` and ends after it: a search of the
+/// 2 × len − 1 bytes around `cut`.
+fn spanning(hay: &[u8], needle: &Needle, cut: usize) -> Option<usize> {
+    let n = needle.bytes.len();
     let lo = cut.saturating_sub(n - 1);
     let hi = (cut + n - 1).min(hay.len());
-    find(&hay[..hi], needle, lo)
-}
-
-/// The first start of `needle` in `hay` at or after `from` (Knuth-Morris-Pratt, linear).
-fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    let n = needle.len();
-    if n == 0 || hay.len() < from + n {
-        return None;
-    }
-    let mut fail = vec![0usize; n];
-    let mut k = 0;
-    for i in 1..n {
-        while k > 0 && needle[i] != needle[k] {
-            k = fail[k - 1];
-        }
-        if needle[i] == needle[k] {
-            k += 1;
-        }
-        fail[i] = k;
-    }
-    let mut k = 0;
-    for (i, &b) in hay[from..].iter().enumerate() {
-        while k > 0 && b != needle[k] {
-            k = fail[k - 1];
-        }
-        if b == needle[k] {
-            k += 1;
-        }
-        if k == n {
-            return Some(from + i + 1 - n);
-        }
-    }
-    None
+    let mut first = None;
+    needle.each(&hay[..hi], lo, &mut |p| {
+        first = Some(p);
+        false
+    });
+    first
 }
 
 /// What a VM boots with.
@@ -628,6 +671,45 @@ mod lines_tests {
         assert_no_run(&out, &secret);
         assert_eq!(out[..2], ["aaaaaaaaaa", "***"]);
         assert_eq!(out[2..].iter().map(String::len).sum::<usize>(), LINE_CAP * 2);
+    }
+
+    #[test]
+    fn a_piece_made_only_of_a_short_secret_is_masked_in_linear_time() {
+        // 3 bytes, the shortest masked; 1 and 2 byte secret lines are left to the redactor.
+        for (secret, masked_here) in [(&b"abc"[..], true), (b"ab", false), (b"a", false)] {
+            let mut l = Lines::new(vec![secret.to_vec()]);
+            let data: Vec<u8> = secret.iter().copied().cycle().take(4 * LINE_CAP).collect();
+            let started = std::time::Instant::now();
+            let mut out = Vec::new();
+            for c in data.chunks(LINE_CAP / 2) {
+                l.feed(Stream::Stdout, c, &mut |p| out.push(p.to_string()));
+            }
+            l.flush(&mut |p| out.push(p.to_string()));
+            // Quadratic masking took minutes here; linear takes milliseconds, even unoptimised.
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "{:?}",
+                started.elapsed()
+            );
+            if masked_here {
+                // Every whole "abc" is masked: what is left is the stream's trailing partial one.
+                assert!(
+                    out.iter()
+                        .all(|p| p.starts_with("***") && p.replace("***", "").len() <= 2),
+                    "{:?}",
+                    out.iter().map(String::len).collect::<Vec<_>>()
+                );
+            } else {
+                assert_eq!(out.iter().map(String::len).sum::<usize>(), 4 * LINE_CAP);
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_secrets_are_masked_as_one_run() {
+        let mut l = Lines::new(vec![b"abcdef".to_vec(), b"zab".to_vec()]);
+        let out = collect(&mut l, &[(Stream::Stdout, b"x zabcdef y\n")]);
+        assert_eq!(out, ["x *** y"]);
     }
 
     #[test]
