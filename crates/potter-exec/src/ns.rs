@@ -39,7 +39,8 @@ pub struct StepRun<'a> {
     /// Texts masked in every line before `log` sees it, on both sides of a cut too
     /// (`chain::keep_whole`; see `vm::Lines`).
     pub keep_whole: Vec<Vec<u8>>,
-    /// Called with each line of the step's output, at most `vm::LINE_CAP` bytes.
+    /// Called with each line of the step's output: a longer one in pieces of `vm::LINE_CAP` bytes,
+    /// whose text can be up to 4 bytes longer where a part of a secret at an end became `***`.
     pub log: &'a mut dyn FnMut(&str),
 }
 

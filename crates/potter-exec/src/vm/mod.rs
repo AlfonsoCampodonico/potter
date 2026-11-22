@@ -71,8 +71,8 @@ const MIN_KEEP: usize = 3;
 /// `keep_whole` holds the secrets, raw and as the redactor sees them (`chain::keep_whole`). Every
 /// raw occurrence of one is masked with `***` before a line is decoded (overlapping ones as one
 /// run), so the redactor's lossy matching is not the only guard. A line longer than [`LINE_CAP`]
-/// is passed on in pieces of that size, cut at the cap (a piece's text can be two bytes longer,
-/// where a 1 or 2 byte part of a secret at either end became `***`). A secret that spans a cut is
+/// is passed on in pieces of that size, cut at the cap (a piece's text can be up to four bytes
+/// longer, where a 1 or 2 byte part of a secret at each end became `***`). A secret that spans a cut is
 /// masked on both sides of it: a piece is cut only once the bytes a secret could span past the
 /// cut are buffered, and the bytes before a cut a secret could span are kept as context for the
 /// next piece, which is masked over them but doesn't repeat them. Each piece costs one pass per
@@ -88,23 +88,27 @@ pub struct Lines {
     overlap: usize,
 }
 
-/// One stream's bytes not yet passed on.
+/// One stream's bytes not yet passed on. Every index is into `buf`, which is drained once per
+/// `feed`, not once per line.
 #[derive(Default)]
 struct Pending {
-    /// `ctx` bytes of context already passed on, then the pending bytes.
     buf: Vec<u8>,
-    ctx: usize,
-    /// The first newline at or after `ctx`, once found.
+    /// `buf[from..start]` is context already passed on; `buf[start..]` is pending.
+    from: usize,
+    start: usize,
+    /// The first newline at or after `start`, once found.
     newline: Option<usize>,
-    /// `buf[..scanned]` holds no newline at or after `ctx` but `newline`, its last byte.
+    /// `buf[..scanned]` holds no newline at or after `start` but `newline`, its last byte.
     scanned: usize,
 }
 
 impl Pending {
-    /// Forgets `buf[..n]`.
-    fn drop_front(&mut self, n: usize) {
+    /// Forgets `buf[..from]`, shifting every index once.
+    fn compact(&mut self) {
+        let n = self.from;
         self.buf.drain(..n);
-        self.ctx -= n.min(self.ctx);
+        self.from = 0;
+        self.start -= n;
         self.newline = self.newline.map(|e| e - n);
         self.scanned = self.scanned.saturating_sub(n);
     }
@@ -185,8 +189,13 @@ impl Lines {
     pub fn flush(&mut self, line: &mut dyn FnMut(&str)) {
         for p in [&mut self.stdout, &mut self.stderr] {
             pass_on(p, &self.keep_whole, self.overlap, true, line);
-            if p.buf.len() > p.ctx {
-                line(&masked(&p.buf, p.ctx, p.buf.len(), &self.keep_whole));
+            if p.buf.len() > p.start {
+                line(&masked(
+                    &p.buf[p.from..],
+                    p.start - p.from,
+                    p.buf.len() - p.from,
+                    &self.keep_whole,
+                ));
             }
             *p = Pending::default();
         }
@@ -198,18 +207,18 @@ impl Lines {
 fn pass_on(p: &mut Pending, keep: &[Needle], overlap: usize, ended: bool, line: &mut dyn FnMut(&str)) {
     loop {
         if p.newline.is_none() {
-            let from = p.scanned.max(p.ctx);
+            let from = p.scanned.max(p.start);
             p.newline = p.buf[from..].iter().position(|&b| b == b'\n').map(|i| from + i);
             p.scanned = p.newline.map_or(p.buf.len(), |e| e + 1);
         }
-        let start = p.ctx;
+        let (from, start) = (p.from, p.start);
         match p.newline {
             Some(end) if end - start <= LINE_CAP => {
-                line(&masked(&p.buf[..end], start, end, keep));
+                line(&masked(&p.buf[from..end], start - from, end - from, keep));
                 // A secret never spans a newline: no context is kept.
                 p.newline = None;
-                p.drop_front(end + 1);
-                p.ctx = 0;
+                p.from = end + 1;
+                p.start = end + 1;
             }
             _ if p.buf.len() - start > LINE_CAP + if ended { 0 } else { overlap } => {
                 let mut cut = start + LINE_CAP;
@@ -217,15 +226,15 @@ fn pass_on(p: &mut Pending, keep: &[Needle], overlap: usize, ended: bool, line: 
                     cut -= 1;
                 }
                 let seen = (cut + overlap).min(p.buf.len());
-                line(&masked(&p.buf[..seen], start, cut, keep));
+                line(&masked(&p.buf[from..seen], start - from, cut - from, keep));
                 // Keep what a secret spanning the next cut could start in.
-                let context = overlap.min(cut);
-                p.drop_front(cut - context);
-                p.ctx = context;
+                p.from = cut.saturating_sub(overlap).max(from);
+                p.start = cut;
             }
             _ => break,
         }
     }
+    p.compact();
 }
 
 /// `seen[from..to]` decoded lossily, with every byte inside an occurrence in `seen` of any of
@@ -598,8 +607,8 @@ mod lines_tests {
         }
         l.flush(&mut |p| out.push(redact(p)));
         // A piece is at most the cap, plus what masking a 1 or 2 byte part of a secret at
-        // each end of it adds.
-        assert!(out.iter().all(|p| p.len() <= LINE_CAP + 2), "a piece over the cap");
+        // each end of it adds: up to 2 bytes per end.
+        assert!(out.iter().all(|p| p.len() <= LINE_CAP + 4), "a piece over the cap");
         out
     }
 
@@ -686,6 +695,36 @@ mod lines_tests {
                 "{:?}",
                 out.iter().map(|p| &p[..p.len().min(12)]).collect::<Vec<_>>()
             );
+        }
+    }
+
+    /// Draining the buffer once per line shifted the rest of a chunk each time: quadratic in the
+    /// chunk size (48 KiB chunks of newlines took over a second for 3 MiB). A 64 KiB feed and a
+    /// 1 MiB one, of newlines only and of short lines: a quadratic drain spends tens of seconds
+    /// on the 1 MiB ones, one drain per feed a fraction of a second, even unoptimised.
+    #[test]
+    fn a_chunk_of_many_short_lines_is_passed_on_in_linear_time() {
+        let unit = b"ab\n\nxyz 8bytesec q\n";
+        for size in [LINE_CAP, 16 * LINE_CAP] {
+            let mixed: Vec<u8> = unit
+                .iter()
+                .copied()
+                .cycle()
+                .take(size / unit.len() * unit.len())
+                .collect();
+            for chunk in [vec![b'\n'; size], mixed] {
+                let mut l = Lines::new(vec![b"8bytesec".to_vec()]);
+                let started = std::time::Instant::now();
+                let mut n = 0;
+                l.feed(Stream::Stdout, &chunk, &mut |p| {
+                    assert!(!p.contains("8bytesec") && !p.contains('\n'), "{p:?}");
+                    n += 1;
+                });
+                let took = started.elapsed();
+                assert!(took < std::time::Duration::from_secs(2), "{size}: {took:?}");
+                assert_eq!(n, chunk.iter().filter(|&&b| b == b'\n').count());
+                assert!(l.stdout.buf.is_empty());
+            }
         }
     }
 
