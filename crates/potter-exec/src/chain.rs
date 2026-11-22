@@ -1147,9 +1147,21 @@ fn needles(values: &[(String, Vec<u8>)]) -> Vec<String> {
     needles
 }
 
-/// Texts a line must not be cut inside, so the redactor still sees them whole (`Lines`).
+/// The texts `vm::Lines` masks and never cuts inside: each secret's raw bytes and raw lines, and
+/// the redactor's lossy [`needles`], so a secret is matched both as the step wrote it and as the
+/// redactor sees it.
 pub fn keep_whole(values: &[(String, Vec<u8>)]) -> Vec<Vec<u8>> {
-    needles(values).into_iter().map(String::into_bytes).collect()
+    let mut keep: Vec<Vec<u8>> = needles(values).into_iter().map(String::into_bytes).collect();
+    for (_, v) in values {
+        keep.push(v.clone());
+        for l in v.split(|&b| b == b'\n') {
+            keep.push(l.strip_suffix(b"\r").unwrap_or(l).to_vec());
+        }
+    }
+    keep.retain(|k| !k.iter().all(u8::is_ascii_whitespace));
+    keep.sort_by_key(|k| std::cmp::Reverse(k.len()));
+    keep.dedup();
+    keep
 }
 
 fn cache_err(e: potter_cache::CacheError) -> BuildError {
