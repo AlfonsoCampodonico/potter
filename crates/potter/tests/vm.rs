@@ -128,6 +128,8 @@ fn layer_entries(ctx: &Ctx, layer: &potter_exec::chain::LayerRef) -> Vec<(String
         .collect()
 }
 
+/// Goes through the CLI, so its VMs boot with potter's real 4096 MiB (`POTTER_TEST_VM_MEMORY_MIB`
+/// doesn't reach them): under nested virtualization that boot can come close to the 60 s timeout.
 #[test]
 fn potter_build_in_a_vm_makes_an_image_and_then_hits_its_vm_entries() {
     let Some((ctx, env)) = setup() else { return };
@@ -254,11 +256,13 @@ fn a_cache_mount_persists_between_vm_builds() {
     }
 }
 
-/// Reaches example.com (or `POTTER_TEST_EGRESS_HOST`): only with POTTER_TEST_NETWORK=1, as build.rs's network tests.
+/// The egress test reaches example.com (or `POTTER_TEST_EGRESS_HOST`): it is opt-in, as build.rs's
+/// network tests are, and passes without running anything unless POTTER_TEST_NETWORK=1.
 fn network() -> bool {
     std::env::var_os("POTTER_TEST_NETWORK").is_some_and(|v| v == "1")
 }
 
+/// Opt-in: skipped silently (it returns before booting anything) without POTTER_TEST_NETWORK=1.
 #[test]
 fn egress_opens_only_for_steps_that_ask_in_one_vm() {
     if !network() {

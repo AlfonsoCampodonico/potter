@@ -7,11 +7,14 @@
 set -euo pipefail
 kernel=$(realpath "$1"); shift
 root=$(cd "$(dirname "$0")/.." && pwd)
-target=${CARGO_TARGET_DIR:-$root/target}
-musl=$(uname -m)-unknown-linux-musl
 cd "$root"
-manifest() { cargo metadata --locked --format-version 1 | python3 -c "import json,sys; print(next(p['manifest_path'] for p in json.load(sys.stdin)['packages'] if p['name'] == '$1'))"; }
-kiln_ws=$(dirname "$(dirname "$(dirname "$(manifest kiln-run)")")")
+target=$(realpath -m "${CARGO_TARGET_DIR:-$root/target}")
+musl=$(uname -m)-unknown-linux-musl
+# One `cargo metadata`; each lookup is its own assignment, so a failure stops the script.
+metadata=$(cargo metadata --locked --format-version 1)
+manifest() { python3 -c "import json,sys; print(next(p['manifest_path'] for p in json.load(sys.stdin)['packages'] if p['name'] == sys.argv[1]))" "$1" <<<"$metadata"; }
+kiln_run_manifest=$(manifest kiln-run)
+kiln_ws=$(dirname "$(dirname "$(dirname "$kiln_run_manifest")")")
 vmkit_manifest=$(manifest vmkit)
 cargo build --locked --release --manifest-path "$kiln_ws/Cargo.toml" --target "$musl" -p kiln-init --target-dir "$target/kiln"
 cargo build --locked --manifest-path "$vmkit_manifest" --bin vmkit-sandbox --target-dir "$target"

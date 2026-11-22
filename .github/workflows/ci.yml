@@ -76,6 +76,30 @@ jobs:
           cargo build --locked --manifest-path "${{ steps.vmkit.outputs.dir }}/Cargo.toml" --bin vmkit-sandbox --target-dir target
           "${{ steps.vmkit.outputs.dir }}/scripts/install-apparmor.sh" "$PWD/target/debug/vmkit-sandbox"
       - name: VM builds end to end
+        # About half the CPUs: every test boots its own VMs. The egress test is opt-in and needs a
+        # host that serves plain HTTP. KILN_KEEP_RUN_DIR keeps every kiln run directory (console,
+        # VMM log, run.json) for the step below; potter's own scratch is gone with each test.
+        env:
+          POTTER_TEST_NETWORK: "1"
+          POTTER_TEST_EGRESS_HOST: captive.apple.com
+          KILN_KEEP_RUN_DIR: "1"
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           scripts/vm-tests.sh out/vmlinux-*-x86_64 -- --test-threads=$(( $(nproc) > 1 ? $(nproc) / 2 : 1 ))
+      - name: Collect the console and VMM logs of the kept run directories
+        if: failure() || cancelled()
+        run: |
+          logs="$RUNNER_TEMP/kiln-logs"
+          runs=${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/kiln}
+          for dir in "${TMPDIR:-/tmp}"/kiln-run-* "${runs:-/tmp/kiln-$(id -u)}"/*; do
+            [ -d "$dir" ] || continue
+            mkdir -p "$logs/$(basename "$dir")"
+            find "$dir" -maxdepth 2 -type f \( -name '*.log' -o -name '*.stderr' -o -name run.json \) \
+              -exec cp {} "$logs/$(basename "$dir")/" \;
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure() || cancelled()
+        with:
+          name: vm-x86_64-logs
+          path: ${{ runner.temp }}/kiln-logs
+          if-no-files-found: ignore

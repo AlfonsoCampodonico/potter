@@ -6,9 +6,9 @@ Cloud Native Buildpacks' `rebase` does (design spec §16). A security fix in `de
 byte for byte unless they depend on the base.
 
 ```sh
-potter build . --executor ns
+potter build . --executor <ns|vm>
 # ... the base's tag is rebuilt upstream with a fix ...
-potter rebase potter/app:latest --executor ns
+potter rebase potter/app:latest --executor <ns|vm>
 ```
 
 ## What the run base is

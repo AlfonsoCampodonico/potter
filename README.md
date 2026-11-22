@@ -291,7 +291,7 @@ flowchart LR
 flowchart LR
     potter["potter"] --> detect["detect PATH"]
     potter --> plan["plan PATH"]
-    potter --> build["build PATH --executor ns"]
+    potter --> build["build PATH --executor ns|vm"]
     potter --> rebase["rebase IMAGE --executor ns|vm"]
     potter --> verify["verify IMAGE --key PUB"]
     potter --> key["key generate DIR"]
@@ -308,7 +308,7 @@ flowchart LR
 |---|---|
 | `potter detect [PATH]` | Lists each provider's claim on `PATH` with its evidence, and the chosen one |
 | `potter plan [PATH] [--target T] [--json \| --explain] [--max-layers N]` | Prints the plan; `--json` prints canonical `potter.plan/v1`; `--explain` shows where every decision came from |
-| `potter build [PATH] --executor ns [options]` | Builds images into `$KILN_HOME` (see below) |
+| `potter build [PATH] --executor ns\|vm [options]` | Builds images into `$KILN_HOME` (see below) |
 | `potter rebase IMAGE --executor ns\|vm [--base REF] [--tag NAME] [--json]` | Swaps a built image's run base for a patched one without rebuilding it, or refuses with the reason ([docs/rebase.md](docs/rebase.md)) |
 | `potter verify IMAGE --key PUB [--expect-tenant T] [--expect-builder B]` | Checks a pushed image's SBOM, provenance and signature |
 | `potter key generate DIR` | Writes `DIR/potter.key` (0600, PKCS#8 P-256) and `DIR/potter.pub` |
