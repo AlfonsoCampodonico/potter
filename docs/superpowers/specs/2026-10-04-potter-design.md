@@ -577,6 +577,7 @@ kiln's build mode (kiln-proto version 3, `kiln_run::BuildVm`, kiln 72c8257) runs
   - potter still ignores `sha256`, `len` and `entries` for trust purposes. It reads `[offset, offset + len)`, checks the range itself, hashes it itself, and streams it through `kiln-erofs` tarstream ingest with kiln's limits.
   - A mismatch with the guest's report fails the build as a protocol violation (exit 3).
 - **Network:** a vmkit net namespace with the egress policy of §9.5. Egress starts closed and is opened and closed per step (`RunStep.egress`): closed means no DNS and cuts connections opened earlier, and no process outlives its step.
+- **Boot timeout:** max(60 s, 45 s per GiB of guest memory, rounded up), so 180 s for the default 4 GiB. Under nested virtualization a guest's boot time grows with its memory; a boot timeout is exit 4 with a hint saying so.
 - **Timeouts:** at the step's timeout kiln signals the step, and kills the VM 10 seconds later; the step fails (exit 1) and the VM is not used again.
 - **Teardown:** after the last step the host sends `Finish`; the guest syncs and ends the VM, and kiln kills it if it hasn't ended in 30 seconds. An unclean end after a successful chain is a warning (every diff was already verified and stored). On any failure the VM is killed, and the scratch and output disks are deleted.
 

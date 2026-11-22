@@ -17,8 +17,18 @@ use crate::error::BuildError;
 
 /// The scratch disk holding every step's upper layer (decision D6).
 pub const SCRATCH_BYTES: u64 = 8 << 30;
-/// How long a VM gets to boot.
-pub const BOOT_TIMEOUT: Duration = Duration::from_secs(60);
+/// The least time a VM gets to boot.
+pub const MIN_BOOT_TIMEOUT: Duration = Duration::from_secs(60);
+/// The boot time allowed per GiB of guest memory.
+const BOOT_PER_GIB: Duration = Duration::from_secs(45);
+
+/// How long a VM with `memory_mib` of memory gets to boot: 60 s, or 45 s per GiB (rounded up)
+/// when that is more. Under nested virtualization a guest's boot time grows with its memory
+/// (4096 MiB took 50 to 125 s in Lima), so a fixed timeout fails the larger guests.
+pub fn boot_timeout(memory_mib: u32) -> Duration {
+    let gib = memory_mib.div_ceil(1024);
+    MIN_BOOT_TIMEOUT.max(BOOT_PER_GIB * gib)
+}
 
 /// What potter needs besides a [`BuildSpec`] to boot a kiln build VM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +37,8 @@ pub struct VmConfig {
     pub kernel: PathBuf,
     pub init: PathBuf,
     pub scratch_bytes: u64,
-    pub boot_timeout: Duration,
+    /// A fixed boot timeout, in place of [`boot_timeout`] of the spec's memory.
+    pub boot_timeout: Option<Duration>,
 }
 
 impl VmConfig {
@@ -37,7 +48,7 @@ impl VmConfig {
             kernel,
             init,
             scratch_bytes: SCRATCH_BYTES,
-            boot_timeout: BOOT_TIMEOUT,
+            boot_timeout: None,
         }
     }
 }
@@ -65,7 +76,7 @@ pub fn kiln_spec(spec: &BuildSpec, cfg: &VmConfig) -> Result<kb::BuildSpec, Buil
         memory_mib: spec.memory_mib,
         cpus,
         scratch_bytes: cfg.scratch_bytes,
-        boot_timeout: cfg.boot_timeout,
+        boot_timeout: cfg.boot_timeout.unwrap_or_else(|| boot_timeout(spec.memory_mib)),
         source_date_epoch: spec.source_date_epoch,
     })
 }
@@ -117,9 +128,16 @@ pub fn stream(s: kb::Stream) -> Stream {
     }
 }
 
-/// Any error from booting a VM (D16).
+/// Any error from booting a VM (D16). A boot timeout gets a hint: it is most likely a large
+/// guest under nested virtualization, not a broken kernel.
 pub fn start_error(e: kiln_run::Error) -> BuildError {
-    BuildError::Infra(format!("the build VM did not start: {e}"))
+    let text = e.to_string();
+    let hint = if text.contains("boot timeout") {
+        " (a build VM's boot time grows with its memory under nested virtualization)"
+    } else {
+        ""
+    };
+    BuildError::Infra(format!("the build VM did not start: {text}{hint}"))
 }
 
 /// Prefixes `text` with the step unless kiln's message already starts with it.
@@ -257,9 +275,47 @@ mod tests {
             (k.network, k.memory_mib, k.cpus, k.source_date_epoch),
             (true, 4096, 2u8, Some(0))
         );
-        assert_eq!((k.scratch_bytes, k.boot_timeout), (SCRATCH_BYTES, BOOT_TIMEOUT));
+        assert_eq!((k.scratch_bytes, k.boot_timeout), (SCRATCH_BYTES, boot_timeout(4096)));
+        let small = kiln_spec(
+            &BuildSpec {
+                memory_mib: 512,
+                ..spec()
+            },
+            &cfg(),
+        )
+        .unwrap();
+        assert_eq!(small.boot_timeout, Duration::from_secs(60));
+        let fixed = VmConfig {
+            boot_timeout: Some(Duration::from_secs(7)),
+            ..cfg()
+        };
+        assert_eq!(kiln_spec(&spec(), &fixed).unwrap().boot_timeout, Duration::from_secs(7));
         let too_many = BuildSpec { cpus: 256, ..spec() };
         assert_eq!(kiln_spec(&too_many, &cfg()).unwrap_err().exit_code(), 4);
+    }
+
+    #[test]
+    fn the_boot_timeout_scales_with_memory() {
+        assert_eq!(boot_timeout(512), Duration::from_secs(60));
+        assert_eq!(boot_timeout(1024), Duration::from_secs(60));
+        assert_eq!(boot_timeout(2048), Duration::from_secs(90));
+        assert_eq!(boot_timeout(2049), Duration::from_secs(135));
+        assert_eq!(boot_timeout(4096), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn a_boot_timeout_says_that_memory_slows_the_boot() {
+        let e = start_error(kiln_run::Error::Refused(
+            "boot timeout: the guest was not ready 180s after the VM started".into(),
+        ));
+        assert_eq!(e.exit_code(), 4);
+        assert!(
+            e.to_string()
+                .contains("grows with its memory under nested virtualization"),
+            "{e}"
+        );
+        let other = start_error(kiln_run::Error::Refused("the build VM failed to boot: x".into()));
+        assert!(!other.to_string().contains("nested"), "{other}");
     }
 
     #[test]

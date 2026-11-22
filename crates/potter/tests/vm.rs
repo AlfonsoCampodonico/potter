@@ -31,7 +31,7 @@ fn setup() -> Option<(Ctx, &'static VmEnv)> {
 
 /// A `KilnBackend` whose VMs get `POTTER_TEST_VM_MEMORY_MIB` instead of potter's 4096 MiB when
 /// it is set: under nested virtualization (the Lima VM on Apple silicon) a guest's boot time grows
-/// with its memory, and 4 GiB takes longer than the 60 s boot timeout there.
+/// with its memory (the boot timeout, `kiln_map::boot_timeout`, scales with it).
 struct TestBackend {
     inner: KilnBackend,
     memory_mib: Option<u32>,
@@ -129,7 +129,8 @@ fn layer_entries(ctx: &Ctx, layer: &potter_exec::chain::LayerRef) -> Vec<(String
 }
 
 /// Goes through the CLI, so its VMs boot with potter's real 4096 MiB (`POTTER_TEST_VM_MEMORY_MIB`
-/// doesn't reach them): under nested virtualization that boot can come close to the 60 s timeout.
+/// doesn't reach them): under nested virtualization that boot takes 50 to 125 s, inside the
+/// 180 s `kiln_map::boot_timeout(4096)`.
 #[test]
 fn potter_build_in_a_vm_makes_an_image_and_then_hits_its_vm_entries() {
     let Some((ctx, env)) = setup() else { return };
@@ -348,7 +349,8 @@ fn a_timed_out_step_fails_within_its_bound() {
     assert_eq!(err.exit_code(), 1, "{err}: {lines:?}");
     assert!(err.to_string().contains("timed out after 2s"), "{err}");
     // The timeout, kiln's STEP_GRACE and KILL_WAIT, and the boot.
-    let bound = Duration::from_secs(2 + 10 + 5 + 60);
+    let memory = backend.memory_mib.unwrap_or(potter_exec::vm::MEMORY_MIB);
+    let bound = Duration::from_secs(2 + 10 + 5) + potter_exec::vm::kiln_map::boot_timeout(memory);
     assert!(elapsed < bound, "{elapsed:?}");
 }
 

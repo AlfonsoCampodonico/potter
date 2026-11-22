@@ -23,7 +23,7 @@
 - **Commits:** plain conventional messages (`feat(vm): …`, `test(vm): …`, `ci: …`, `docs: …`). No `Co-Authored-By`, no `Claude-Session`, no "Generated with" lines. Don't push.
 - **Lima test environment** (the KVM tests on this Mac): the Lima VM is `vmkit` (Ubuntu, nested KVM, Firecracker and Cloud Hypervisor in `~/bin`). Its ssh session predates the kvm group, so every command runs under `sg kvm -c '…'`. Use `CARGO_TARGET_DIR=/tmp/potter-p4b`. The kernel is `/Users/alfonso/Github/Personal/playground/vmkit/out/vmlinux-6.18.54-aarch64`. Once, install vmkit's AppArmor profile for the helper at `/tmp/potter-p4b/debug/vmkit-sandbox` (the script in Task 9 prints the command). A full run:
   `limactl shell vmkit -- sg kvm -c 'cd /Users/alfonso/Github/Personal/playground/potter/.claude/worktrees/p4b-kiln-build && PATH=$HOME/bin:$PATH CARGO_TARGET_DIR=/tmp/potter-p4b scripts/vm-tests.sh /Users/alfonso/Github/Personal/playground/vmkit/out/vmlinux-6.18.54-aarch64'`
-- **Fixed sizes (decisions D6, D9):** output disk 8 GiB (`vm::OUTPUT_SIZE`, unchanged), scratch 8 GiB (`kiln_map::SCRATCH_BYTES = 8 << 30`), cache disk 8 GiB (`caches::CACHE_DISK_BYTES = 8 << 30`), boot timeout 60 s (`kiln_map::BOOT_TIMEOUT`), memory 4096 MiB and 2 vCPUs (unchanged).
+- **Fixed sizes (decisions D6, D9):** output disk 8 GiB (`vm::OUTPUT_SIZE`, unchanged), scratch 8 GiB (`kiln_map::SCRATCH_BYTES = 8 << 30`), cache disk 8 GiB (`caches::CACHE_DISK_BYTES = 8 << 30`), boot timeout `kiln_map::boot_timeout(memory_mib)` = max(60 s, 45 s × ⌈memory_mib / 1024⌉), so 180 s at 4096 MiB (amended at the final review: a fixed 60 s failed 4 GiB guests under nested virtualization), computed in `kiln_spec` from the spec's memory, with `VmConfig.boot_timeout: Option<Duration>` as an explicit override, memory 4096 MiB and 2 vCPUs (unchanged).
 
 ## Decisions
 
@@ -118,8 +118,8 @@ git commit -m "build: pin kiln 72c8257 (build mode) and vmkit 924ae24, the rev k
 **Interfaces:**
 - Consumes: Task 1's crates.
 - Produces, in `potter_exec::vm::kiln_map`:
-  - `pub const SCRATCH_BYTES: u64 = 8 << 30;` `pub const BOOT_TIMEOUT: Duration = Duration::from_secs(60);` `pub use kiln_proto::MAX_BUILD_LOWERS;`
-  - `#[derive(Debug, Clone, PartialEq, Eq)] pub struct VmConfig { pub vmm: kiln_run::VmmKind, pub kernel: PathBuf, pub init: PathBuf, pub scratch_bytes: u64, pub boot_timeout: Duration }` and `impl VmConfig { pub fn new(vmm: VmmKind, kernel: PathBuf, init: PathBuf) -> Self }`, which fills in `SCRATCH_BYTES` and `BOOT_TIMEOUT`.
+  - `pub const SCRATCH_BYTES: u64 = 8 << 30;` `pub fn boot_timeout(memory_mib: u32) -> Duration` (max(60 s, 45 s per GiB rounded up); was `BOOT_TIMEOUT` = 60 s before the final review) `pub use kiln_proto::MAX_BUILD_LOWERS;`
+  - `#[derive(Debug, Clone, PartialEq, Eq)] pub struct VmConfig { pub vmm: kiln_run::VmmKind, pub kernel: PathBuf, pub init: PathBuf, pub scratch_bytes: u64, pub boot_timeout: Option<Duration> }` and `impl VmConfig { pub fn new(vmm: VmmKind, kernel: PathBuf, init: PathBuf) -> Self }`, which fills in `SCRATCH_BYTES` and no boot timeout override.
   - `pub fn device_cap(available: u32) -> usize`: `min(available, MAX_LAYERS + FIXED_DEVICES)` (D14).
   - `pub fn kiln_spec(spec: &BuildSpec, cfg: &VmConfig) -> Result<kiln_run::build::BuildSpec, BuildError>`: `cpus` over 255 is `Infra`.
   - `pub fn kiln_step(step: &RunStep) -> kiln_run::build::RunStep`
@@ -137,7 +137,7 @@ fn a_potter_spec_maps_field_for_field() {
     assert_eq!((k.vmm, k.kernel.as_path(), k.init.as_path()), (VmmKind::Firecracker, Path::new("/k"), Path::new("/i")));
     assert_eq!((k.layers.len(), k.root, k.cache_disks.len()), (2, 1, 1));
     assert_eq!((k.network, k.memory_mib, k.cpus, k.source_date_epoch), (true, 4096, 2u8, Some(0)));
-    assert_eq!((k.scratch_bytes, k.boot_timeout), (SCRATCH_BYTES, BOOT_TIMEOUT));
+    assert_eq!((k.scratch_bytes, k.boot_timeout), (SCRATCH_BYTES, boot_timeout(4096)));
     let too_many = BuildSpec { cpus: 256, ..spec() };
     assert_eq!(kiln_spec(&too_many, &cfg()).unwrap_err().exit_code(), 4);
 }
