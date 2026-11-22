@@ -1147,7 +1147,7 @@ fn needles(values: &[(String, Vec<u8>)]) -> Vec<String> {
     needles
 }
 
-/// The texts `vm::Lines` masks and never cuts inside: each secret's raw bytes and raw lines, and
+/// The texts `vm::Lines` masks, on both sides of a cut too: each secret's raw bytes and raw lines, and
 /// the redactor's lossy [`needles`], so a secret is matched both as the step wrote it and as the
 /// redactor sees it.
 pub fn keep_whole(values: &[(String, Vec<u8>)]) -> Vec<Vec<u8>> {

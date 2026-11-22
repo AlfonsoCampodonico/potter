@@ -36,7 +36,7 @@ pub struct StepRun<'a> {
     pub timeout: Duration,
     /// Holds the sandbox's own files and the step's `resolv.conf`.
     pub run_dir: PathBuf,
-    /// Texts a long line is never cut inside, so a redacting `log` sees them whole
+    /// Texts masked in every line before `log` sees it, on both sides of a cut too
     /// (`chain::keep_whole`; see `vm::Lines`).
     pub keep_whole: Vec<Vec<u8>>,
     /// Called with each line of the step's output, at most `vm::LINE_CAP` bytes.
